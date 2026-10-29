@@ -91,6 +91,14 @@ class cESndTagOps : public cClassDataOps<sOpsList>
 public: 
 
    cESndTagOps() : cParent(kNoFlags) {} ; 
+   // On disk this is the 32-bit structure: a 4-byte (meaningless) cTagSet
+   // pointer followed by the tag string, 256 bytes in all ("version" is that
+   // size). Reading it straight into a 64-bit sESndTagList put the string 4
+   // bytes late, so every tag lost its first letters ("Material Stone"
+   // became "rial Stone") and no environmental sound -- footsteps,
+   // collisions, damage, doors -- could match.
+   enum { kDiskPointerSize = 4, kDiskRecordSize = 256 };
+
    STDMETHOD(Read)(THIS_ sDatum* dat, IDataOpsFile* file, int version)
    {
       if (!dat->value)
@@ -98,12 +106,36 @@ public:
       sOpsList* list = (sOpsList*)dat->value; 
       sESndTagList tmp;
       memset(&tmp,0,sizeof(tmp)); 
-      // we derive from cClassDataOps, thus version == size; 
-      int sz = (version < sizeof(tmp)) ? version : sizeof(tmp); 
-      Verify(file->Read(&tmp,sz) == sz); 
+      if (version <= 0 || version > 4096)
+         return E_FAIL;
+      char *raw = new char[version];
+      memset(raw, 0, version);
+      Verify(file->Read(raw,version) == version); 
+      if (version > kDiskPointerSize)
+      {
+         int len = version - kDiskPointerSize;
+         if (len > (int)sizeof(tmp.m_TagStrings) - 1)
+            len = sizeof(tmp.m_TagStrings) - 1;
+         memcpy(tmp.m_TagStrings, raw + kDiskPointerSize, len);
+         tmp.m_TagStrings[len] = '\0';
+      }
+      delete [] raw;
       *list = tmp; 
       return S_OK; 
    }
+
+   STDMETHOD(Write)(THIS_ sDatum val, IDataOpsFile* file)
+   {
+      const sESndTagList* list = (const sESndTagList*)val.value;
+      char raw[kDiskRecordSize];
+      memset(raw, 0, sizeof(raw));
+      if (list)
+         strncpy(raw + kDiskPointerSize, list->m_TagStrings,
+                 kDiskRecordSize - kDiskPointerSize - 1);
+      return file->Write(raw, kDiskRecordSize) == kDiskRecordSize ? S_OK : E_FAIL;
+   }
+
+   STDMETHOD_(int,Version)() { return kDiskRecordSize; }
 
 }; 
 
