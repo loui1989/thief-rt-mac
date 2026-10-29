@@ -22,6 +22,9 @@
 extern float r3d_rt_c2w[12];
 extern int r3d_rt_c2w_valid;
 extern int r3d_rt_project_space;
+extern int r3d_rt_backface;
+// RenderRTDrawWorld: the triangles are shadow-only (see r3d_rt_backface)
+extern int g_RenderRTShadowOnly;
 // set while lgd3d draws a glowing sprite (lgd3d_hack_light)
 extern int g_RenderRTEmissiveSprite;
 #endif
@@ -62,6 +65,7 @@ typedef struct sLgd3dVertex {
    // the material's own colour before lgd3d's lighting, for untextured
    // polygons (0: use color). The path tracer lights them itself.
    uint32 rtcolor;
+   int wback;          // a culled (back) face kept for shadows
 #endif
 } sLgd3dVertex;
 
@@ -74,6 +78,7 @@ do { \
    (_d)->wy = _m[4]*_x + _m[5]*_y + _m[6]*_z + _m[7]; \
    (_d)->wz = _m[8]*_x + _m[9]*_y + _m[10]*_z + _m[11]; \
    (_d)->wvalid = r3d_rt_c2w_valid && g_RenderRTCaptureVertices; \
+   (_d)->wback = r3d_rt_backface; \
 } while (0)
 #define rt_clear_world(_d) ((_d)->wvalid = 0)
 #else
@@ -639,7 +644,7 @@ static void ModernConvertVertex(sRenderBackendVertex *d, const sLgd3dVertex *s)
 static BOOL ModernCapture(int primitive, int count, const sRenderBackendVertex *dst,
                           const sLgd3dVertex *src, const ushort *indices, BOOL fan)
 {
-   int i, t, kept = 0;
+   int i, t, kept = 0, pass;
    float *xyz;
    sRenderBackendVertex *out;
    if (!RenderRTCaptureDraws())
@@ -648,6 +653,9 @@ static BOOL ModernCapture(int primitive, int count, const sRenderBackendVertex *
       return TRUE;
    xyz = (float *)temp_malloc(count * 3 * sizeof(float));
    out = (sRenderBackendVertex *)temp_malloc(count * sizeof(*out));
+   // pass 0: faces as the game draws them; pass 1: back faces, shadow-only
+   for (pass = 0; pass < 2; ++pass) {
+   kept = 0;
    for (t = 0; t + 2 < count; t += 3) {
       const sLgd3dVertex *v[3];
       for (i = 0; i < 3; ++i) {
@@ -662,6 +670,8 @@ static BOOL ModernCapture(int primitive, int count, const sRenderBackendVertex *
       }
       if (!v[0]->wvalid || !v[1]->wvalid || !v[2]->wvalid)
          continue;
+      if ((v[0]->wback != 0) != (pass == 1))
+         continue;
       for (i = 0; i < 3; ++i) {
          xyz[kept*3] = v[i]->wx; xyz[kept*3+1] = v[i]->wy; xyz[kept*3+2] = v[i]->wz;
          out[kept] = dst[t + i];
@@ -673,8 +683,12 @@ static BOOL ModernCapture(int primitive, int count, const sRenderBackendVertex *
          ++kept;
       }
    }
-   if (kept)
+   if (kept) {
+      g_RenderRTShadowOnly = pass;
       RenderRTDrawWorld(primitive, out, xyz, kept);
+      g_RenderRTShadowOnly = 0;
+   }
+   }
    temp_free(out);
    temp_free(xyz);
    return TRUE;
@@ -788,7 +802,7 @@ static sLgd3dVertex *PolyMalloc(int n)
    if (lgd3d_punt_buffer) {
       retval = (sLgd3dVertex *)temp_malloc(n*sizeof(sLgd3dVertex));
 #ifdef DARK_RT
-      for (i = 0; i < n; ++i) retval[i].wvalid = 0, retval[i].rtcolor = 0;
+      for (i = 0; i < n; ++i) retval[i].wvalid = 0, retval[i].rtcolor = 0, retval[i].wback = 0;
 #endif
       return retval;
    }
@@ -819,7 +833,7 @@ static sLgd3dVertex *PolyMalloc(int n)
    num_poly_verts += n;
    primitives_pending = TRUE;
 #ifdef DARK_RT
-   for (i = 0; i < n; ++i) retval[i].wvalid = 0, retval[i].rtcolor = 0;
+   for (i = 0; i < n; ++i) retval[i].wvalid = 0, retval[i].rtcolor = 0, retval[i].wback = 0;
 #endif
 
    return retval;

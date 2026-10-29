@@ -18,7 +18,7 @@
 #include <g2.h> // g2s_point
 #include <lgd3d.h>
 // r3d/block.c: set while the ray tracer captures a model whole
-extern int r3d_rt_noclip;
+extern int r3d_rt_noclip, r3d_rt_backface;
 
 // These could be legitimately shared between objects recursing...
 static int         def_vcolor_tab[MD_TAB_SIZE];
@@ -731,7 +731,11 @@ void md_render_pgon(mds_pgon *p)
    // use the cached normal dot prod
    // (not while the ray tracer captures the model whole: the faces turned
    // away from the camera are the ones that shadow what it sees)
-   if ((mdd.buff_norms[p->norm] + p->d) <= 0.0 && !r3d_rt_noclip) return;
+   if ((mdd.buff_norms[p->norm] + p->d) <= 0.0) {
+      if (!r3d_rt_noclip) return;
+      r3d_rt_backface = 1;
+   } else
+      r3d_rt_backface = 0;
    
    // Set vlist to contain the list of verts
    for (i=0;i<p->num;++i) {
@@ -841,7 +845,11 @@ void md_render_pgon_render_callback(mds_pgon *p)
    // use the cached normal dot prod
    // (not while the ray tracer captures the model whole: the faces turned
    // away from the camera are the ones that shadow what it sees)
-   if ((mdd.buff_norms[p->norm] + p->d) <= 0.0 && !r3d_rt_noclip) return;
+   if ((mdd.buff_norms[p->norm] + p->d) <= 0.0) {
+      if (!r3d_rt_noclip) return;
+      r3d_rt_backface = 1;
+   } else
+      r3d_rt_backface = 0;
    
    // Set vlist to contain the list of verts
    for (i=0;i<p->num;++i) {

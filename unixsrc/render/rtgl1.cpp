@@ -63,6 +63,7 @@
 
 extern "C" int g_RenderRTCaptureVertices = 0;
 extern "C" int g_RenderRTEmissiveSprite = 0;
+extern "C" int g_RenderRTShadowOnly = 0;
 
 namespace {
 
@@ -1944,7 +1945,12 @@ void RenderRTDrawWorld(int primitive, const sRenderBackendVertex *v, const float
       d.color = (name && !sprite) ? pack_color(1, 1, 1, v[i].a)
                                   : pack_color(v[i].r, v[i].g, v[i].b, v[i].a);
    }
-   if (sprite) {
+   if (g_RenderRTShadowOnly) {
+      // a face turned away from the camera: it blocks light, but is not seen
+      // (two-sided model parts are pairs of coincident opposite faces)
+      prim.flags = RG_MESH_PRIMITIVE_SHADOW_ONLY |
+                   ((tex && tex->cutout && g_alphaTest) ? RgMeshPrimitiveFlags(RG_MESH_PRIMITIVE_ALPHA_TESTED) : 0u);
+   } else if (sprite) {
       // a glow or particle sprite, never casting shadows. Not emissive: RTGL1
       // adds a translucent primitive's emission without its texture's alpha,
       // so any glow at all turned the soft round particles into squares.
@@ -1974,7 +1980,7 @@ void RenderRTDrawWorld(int primitive, const sRenderBackendVertex *v, const float
 
    // A light fixture's bulb, flame or glass sits at the light it carries and
    // is drawn self-lit (full white): make it glow, so lamps are seen to be lit.
-   if (!sprite && g_cfg.glow > 0.0f && allWhite && !g_lightPositions.empty() && name) {
+   if (!sprite && !g_RenderRTShadowOnly && g_cfg.glow > 0.0f && allWhite && !g_lightPositions.empty() && name) {
       float c[3] = {0, 0, 0};
       for (const RgPrimitiveVertex &d : prim.verts)
          for (int k = 0; k < 3; ++k)

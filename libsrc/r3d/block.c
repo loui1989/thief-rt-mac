@@ -25,6 +25,10 @@ int r3d_rt_project_space = 0;
 // (lgd3d never rasterizes captured triangles; their world positions come
 // from camera space, which stays valid behind the camera too).
 int r3d_rt_noclip = 0;
+// Set by md/mm, during such a capture, while drawing a face turned away from
+// the camera (which the game would have culled): the ray tracer keeps it for
+// shadows only, so coincident two-sided faces do not fight in view.
+int r3d_rt_backface = 0;
 
 void r3_rt_zero_codes(int n, r3s_point *src)
 {

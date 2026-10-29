@@ -125,7 +125,7 @@ extern void set_mm_sort(bool);
 #ifdef DARK_RT
 #include <render_rt.h>
 EXTERN void lgd3d_render_flush(void);
-EXTERN int r3d_rt_noclip;
+EXTERN int r3d_rt_noclip, r3d_rt_backface;
 #endif
 #include <dbmem.h>
 
@@ -2455,6 +2455,7 @@ BOOL rendobj_core_render_object(ObjID obj, int fragment, int idx, uchar *clut,
    {
       lgd3d_render_flush();
       r3d_rt_noclip = 0;
+      r3d_rt_backface = 0;
       RenderRTObjectEnd();
    }
 #endif
