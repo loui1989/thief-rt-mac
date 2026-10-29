@@ -185,7 +185,8 @@ struct RtTexture {
    std::vector<uint8_t> rgba;
    bool dirty = true;      // pixels changed since RTGL1 got them
    bool provided = false;  // RTGL1 has a texture of this name
-   bool hasAlpha = false;
+   bool hasAlpha = false;  // any texel not fully opaque
+   bool cutout = false;    // any texel see-through (alpha < 50%)
    bool white = false;     // the 1x1 white "no texture" texture
 };
 
@@ -201,16 +202,20 @@ void copy_pixels(RtTexture &t, int width, int height, const void *rgba, int rowB
    t.width = width;
    t.height = height;
    t.rgba.resize(size_t(width) * height * 4);
-   bool alpha = false;
+   bool alpha = false, cutout = false;
    for (int y = 0; y < height; ++y) {
       const uint8_t *src = static_cast<const uint8_t *>(rgba) + size_t(y) * rowBytes;
       uint8_t *dst = t.rgba.data() + size_t(y) * width * 4;
       memcpy(dst, src, size_t(width) * 4);
-      if (!alpha)
-         for (int x = 0; x < width; ++x)
-            if (dst[x * 4 + 3] != 255) { alpha = true; break; }
+      if (!cutout)
+         for (int x = 0; x < width; ++x) {
+            const uint8_t a = dst[x * 4 + 3];
+            if (a != 255) alpha = true;
+            if (a < 128) { cutout = true; break; }
+         }
    }
    t.hasAlpha = alpha;
+   t.cutout = cutout;
    t.white = width == 1 && height == 1 && t.rgba[0] == 255 && t.rgba[1] == 255 &&
              t.rgba[2] == 255 && t.rgba[3] == 255;
    t.dirty = true;
@@ -610,6 +615,8 @@ void upload_world()
 {
    if (!g_worldValid)
       return;
+   static uint32_t s_reported = 0;
+   size_t tris = 0, cutTris = 0;
    for (size_t i = 0; i < g_world.size(); ++i) {
       WorldGroup &g = g_world[i];
       if (g.verts.empty() || (g.flags & kRenderRTWorldSky))
@@ -617,7 +624,10 @@ void upload_world()
       auto found = g_worldTextures.find(g.textureId);
       RtTexture *tex = found == g_worldTextures.end() ? nullptr : found->second;
       RgMeshPrimitiveFlags flags = 0;
-      if ((g.flags & kRenderRTWorldTransparent) || (tex && tex->hasAlpha))
+      // Alpha-tested geometry runs a shader at every hit any ray finds on it:
+      // only where the game cuts holes (a colour-keyed texture that has
+      // see-through texels: grates, railings, foliage).
+      if ((g.flags & kRenderRTWorldTransparent) && tex && tex->cutout)
          flags |= RG_MESH_PRIMITIVE_ALPHA_TESTED;
       float alpha = 1.0f;
       if (g.flags & kRenderRTWorldWater) {
@@ -649,6 +659,14 @@ void upload_world()
          .emissiveGi = 0.0f,
       };
       upload(0x100000000ull + i, prim);
+      tris += g.indices.size() / 3;
+      if (flags & RG_MESH_PRIMITIVE_ALPHA_TESTED)
+         cutTris += g.indices.size() / 3;
+   }
+   if (s_reported != g_worldSerial) {
+      s_reported = g_worldSerial;
+      fprintf(stderr, "RT: world %zu triangles in %zu groups, %zu of them alpha-tested\n", tris,
+              g_world.size(), cutTris);
    }
 }
 
@@ -695,6 +713,9 @@ bool Wanted()
 bool Open(SDL_Window *window)
 {
    load_settings();
+   // the Metal backend's GPU timeline, every 2 seconds, in the log
+   if (env_float("THIEF_RT_PROFILE", 0) != 0)
+      setenv("RTGL1_METAL_PROFILE", "1", 1);
    g_cfg.upscale = std::clamp(int(env_float("THIEF_RT_UPSCALE", float(g_cfg.upscale))), 0, 5);
    g_cfg.scale = std::clamp(env_float("THIEF_RT_SCALE", g_cfg.scale), 0.25f, 1.0f);
    g_cfg.light = env_float("THIEF_RT_LIGHT", g_cfg.light);
@@ -1898,7 +1919,7 @@ void RenderRTDrawWorld(int primitive, const sRenderBackendVertex *v, const float
       prim.emissive = 1.0f;
    } else if (g_blend == kRenderBackendBlendAlpha && minAlpha < 0.99f) {
       prim.flags |= RG_MESH_PRIMITIVE_TRANSLUCENT;
-   } else if (g_alphaTest || (tex && tex->hasAlpha)) {
+   } else if (tex && tex->cutout && (g_alphaTest || g_blend == kRenderBackendBlendAlpha)) {
       prim.flags |= RG_MESH_PRIMITIVE_ALPHA_TESTED;
    }
 
