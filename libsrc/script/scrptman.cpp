@@ -112,6 +112,11 @@ _ScriptManCreate(REFIID, IScriptMan ** /*ppScriptMan*/, IUnknown * pOuter,
 template cHashSet <cScrObj *, int, cHashFunctions>;
 template cHashSet <sScrClassDesc *, const char *, cCaselessStringHashFuncs>;
 template cHashSet <sServiceTableEntry *, const GUID *, cHashFunctions>;
+#else
+// GCC happens to emit these members where they are used; clang does not.
+template class cHashSet <cScrObj *, int, cHashFunctions>;
+template class cHashSet <sScrClassDesc *, const char *, cCaselessStringHashFuncs>;
+template class cHashSet <sServiceTableEntry *, const GUID *, cHashFunctions>;
 #endif
 
 ///////////////////////////////////////////////////////////////////////////////

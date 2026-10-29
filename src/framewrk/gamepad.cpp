@@ -2,7 +2,11 @@
 #include <string.h>
 #include <ctype.h>
 
+// The engine is built with -fpack-struct=1. std::atomic must keep its natural
+// alignment or the compiler falls back to libatomic calls (absent on macOS).
+#pragma pack(push, 8)
 #include <atomic>
+#pragma pack(pop)
 
 #include <config.h>
 #include <gamepad.h>
