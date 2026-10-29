@@ -126,6 +126,17 @@ extern void set_mm_sort(bool);
 #include <render_rt.h>
 EXTERN void lgd3d_render_flush(void);
 EXTERN int r3d_rt_noclip, r3d_rt_backface;
+EXTERN ObjID GetWeaponObjID(ObjID owner);   // weapon.h
+// The player's own arm, weapon and nocked arrow: drawn in front of the
+// camera, they move with it, and as shadow casters they threw the camera's
+// own shadow over whatever it approached -- the shadows that "filled in"
+// under a lamp as you walked up to it.
+static BOOL rt_first_person_object(ObjID obj)
+{
+   if (obj == PlayerArm() || obj == PlayerArrow())
+      return obj != OBJ_NULL;
+   return PlayerObjectExists() && obj == GetWeaponObjID(PlayerObject());
+}
 #endif
 #include <dbmem.h>
 
@@ -2445,7 +2456,8 @@ BOOL rendobj_core_render_object(ObjID obj, int fragment, int idx, uchar *clut,
    {
       lgd3d_render_flush();
       RenderRTObjectBegin(obj, (rt_whole ? kRenderRTObjectWhole : 0) |
-                               (rt_type != OM_TYPE_MD && rt_type != OM_TYPE_MESH
+                               ((rt_type != OM_TYPE_MD && rt_type != OM_TYPE_MESH) ||
+                                        rt_first_person_object(obj)
                                    ? kRenderRTObjectNoShadow : 0));
       if (rt_whole)
          r3d_rt_noclip = 1;

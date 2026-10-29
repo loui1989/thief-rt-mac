@@ -88,6 +88,8 @@ struct Settings {
    bool volumetric = false;   // haze lit by every light
    int dynres = 0;            // dynamic resolution's target fps, 0 off
    int maxLights = 64;        // lights given to the path tracer, nearest first; 0 all
+   float minRoughness = 0.7f; // no surface glossier than this (1: no glossy highlights)
+   int debugView = 0;         // 0 off, 1 shadow visibility, 2 direct diffuse, 3 specular, 4 bounce
    float waterAlpha = 0.55f;
    float scale = 0.5f;      // render scale for upscale modes 0 and 5
    bool fps = false;
@@ -140,6 +142,7 @@ void load_settings()
       else if (k == "volumetric") g_cfg.volumetric = value != 0;
       else if (k == "dynres") g_cfg.dynres = std::clamp(int(value), 0, 240);
       else if (k == "max_lights") g_cfg.maxLights = std::clamp(int(value), 0, 4096);
+      else if (k == "min_roughness") g_cfg.minRoughness = std::clamp(value, 0.0f, 1.0f);
    }
    fclose(f);
 }
@@ -155,10 +158,10 @@ void save_settings()
       return;
    fprintf(f, "upscale = %d\nscale = %.2f\nfps = %d\nvsync = %d\nlight = %.3f\nsky = %.3f\n"
               "light_size = %.3f\nglow = %.3f\nwater = %d\nsprite_glow = %.3f\ngi = %d\n"
-              "volumetric = %d\ndynres = %d\nmax_lights = %d\n",
+              "volumetric = %d\ndynres = %d\nmax_lights = %d\nmin_roughness = %.2f\n",
            g_cfg.upscale, g_cfg.scale, int(g_cfg.fps), int(g_cfg.vsync), g_cfg.light, g_cfg.sky,
            g_cfg.lightSize, g_cfg.glow, g_cfg.water, g_cfg.spriteGlow, g_cfg.gi,
-           int(g_cfg.volumetric), g_cfg.dynres, g_cfg.maxLights);
+           int(g_cfg.volumetric), g_cfg.dynres, g_cfg.maxLights, g_cfg.minRoughness);
    fclose(f);
 }
 
@@ -1118,15 +1121,15 @@ const char *kUpscaleNames[] = {"Off",
 
 enum UiRow {
    kRowUpscale, kRowScale, kRowDynres, kRowBounces, kRowLights, kRowVolumetric, kRowVsync,
-   kRowFps, kRowLight, kRowSky, kRowLightSize, kRowGlow, kRowWater,
-   kRowInspect, kRowReset, kRowCount
+   kRowFps, kRowLight, kRowSky, kRowLightSize, kRowRough, kRowGlow, kRowWater,
+   kRowDebug, kRowInspect, kRowReset, kRowCount
 };
 
 const char *kRowLabels[kRowCount] = {
    "Upscaler", "Render resolution", "Dynamic resolution", "Bounce light", "Lights traced",
    "Volumetric light", "VSync", "FPS counter", "Light brightness", "Sky brightness",
-   "Light size (soft shadows)", "Lamp glow", "Water",
-   "Inspect centre of view", "Reset to defaults",
+   "Light size (soft shadows)", "Surface roughness", "Lamp glow", "Water",
+   "Debug view", "Inspect centre of view", "Reset to defaults",
 };
 
 // rows that do something when chosen rather than having a value
@@ -1161,6 +1164,15 @@ std::string row_value(int row)
    case kRowLight: snprintf(buf, sizeof(buf), "%.2fx", g_cfg.light); return buf;
    case kRowSky: snprintf(buf, sizeof(buf), "%.2fx", g_cfg.sky); return buf;
    case kRowLightSize: snprintf(buf, sizeof(buf), "%.2f m", g_cfg.lightSize); return buf;
+   case kRowDebug: {
+      static const char *kViews[] = {"Off", "Shadows only", "Direct light only", "Glossy only",
+                                     "Bounce light only"};
+      return kViews[std::clamp(g_cfg.debugView, 0, 4)];
+   }
+   case kRowRough:
+      snprintf(buf, sizeof(buf), g_cfg.minRoughness >= 0.999f ? "%.2f (matte)" : "at least %.2f",
+               g_cfg.minRoughness);
+      return buf;
    case kRowGlow:
       if (g_cfg.glow <= 0.0f) return "Off";
       snprintf(buf, sizeof(buf), "%.2f", g_cfg.glow);
@@ -1235,6 +1247,11 @@ void change_row(int row, int dir)
    case kRowLightSize:
       g_cfg.lightSize = std::clamp(std::round(g_cfg.lightSize * 20.0f) / 20.0f + 0.05f * dir,
                                    0.05f, 1.5f);
+      break;
+   case kRowDebug: g_cfg.debugView = (g_cfg.debugView + dir + 5) % 5; return;   // not saved
+   case kRowRough:
+      g_cfg.minRoughness = std::clamp(std::round(g_cfg.minRoughness * 20.0f) / 20.0f + 0.05f * dir,
+                                      0.0f, 1.0f);
       break;
    case kRowGlow:
       g_cfg.glow = std::clamp(std::round(g_cfg.glow * 4.0f) / 4.0f + 0.25f * dir, 0.0f, 5.0f);
@@ -1486,7 +1503,10 @@ void draw_frame(bool sceneDrawn)
       .restirBlueNoise = true,
       .shadowSamples = 1,
       .debugRestirM = 0,
-      .debugVisibility = 0,
+      // the panel's debug view: which part of the lighting is what
+      .debugVisibility = g_cfg.debugView == 1 ? 1u : 0u,
+      .debugShowFlags = g_cfg.debugView == 2 ? 32u : g_cfg.debugView == 3 ? 64u
+                        : g_cfg.debugView == 4 ? 128u : 0u,
       .restirTemporalJitter = 2.0f,
       .rrSpecularHitDistance = true,
       .directSamples = 1,
@@ -1513,7 +1533,7 @@ void draw_frame(bool sceneDrawn)
       .normalMapStrength = 1.0f,
       .emissionMapBoost = 100.0f,
       .emissionMaxScreenColor = 1.5f,
-      .minRoughness = 0.7f,
+      .minRoughness = g_cfg.minRoughness,
       .heightMapDepth = 0.02f,
    };
    auto sky = RgDrawFrameSkyParams{
