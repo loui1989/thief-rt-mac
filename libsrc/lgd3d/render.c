@@ -59,6 +59,9 @@ typedef struct sLgd3dVertex {
 #ifdef DARK_RT
    float wx, wy, wz;   // world position, for the ray tracer
    int wvalid;
+   // the material's own colour before lgd3d's lighting, for untextured
+   // polygons (0: use color). The path tracer lights them itself.
+   uint32 rtcolor;
 #endif
 } sLgd3dVertex;
 
@@ -662,6 +665,11 @@ static BOOL ModernCapture(int primitive, int count, const sRenderBackendVertex *
       for (i = 0; i < 3; ++i) {
          xyz[kept*3] = v[i]->wx; xyz[kept*3+1] = v[i]->wy; xyz[kept*3+2] = v[i]->wz;
          out[kept] = dst[t + i];
+         if (v[i]->rtcolor) {
+            out[kept].r = ((v[i]->rtcolor >> 16) & 255) / 255.0f;
+            out[kept].g = ((v[i]->rtcolor >> 8) & 255) / 255.0f;
+            out[kept].b = (v[i]->rtcolor & 255) / 255.0f;
+         }
          ++kept;
       }
    }
@@ -780,7 +788,7 @@ static sLgd3dVertex *PolyMalloc(int n)
    if (lgd3d_punt_buffer) {
       retval = (sLgd3dVertex *)temp_malloc(n*sizeof(sLgd3dVertex));
 #ifdef DARK_RT
-      for (i = 0; i < n; ++i) retval[i].wvalid = 0;
+      for (i = 0; i < n; ++i) retval[i].wvalid = 0, retval[i].rtcolor = 0;
 #endif
       return retval;
    }
@@ -811,7 +819,7 @@ static sLgd3dVertex *PolyMalloc(int n)
    num_poly_verts += n;
    primitives_pending = TRUE;
 #ifdef DARK_RT
-   for (i = 0; i < n; ++i) retval[i].wvalid = 0;
+   for (i = 0; i < n; ++i) retval[i].wvalid = 0, retval[i].rtcolor = 0;
 #endif
 
    return retval;
@@ -1261,6 +1269,9 @@ static int lgd3d_spoly(int n, r3s_point **ppl)
       i = ppl[j]->grp.i;
       if (i>1.0) i = 1.0;
       make_scolor(&vlist[j].color, c0, i);
+#ifdef DARK_RT
+      vlist[j].rtcolor = c0 | 0xff000000;
+#endif
       vlist[j].specular = fog_specular;
       setxyz(&vlist[j], ppl[j]);
    }
@@ -1289,6 +1300,9 @@ static int lgd3d_rgb_poly(int n, r3s_point **ppl)
       g = (int)(gc*g2p->h); if (g>255) g = 255;
       b = (int)(bc*g2p->d); if (b>255) b = 255;
       vlist[j].color = PackColor(r, g, b, get_vertex_alpha(g2p));
+#ifdef DARK_RT
+      vlist[j].rtcolor = c0 | 0xff000000;
+#endif
       vlist[j].specular = fog_specular;
       setxyz(&vlist[j], ppl[j]);
    }

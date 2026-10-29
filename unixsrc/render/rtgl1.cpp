@@ -496,6 +496,10 @@ struct CapturedPrim {
    std::string texture;   // RTGL1 name, "" for untextured
    RgMeshPrimitiveFlags flags = 0;
    float emissive = 0.0f;
+   // The primitive's colour. RTGL1's path tracer ignores vertex colours, so
+   // an untextured part (a model's flat-coloured material) is split by colour
+   // and each piece gets its colour here -- otherwise it is white.
+   uint32_t color = 0xffffffffu;
    // for the inspector
    const RtTexture *tex = nullptr;
    uint32_t texSerial = 0;
@@ -565,7 +569,7 @@ void upload_captured(uint64_t id, const CapturedPrim &p)
       .indexCount = 0,
       .pTextureName = p.texture.empty() ? nullptr : p.texture.c_str(),
       .textureFrame = 0,
-      .color = pack_color(1, 1, 1, 1),
+      .color = p.color,
       .emissive = p.emissive,
       .classicLight = 1.0f,
       .emissiveGi = 0.0f,
@@ -1993,13 +1997,38 @@ void RenderRTDrawWorld(int primitive, const sRenderBackendVertex *v, const float
          }
    }
 
-   if (g_currentObject) {
-      g_currentCapture.push_back(std::move(prim));
+   auto emit = [&](CapturedPrim &&p) {
+      if (g_currentObject) {
+         g_currentCapture.push_back(std::move(p));
+         return;
+      }
+      const uint32_t key = tex ? tex->serial : 0;
+      const uint32_t n = g_primitiveCounters[key]++;
+      upload_captured(0x300000000ull + (uint64_t(key) << 12) + n, p);
+   };
+   const bool solidUntextured = !name && !(prim.flags & RG_MESH_PRIMITIVE_TRANSLUCENT);
+   if (!solidUntextured) {
+      emit(std::move(prim));
       return;
    }
-   const uint32_t key = tex ? tex->serial : 0;
-   const uint32_t n = g_primitiveCounters[key]++;
-   upload_captured(0x300000000ull + (uint64_t(key) << 12) + n, prim);
+   // one primitive per material colour (taken from each triangle's first vertex)
+   std::vector<std::pair<uint32_t, CapturedPrim>> parts;
+   for (size_t t = 0; t + 2 < prim.verts.size(); t += 3) {
+      const uint32_t c = prim.verts[t].color | 0xff000000u;
+      auto it = std::find_if(parts.begin(), parts.end(),
+                             [c](const auto &e) { return e.first == c; });
+      if (it == parts.end()) {
+         CapturedPrim p = prim;
+         p.verts.clear();
+         p.color = c;
+         parts.emplace_back(c, std::move(p));
+         it = parts.end() - 1;
+      }
+      it->second.verts.insert(it->second.verts.end(), prim.verts.begin() + t,
+                              prim.verts.begin() + t + 3);
+   }
+   for (auto &e : parts)
+      emit(std::move(e.second));
 }
 
 void RenderRTObjectBegin(uint32_t obj, int whole)
