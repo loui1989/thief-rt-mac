@@ -37,6 +37,7 @@
 #include <SDL2/SDL_metal.h>
 
 #include <algorithm>
+#include <array>
 #include <chrono>
 #include <cmath>
 #include <cstdarg>
@@ -88,6 +89,7 @@ struct Settings {
    bool volumetric = false;   // haze lit by every light
    int dynres = 0;            // dynamic resolution's target fps, 0 off
    int maxLights = 64;        // lights given to the path tracer, nearest first; 0 all
+   int flicker = 0;           // flickering lights: 0 smoothed, 1 as the game, 2 nearly steady
    bool lightCull = true;     // skip lights the level's lighting has on no cell near or in view
    float minRoughness = 0.7f; // no surface glossier than this (1: no glossy highlights)
    int debugView = 0;         // 0 off, 1 shadow visibility, 2 direct diffuse, 3 specular, 4 bounce
@@ -143,6 +145,7 @@ void load_settings()
       else if (k == "volumetric") g_cfg.volumetric = value != 0;
       else if (k == "dynres") g_cfg.dynres = std::clamp(int(value), 0, 240);
       else if (k == "max_lights") g_cfg.maxLights = std::clamp(int(value), 0, 4096);
+      else if (k == "flicker") g_cfg.flicker = std::clamp(int(value), 0, 2);
       else if (k == "light_cull") g_cfg.lightCull = value != 0;
       else if (k == "min_roughness") g_cfg.minRoughness = std::clamp(value, 0.0f, 1.0f);
    }
@@ -160,11 +163,11 @@ void save_settings()
       return;
    fprintf(f, "upscale = %d\nscale = %.2f\nfps = %d\nvsync = %d\nlight = %.3f\nsky = %.3f\n"
               "light_size = %.3f\nglow = %.3f\nwater = %d\nsprite_glow = %.3f\ngi = %d\n"
-              "volumetric = %d\ndynres = %d\nmax_lights = %d\nmin_roughness = %.2f\nlight_cull = %d\n",
+              "volumetric = %d\ndynres = %d\nmax_lights = %d\nmin_roughness = %.2f\nlight_cull = %d\nflicker = %d\n",
            g_cfg.upscale, g_cfg.scale, int(g_cfg.fps), int(g_cfg.vsync), g_cfg.light, g_cfg.sky,
            g_cfg.lightSize, g_cfg.glow, g_cfg.water, g_cfg.spriteGlow, g_cfg.gi,
            int(g_cfg.volumetric), g_cfg.dynres, g_cfg.maxLights, g_cfg.minRoughness,
-           int(g_cfg.lightCull));
+           int(g_cfg.lightCull), g_cfg.flicker);
    fclose(f);
 }
 
@@ -1206,14 +1209,14 @@ const char *kUpscaleNames[] = {"Off",
                                "MetalFX Custom"};
 
 enum UiRow {
-   kRowUpscale, kRowScale, kRowDynres, kRowBounces, kRowLights, kRowLightCull, kRowVolumetric, kRowVsync,
+   kRowUpscale, kRowScale, kRowDynres, kRowBounces, kRowLights, kRowLightCull, kRowFlicker, kRowVolumetric, kRowVsync,
    kRowFps, kRowLight, kRowSky, kRowLightSize, kRowRough, kRowGlow, kRowWater,
    kRowDebug, kRowFreeze, kRowBackFaces, kRowReuse, kRowInspect, kRowReset, kRowCount
 };
 
 const char *kRowLabels[kRowCount] = {
    "Upscaler", "Render resolution", "Dynamic resolution", "Bounce light", "Lights traced",
-   "Lights behind walls",
+   "Lights behind walls", "Light flicker",
    "Volumetric light", "VSync", "FPS counter", "Light brightness", "Sky brightness",
    "Light size (soft shadows)", "Surface roughness", "Lamp glow", "Water",
    "Debug view", "Freeze scene (test)", "Back faces (test)", "Light sampling (test)", "Inspect centre of view", "Reset to defaults",
@@ -1246,6 +1249,7 @@ std::string row_value(int row)
       snprintf(buf, sizeof(buf), "nearest %d", g_cfg.maxLights);
       return buf;
    case kRowLightCull: return g_cfg.lightCull ? "Skipped" : "Traced";
+   case kRowFlicker: return g_cfg.flicker == 1 ? "As the game" : g_cfg.flicker == 2 ? "Nearly steady" : "Smoothed";
    case kRowVolumetric: return g_cfg.volumetric ? "On" : "Off";
    case kRowVsync: return g_cfg.vsync ? "On" : "Off";
    case kRowFps: return g_cfg.fps ? "On" : "Off";
@@ -1331,6 +1335,7 @@ void change_row(int row, int dir)
       break;
    }
    case kRowLightCull: g_cfg.lightCull = !g_cfg.lightCull; break;
+   case kRowFlicker: g_cfg.flicker = (g_cfg.flicker + dir + 3) % 3; break;
    case kRowVolumetric: g_cfg.volumetric = !g_cfg.volumetric; break;
    case kRowVsync: g_cfg.vsync = !g_cfg.vsync; break;
    case kRowFps: g_cfg.fps = !g_cfg.fps; break;
@@ -2455,6 +2460,52 @@ void upload_light(const PendingLight &L)
       ++g_frameLights;
 }
 
+// Thief's torches flicker: their brightness jumps every frame. The denoiser
+// takes a jump in the light as a change and throws away what it had gathered
+// for every pixel that light reaches -- walls by torchlight never settle, the
+// crawling splotches. Blood RT smooths its flickering sectors the same way.
+// The brightness is eased toward the game's over a fraction of a second.
+void smooth_flicker()
+{
+   static std::unordered_map<uint32_t, std::array<float, 4>> s_state;   // rgb, last frame seen
+   static std::chrono::steady_clock::time_point s_last = std::chrono::steady_clock::now();
+   static uint32_t s_frame = 0;
+   static double s_logAt = 0;
+   static uint32_t s_changing = 0, s_counted = 0;
+   const auto now = std::chrono::steady_clock::now();
+   const float dt = std::clamp(std::chrono::duration<float>(now - s_last).count(), 0.0f, 0.1f);
+   s_last = now;
+   ++s_frame;
+   const float tau = g_cfg.flicker == 2 ? 1.5f : 0.3f;
+   const float a = g_cfg.flicker == 1 ? 1.0f : 1.0f - std::exp(-dt / tau);
+   for (PendingLight &L : g_pendingLights) {
+      auto it = s_state.find(L.id);
+      if (it == s_state.end() || it->second[3] + 30 < float(s_frame)) {
+         s_state[L.id] = {L.rgb[0], L.rgb[1], L.rgb[2], float(s_frame)};
+         continue;
+      }
+      std::array<float, 4> &st = it->second;
+      const float before = std::max({st[0], st[1], st[2]});
+      if (std::fabs(L.peak - before) > 0.05f * std::max(before, 1.0f))
+         ++s_changing;
+      for (int k = 0; k < 3; ++k) {
+         st[k] += (L.rgb[k] - st[k]) * a;
+         L.rgb[k] = st[k];
+      }
+      st[3] = float(s_frame);
+      L.peak = std::max({L.rgb[0], L.rgb[1], L.rgb[2], 0.01f});
+   }
+   s_counted += uint32_t(g_pendingLights.size());
+   const double t = std::chrono::duration<double>(now.time_since_epoch()).count();
+   if (t > s_logAt) {
+      if (s_logAt > 0 && s_counted)
+         fprintf(stderr, "RT: lights changing brightness: %.1f%% of light-frames (flicker %d)\n",
+                 100.0 * double(s_changing) / double(s_counted), g_cfg.flicker);
+      s_logAt = t + 5.0;
+      s_changing = s_counted = 0;
+   }
+}
+
 // RTGL1 picks each pixel's candidate lights uniformly from ALL the lights it
 // is given (this build has no light grid). A Thief mission has hundreds, so
 // nearly every candidate was a far-away light: the lamp next to you was
@@ -2471,6 +2522,7 @@ void flush_lights()
       return;
    }
    g_lightsTotal = uint32_t(g_pendingLights.size());
+   smooth_flicker();
    // A light that shines on none of the cells around the camera or in view
    // is behind walls (the level's own lighting says so): every candidate
    // RTGL1 spent on it would be shadowed, the splotches in dark places.
