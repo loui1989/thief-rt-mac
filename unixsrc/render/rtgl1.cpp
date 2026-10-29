@@ -302,6 +302,10 @@ bool g_freeze = false;
 // Test switch (panel): faces turned away from the camera, which the game culls,
 // are dropped instead of kept for shadows.
 bool g_dropBackFaces = false;
+// Test switch (panel): how the path tracer reuses light samples between
+// pixels and frames. 0 normal, 1 no spatial reuse, 2 no reuse at all,
+// 3 normal with 8 shadow rays and 4 light samples per pixel.
+int g_reuseTest = 0;
 struct PendingLight {
    uint32_t id;
    float pos[3], rgb[3], dir[3];
@@ -1137,14 +1141,14 @@ const char *kUpscaleNames[] = {"Off",
 enum UiRow {
    kRowUpscale, kRowScale, kRowDynres, kRowBounces, kRowLights, kRowVolumetric, kRowVsync,
    kRowFps, kRowLight, kRowSky, kRowLightSize, kRowRough, kRowGlow, kRowWater,
-   kRowDebug, kRowFreeze, kRowBackFaces, kRowInspect, kRowReset, kRowCount
+   kRowDebug, kRowFreeze, kRowBackFaces, kRowReuse, kRowInspect, kRowReset, kRowCount
 };
 
 const char *kRowLabels[kRowCount] = {
    "Upscaler", "Render resolution", "Dynamic resolution", "Bounce light", "Lights traced",
    "Volumetric light", "VSync", "FPS counter", "Light brightness", "Sky brightness",
    "Light size (soft shadows)", "Surface roughness", "Lamp glow", "Water",
-   "Debug view", "Freeze scene (test)", "Back faces (test)", "Inspect centre of view", "Reset to defaults",
+   "Debug view", "Freeze scene (test)", "Back faces (test)", "Light sampling (test)", "Inspect centre of view", "Reset to defaults",
 };
 
 // rows that do something when chosen rather than having a value
@@ -1181,6 +1185,10 @@ std::string row_value(int row)
    case kRowLightSize: snprintf(buf, sizeof(buf), "%.2f m", g_cfg.lightSize); return buf;
    case kRowFreeze: return g_freeze ? "On (frozen)" : "Off";
    case kRowBackFaces: return g_dropBackFaces ? "Dropped" : "Shadows only";
+   case kRowReuse: {
+      static const char *kReuse[] = {"Normal", "No spatial reuse", "No reuse", "8 shadow rays"};
+      return kReuse[std::clamp(g_reuseTest, 0, 3)];
+   }
    case kRowDebug: {
       static const char *kViews[] = {"Off", "Shadows only", "Direct light only", "Glossy only",
                                      "Bounce light only"};
@@ -1267,6 +1275,7 @@ void change_row(int row, int dir)
       break;
    case kRowDebug: g_cfg.debugView = (g_cfg.debugView + dir + 5) % 5; return;   // not saved
    case kRowBackFaces: g_dropBackFaces = !g_dropBackFaces; return;   // not saved
+   case kRowReuse: g_reuseTest = (g_reuseTest + dir + 4) % 4; return;   // not saved
    case kRowFreeze:
       g_freeze = !g_freeze;
       if (g_freeze)
@@ -1524,22 +1533,22 @@ void draw_frame(bool sceneDrawn)
       .rrFireflyThreshold = 0.0f,
       .rrFireflyMinLum = 0.01f,
       .restirBlueNoise = true,
-      .shadowSamples = 1,
+      .shadowSamples = g_reuseTest == 3 ? 8u : 1u,
       .debugRestirM = 0,
       // the panel's debug view: which part of the lighting is what
       .debugVisibility = g_cfg.debugView == 1 ? 1u : 0u,
       .debugShowFlags = g_cfg.debugView == 2 ? 32u : g_cfg.debugView == 3 ? 64u
                         : g_cfg.debugView == 4 ? 128u : 0u,
-      .restirTemporalJitter = 2.0f,
+      .restirTemporalJitter = g_reuseTest == 2 ? 0.0f : 2.0f,
       .rrSpecularHitDistance = true,
-      .directSamples = 1,
+      .directSamples = g_reuseTest == 3 ? 4u : 1u,
       // 0: bounce light traced for half of the pixels each frame
       .indirectSamples = (g_cfg.gi == 0 || g_cfg.gi == 3) ? 0u : 1u,
       // more candidate lights per pixel (no extra rays): Thief has many small lights
       .restirInitialSamples = 12,
-      .restirSpatialSamples = 8,
+      .restirSpatialSamples = (g_reuseTest == 1 || g_reuseTest == 2) ? 0u : 8u,
       .restirSpatialRadius = 30.0f,
-      .restirTemporalMCap = 20,
+      .restirTemporalMCap = g_reuseTest == 2 ? 1u : 20u,
       .rrGuideMin = 0.01f,
       .rrGuideMode = 1,
       .restirIndirAntilag = 1,
