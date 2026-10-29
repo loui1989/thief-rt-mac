@@ -82,9 +82,9 @@ struct Settings {
    float glow = 1.0f;         // light fixtures
    float spriteGlow = 0.35f;  // glow and particle sprites
    int water = 0;             // 0 translucent (as the game), 1 RTGL1 water, 2 opaque
-   int bounces = 1;           // indirect light: 0 half rate, 1, 2
+   int gi = 0;                // bounce light: 0 two bounces at half rate (as Blood RT),
+                              // 1 one bounce, 2 two bounces, 3 one bounce at half rate
    bool volumetric = false;   // haze lit by every light
-   int denoiser = 0;          // 0 RTGL1's, 1 MetalFX denoising upscaler
    int dynres = 0;            // dynamic resolution's target fps, 0 off
    float waterAlpha = 0.55f;
    float scale = 0.5f;      // render scale for upscale modes 0 and 5
@@ -134,9 +134,8 @@ void load_settings()
       else if (k == "glow") g_cfg.glow = std::clamp(value, 0.0f, 10.0f);
       else if (k == "water") g_cfg.water = std::clamp(int(value), 0, 2);
       else if (k == "sprite_glow") g_cfg.spriteGlow = std::clamp(value, 0.0f, 10.0f);
-      else if (k == "bounces") g_cfg.bounces = std::clamp(int(value), 0, 2);
+      else if (k == "gi") g_cfg.gi = std::clamp(int(value), 0, 3);
       else if (k == "volumetric") g_cfg.volumetric = value != 0;
-      else if (k == "denoiser") g_cfg.denoiser = std::clamp(int(value), 0, 1);
       else if (k == "dynres") g_cfg.dynres = std::clamp(int(value), 0, 240);
    }
    fclose(f);
@@ -152,11 +151,11 @@ void save_settings()
    if (!f)
       return;
    fprintf(f, "upscale = %d\nscale = %.2f\nfps = %d\nvsync = %d\nlight = %.3f\nsky = %.3f\n"
-              "light_size = %.3f\nglow = %.3f\nwater = %d\nsprite_glow = %.3f\nbounces = %d\n"
-              "volumetric = %d\ndenoiser = %d\ndynres = %d\n",
+              "light_size = %.3f\nglow = %.3f\nwater = %d\nsprite_glow = %.3f\ngi = %d\n"
+              "volumetric = %d\ndynres = %d\n",
            g_cfg.upscale, g_cfg.scale, int(g_cfg.fps), int(g_cfg.vsync), g_cfg.light, g_cfg.sky,
-           g_cfg.lightSize, g_cfg.glow, g_cfg.water, g_cfg.spriteGlow, g_cfg.bounces,
-           int(g_cfg.volumetric), g_cfg.denoiser, g_cfg.dynres);
+           g_cfg.lightSize, g_cfg.glow, g_cfg.water, g_cfg.spriteGlow, g_cfg.gi,
+           int(g_cfg.volumetric), g_cfg.dynres);
    fclose(f);
 }
 
@@ -371,7 +370,8 @@ void start_frame()
    resolution.frameGeneration = RG_FRAME_GENERATION_MODE_OFF;
    resolution.denoiser = RG_DENOISER_DEFAULT;
    const bool metalfx = g_cfg.upscale >= 1 && g_cfg.upscale <= 5;
-   const bool mfxDenoiser = metalfx && g_cfg.denoiser == 1 && metalfx_denoiser_available();
+   // (MetalFX's denoiser: less stable than RTGL1's, and not cheaper)
+   const bool mfxDenoiser = false;
    // Dynamic resolution (the Metal backend reads RTGL1_DYNRES_* every frame):
    // the size asked for here is the largest; each frame's follows the GPU time.
    // Not with the MetalFX denoiser, which needs a fixed size.
@@ -385,7 +385,7 @@ void start_frame()
             char v[16];
             snprintf(v, sizeof(v), "%d", fps);
             setenv("RTGL1_DYNRES_FPS", v, 1);
-            setenv("RTGL1_DYNRES_MIN", "0.3", 1);
+            setenv("RTGL1_DYNRES_MIN", "0.25", 1);
          } else {
             unsetenv("RTGL1_DYNRES_FPS");
          }
@@ -1098,13 +1098,13 @@ const char *kUpscaleNames[] = {"Off",
                                "MetalFX Custom"};
 
 enum UiRow {
-   kRowUpscale, kRowScale, kRowDynres, kRowDenoiser, kRowBounces, kRowVolumetric, kRowVsync,
+   kRowUpscale, kRowScale, kRowDynres, kRowBounces, kRowVolumetric, kRowVsync,
    kRowFps, kRowLight, kRowSky, kRowLightSize, kRowGlow, kRowWater,
    kRowInspect, kRowReset, kRowCount
 };
 
 const char *kRowLabels[kRowCount] = {
-   "Upscaler", "Render resolution", "Dynamic resolution", "Denoiser", "Bounce light",
+   "Upscaler", "Render resolution", "Dynamic resolution", "Bounce light",
    "Volumetric light", "VSync", "FPS counter", "Light brightness", "Sky brightness",
    "Light size (soft shadows)", "Lamp glow", "Water",
    "Inspect centre of view", "Reset to defaults",
@@ -1130,13 +1130,8 @@ std::string row_value(int row)
       if (g_cfg.dynres <= 0) return "Off";
       snprintf(buf, sizeof(buf), "aim for %d fps", g_cfg.dynres);
       return buf;
-   case kRowDenoiser:
-      if (g_cfg.denoiser == 1)
-         return metalfx_denoiser_available() ? (g_cfg.upscale >= 1 ? "MetalFX" : "MetalFX (needs upscaler)")
-                                             : "MetalFX (not on this Mac)";
-      return "RTGL1";
    case kRowBounces:
-      return g_cfg.bounces == 0 ? "1, half rate" : g_cfg.bounces == 1 ? "1" : "2";
+      return g_cfg.gi == 0 ? "2, half rate" : g_cfg.gi == 1 ? "1" : g_cfg.gi == 2 ? "2" : "1, half rate";
    case kRowVolumetric: return g_cfg.volumetric ? "On" : "Off";
    case kRowVsync: return g_cfg.vsync ? "On" : "Off";
    case kRowFps: return g_cfg.fps ? "On" : "Off";
@@ -1196,8 +1191,7 @@ void change_row(int row, int dir)
       g_cfg.dynres = kDynres[(i + dir + n) % n];
       break;
    }
-   case kRowDenoiser: g_cfg.denoiser = g_cfg.denoiser ? 0 : 1; break;
-   case kRowBounces: g_cfg.bounces = (g_cfg.bounces + dir + 3) % 3; break;
+   case kRowBounces: g_cfg.gi = (g_cfg.gi + dir + 4) % 4; break;
    case kRowVolumetric: g_cfg.volumetric = !g_cfg.volumetric; break;
    case kRowVsync: g_cfg.vsync = !g_cfg.vsync; break;
    case kRowFps: g_cfg.fps = !g_cfg.fps; break;
@@ -1278,7 +1272,7 @@ void draw_ui(bool scene)
       int w, h;
       render_size(w, h);
       char line[128], line2[128];
-      if (g_cfg.dynres > 0 && !(g_cfg.denoiser == 1 && g_cfg.upscale >= 1 && metalfx_denoiser_available()))
+      if (g_cfg.dynres > 0)
          snprintf(line, sizeof(line), "%3.0f fps  %5.1f ms (worst %5.1f)  dynamic \x7f%dx%d",
                   g_ui.fps, g_ui.frameMs, g_ui.worstMs, g_drawableW, g_drawableH);
       else
@@ -1446,7 +1440,7 @@ void draw_frame(bool sceneDrawn)
       .sType = RG_STRUCTURE_TYPE_DRAW_FRAME_ILLUMINATION_PARAMS,
       .pNext = &volumetric,
       .maxBounceShadows = 2,
-      .indirectBounces = uint32_t(std::max(1, g_cfg.bounces)),
+      .indirectBounces = (g_cfg.gi == 1 || g_cfg.gi == 3) ? 1u : 2u,
       .indirectLegacyBounceWeight = true,
       .cellWorldSize = 1.0f,
       .directDiffuseSensitivityToChange = 0.5f,
@@ -1465,7 +1459,7 @@ void draw_frame(bool sceneDrawn)
       .rrSpecularHitDistance = true,
       .directSamples = 1,
       // 0: bounce light traced for half of the pixels each frame
-      .indirectSamples = g_cfg.bounces == 0 ? 0u : 1u,
+      .indirectSamples = (g_cfg.gi == 0 || g_cfg.gi == 3) ? 0u : 1u,
       // more candidate lights per pixel (no extra rays): Thief has many small lights
       .restirInitialSamples = 12,
       .restirSpatialSamples = 8,
@@ -1477,9 +1471,22 @@ void draw_frame(bool sceneDrawn)
       .rrPreExposure = true,
       .rrPreExposureDebug = false,
    };
+   // No surface glossier than 0.7 (Blood RT's rt_min_roughness): a glossy
+   // surface's reflection is one noisy sample per pixel, the crawling.
+   auto textures = RgDrawFrameTexturesParams{
+      .sType = RG_STRUCTURE_TYPE_DRAW_FRAME_TEXTURES_PARAMS,
+      .pNext = &illum,
+      .dynamicSamplerFilter = RG_SAMPLER_FILTER_LINEAR,
+      .mipLodBiasOffset = 0.0f,
+      .normalMapStrength = 1.0f,
+      .emissionMapBoost = 100.0f,
+      .emissionMaxScreenColor = 1.5f,
+      .minRoughness = 0.7f,
+      .heightMapDepth = 0.02f,
+   };
    auto sky = RgDrawFrameSkyParams{
       .sType = RG_STRUCTURE_TYPE_DRAW_FRAME_SKY_PARAMS,
-      .pNext = &illum,
+      .pNext = &textures,
       .skyType = RG_SKY_TYPE_COLOR,
       .skyColorDefault = {{0.035f, 0.045f, 0.075f}},
       .skyColorMultiplier = g_cfg.sky,
@@ -2085,10 +2092,16 @@ void RenderRTWorldPolygon(int textureId, int flags, int count, const float *xyz,
       v.color = pack_color(1, 1, 1, 1);
       g.verts.push_back(v);
    }
-   for (int i = 2; i < count; ++i) {
-      g.indices.push_back(base);
-      g.indices.push_back(base + uint32_t(i - 1));
-      g.indices.push_back(base + uint32_t(i));
+   // A zig-zag strip across the (convex) polygon rather than a fan from one
+   // corner: no long slivers, whose wide bounding boxes slow every ray.
+   // Same winding as the fan.
+   for (int lo = 0, hi = count - 1, k = 0; hi - lo >= 2; ++k) {
+      uint32_t a, b, c;
+      if ((k & 1) == 0) { a = lo; b = lo + 1; c = hi; ++lo; }
+      else { a = lo; b = hi - 1; c = hi; --hi; }
+      g.indices.push_back(base + a);
+      g.indices.push_back(base + b);
+      g.indices.push_back(base + c);
    }
 }
 
