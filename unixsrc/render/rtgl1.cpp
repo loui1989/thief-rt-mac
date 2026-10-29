@@ -299,6 +299,9 @@ bool g_vsync = true;
 // models and lights stay as they were -- while the camera still moves. What
 // still changes as you walk is then the path tracer's own doing.
 bool g_freeze = false;
+// Test switch (panel): faces turned away from the camera, which the game culls,
+// are dropped instead of kept for shadows.
+bool g_dropBackFaces = false;
 struct PendingLight {
    uint32_t id;
    float pos[3], rgb[3], dir[3];
@@ -1134,14 +1137,14 @@ const char *kUpscaleNames[] = {"Off",
 enum UiRow {
    kRowUpscale, kRowScale, kRowDynres, kRowBounces, kRowLights, kRowVolumetric, kRowVsync,
    kRowFps, kRowLight, kRowSky, kRowLightSize, kRowRough, kRowGlow, kRowWater,
-   kRowDebug, kRowFreeze, kRowInspect, kRowReset, kRowCount
+   kRowDebug, kRowFreeze, kRowBackFaces, kRowInspect, kRowReset, kRowCount
 };
 
 const char *kRowLabels[kRowCount] = {
    "Upscaler", "Render resolution", "Dynamic resolution", "Bounce light", "Lights traced",
    "Volumetric light", "VSync", "FPS counter", "Light brightness", "Sky brightness",
    "Light size (soft shadows)", "Surface roughness", "Lamp glow", "Water",
-   "Debug view", "Freeze scene (test)", "Inspect centre of view", "Reset to defaults",
+   "Debug view", "Freeze scene (test)", "Back faces (test)", "Inspect centre of view", "Reset to defaults",
 };
 
 // rows that do something when chosen rather than having a value
@@ -1177,6 +1180,7 @@ std::string row_value(int row)
    case kRowSky: snprintf(buf, sizeof(buf), "%.2fx", g_cfg.sky); return buf;
    case kRowLightSize: snprintf(buf, sizeof(buf), "%.2f m", g_cfg.lightSize); return buf;
    case kRowFreeze: return g_freeze ? "On (frozen)" : "Off";
+   case kRowBackFaces: return g_dropBackFaces ? "Dropped" : "Shadows only";
    case kRowDebug: {
       static const char *kViews[] = {"Off", "Shadows only", "Direct light only", "Glossy only",
                                      "Bounce light only"};
@@ -1262,6 +1266,7 @@ void change_row(int row, int dir)
                                    0.05f, 1.5f);
       break;
    case kRowDebug: g_cfg.debugView = (g_cfg.debugView + dir + 5) % 5; return;   // not saved
+   case kRowBackFaces: g_dropBackFaces = !g_dropBackFaces; return;   // not saved
    case kRowFreeze:
       g_freeze = !g_freeze;
       if (g_freeze)
@@ -1996,6 +2001,8 @@ int RenderRTSuppressCapture(int suppress)
 void RenderRTDrawWorld(int primitive, const sRenderBackendVertex *v, const float *xyz,
                        int count)
 {
+   if (g_RenderRTShadowOnly && g_dropBackFaces)
+      return;
    if (!g_inScene || primitive != kRenderBackendTriangles || count < 3)
       return;
    if (g_blend == kRenderBackendBlendMultiply)
