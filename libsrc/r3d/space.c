@@ -467,6 +467,10 @@ void r3_w2c_plane(mxs_plane *dst,mxs_plane *src)
          mx_mat_eltmuleq_vec(X2MAT(&cx.w2c),&cx.cspace_vec);
          mx_elmuleq_vec(X2VEC(&cx.w2c),&cx.cspace_vec);
          cx.w2c_invalid = FALSE;
+         {
+            extern void _r3_rt_update_c2w(void);
+            _r3_rt_update_c2w();
+         }
       }
       dst->d = src->d - mx_dot_vec(&(dst->v),X2VEC(&cx.w2c));
    }

@@ -74,6 +74,9 @@ float dot_clamp=0.6f;
 #include <uigame.h>
 #include <guistyle.h>
 #include <memall.h>
+#ifdef DARK_RT
+#include <render_rt.h>
+#endif
 #include <dbmem.h>   // must be last header! 
    bool draw_solid_by_MIP_level = FALSE;
    bool draw_solid_by_cell = FALSE;
@@ -1571,6 +1574,9 @@ static void draw_many_objects(void)
    if (portal_sky_spans > 0)
       ptsky_render_stars();
 
+#ifdef DARK_RT
+   const int rt_suppressed = RenderRTSuppressCapture(0);
+#endif
 #ifdef STATS_ON
    stat_num_object_ms -= portal_get_time();
 #endif
@@ -1622,6 +1628,9 @@ static void draw_many_objects(void)
 
 #ifdef STATS_ON
    stat_num_object_ms += portal_get_time();
+#endif
+#ifdef DARK_RT
+   RenderRTSuppressCapture(rt_suppressed);
 #endif
 
    // restore g2pt_clut in case object rendering trashed it

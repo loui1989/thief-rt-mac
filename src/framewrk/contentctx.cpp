@@ -171,6 +171,46 @@ static void AddPath(char* list, int size, const char* path)
    }
 }
 
+#ifndef _WIN32
+// install.cfg written by a Windows installer (Steam's Thief Gold, for one)
+// names C:\... directories. Map such a path into the installation actually
+// being run: strip the configured install_path prefix if it matches,
+// otherwise keep the last path component (RES, MOVIES, ...).
+static BOOL RemapWindowsPath(const char* token, char* output, int size)
+{
+   char install[CONTENT_PATH_SIZE] = "";
+   const char* rest = NULL;
+   size_t installLen;
+   if (!token || !isalpha((unsigned char)token[0]) || token[1] != ':')
+      return FALSE;
+   if (config_get_raw("install_path", install, sizeof(install)))
+   {
+      Trim(install);
+      installLen = strlen(install);
+      while (installLen && (install[installLen-1] == '\\' || install[installLen-1] == '/'))
+         install[--installLen] = '\0';
+      if (installLen && _strnicmp(token, install, installLen) == 0 &&
+          (token[installLen] == '\0' || token[installLen] == '\\' ||
+           token[installLen] == '/'))
+      {
+         rest = token + installLen;
+         while (*rest == '\\' || *rest == '/')
+            ++rest;
+      }
+   }
+   if (!rest)
+   {
+      const char* slash = strrchr(token, '\\');
+      const char* forward = strrchr(token, '/');
+      if (forward > slash)
+         slash = forward;
+      rest = slash ? slash + 1 : token + 2;
+   }
+   JoinPath(output, size, gBasePath, rest);
+   return TRUE;
+}
+#endif
+
 static void AddExpandedList(char* output, int outputSize, const char* list,
                             const char* suffix)
 {
@@ -188,6 +228,10 @@ static void AddExpandedList(char* output, int outputSize, const char* list,
       char suffixed[DARK_CONTENT_MAX_PATH];
       Trim(token);
       JoinPath(absolute, sizeof(absolute), gBasePath, token);
+#ifndef _WIN32
+      if (!DirectoryExists(absolute))
+         RemapWindowsPath(token, absolute, sizeof(absolute));
+#endif
       JoinPath(suffixed, sizeof(suffixed), absolute, suffix);
       AddPath(output, outputSize, suffixed);
    }
@@ -218,6 +262,10 @@ static void AddLastExpandedPath(char* output, int outputSize, const char* list,
       char suffixed[DARK_CONTENT_MAX_PATH];
       Trim(token);
       JoinPath(absolute, sizeof(absolute), gBasePath, token);
+#ifndef _WIN32
+      if (!DirectoryExists(absolute))
+         RemapWindowsPath(token, absolute, sizeof(absolute));
+#endif
       JoinPath(suffixed, sizeof(suffixed), absolute, suffix);
       if (DirectoryExists(suffixed))
       {

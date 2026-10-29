@@ -420,6 +420,10 @@ void portal_render_water_polys(int n)
 
    AssertMsg(water_info_list != NULL, "Must call portal_setup_water_hack() before rendering water in hardware!");
    AssertMsg(end <= num_water_polys, "portal_render_water_polys(): too many polys requested!");
+#ifdef DARK_RT
+   // water surfaces come from the world representation
+   const int rt_suppressed = RenderRTSuppressCapture(1);
+#endif
 
    r3_start_block();
    r3_set_clipmode(R3_CLIP);

@@ -20,7 +20,9 @@ BOOL g_fResPrintDrops;
 #include <cstdlib>
 #include <missiondiag.h>
 #include <platform_services.h>
+#pragma pack(push, 8)
 #include <mutex>
+#pragma pack(pop)
 #include <string>
 #include <vector>
 

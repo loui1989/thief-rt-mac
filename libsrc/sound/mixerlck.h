@@ -11,7 +11,9 @@
 #ifndef __MIXERLCK_H
 #define __MIXERLCK_H
 
+#pragma pack(push, 8)
 #include <mutex>
+#pragma pack(pop)
 
 ///////////////////////////////////////////////////////////////////////////////
 //

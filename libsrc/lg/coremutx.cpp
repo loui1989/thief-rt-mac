@@ -6,7 +6,9 @@
 //
 
 #include <coremutx.h>
+#pragma pack(push, 8)
 #include <mutex>
+#pragma pack(pop)
 
 namespace
 {

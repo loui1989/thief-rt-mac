@@ -169,21 +169,33 @@ if(DARK_BUILD_ENGINE)
         continue()
       endif()
 
-      if(EXISTS "${resolved}/${part}")
+      # On a case-insensitive file system (macOS) EXISTS accepts the
+      # manifest's spelling, so always look up the name as it is on disk:
+      # the source filters below compare paths case-sensitively.
+      if(NOT APPLE AND EXISTS "${resolved}/${part}")
         set(resolved "${resolved}/${part}")
         continue()
       endif()
 
       string(TOLOWER "${part}" part_lower)
-      file(GLOB siblings "${resolved}/*")
+      get_property(siblings GLOBAL PROPERTY "dark_dir_${resolved}")
+      if(NOT siblings)
+        file(GLOB siblings "${resolved}/*")
+        set_property(GLOBAL PROPERTY "dark_dir_${resolved}" "${siblings}")
+      endif()
+      set(found FALSE)
       foreach(candidate IN LISTS siblings)
         get_filename_component(candidate_name "${candidate}" NAME)
         string(TOLOWER "${candidate_name}" candidate_name_lower)
         if(candidate_name_lower STREQUAL part_lower)
           set(resolved "${candidate}")
+          set(found TRUE)
           break()
         endif()
       endforeach()
+      if(NOT found)
+        set(resolved "${resolved}/${part}")
+      endif()
     endforeach()
     cmake_path(NORMAL_PATH resolved)
     # Keep manifest paths in CMake's portable slash form so the source filters
@@ -591,6 +603,12 @@ if(DARK_BUILD_ENGINE)
       if(NOT ANDROID)
         target_link_libraries(thief2 PRIVATE pthread)
         set_target_properties(thief2 PROPERTIES OUTPUT_NAME thief-runner)
+        if(APPLE)
+          # The engine's byte-packed records hold pointers at odd offsets.
+          # Chained fixups (the default for macOS 12+) cannot rebase those;
+          # the classic rebase opcodes can.
+          target_link_options(thief2 PRIVATE "LINKER:-no_fixup_chains")
+        endif()
         if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
           install(TARGETS thief2 RUNTIME DESTINATION bin)
           install(FILES

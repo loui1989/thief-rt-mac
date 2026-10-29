@@ -1,11 +1,54 @@
 #pragma once
 
+// Most engine code is compiled with -fpack-struct=1. System structures the
+// C library fills in (struct stat, timespec, tm, dirent) must keep their
+// native layout, or calls such as stat() write past the caller's copy: on
+// macOS struct stat has alignment padding that packing removes. This header
+// is force-included first, so declaring them here, at natural packing, keeps
+// every later include of these headers (guarded) consistent.
+//
+// Some macOS SDK headers (sys/fcntl.h, sys/dirent.h) end with "#pragma
+// pack()", which resets to the command line's 1-byte default rather than
+// popping, so natural packing is re-established after each one. Including
+// them here, once, also keeps them from resetting the packing of a later
+// "#pragma pack(push, 8)" block around C++ standard headers.
+#pragma pack(push, 8)
 #include <fcntl.h>
+#pragma pack(8)
 #include <limits.h>
+#pragma pack(8)
 #include <stdio.h>
+#pragma pack(8)
 #include <sys/stat.h>
+#pragma pack(8)
+#include <sys/time.h>
+#pragma pack(8)
+#include <time.h>
+#pragma pack(8)
+#include <dirent.h>
+#pragma pack(8)
 #include <unistd.h>
+#pragma pack(8)
+#include <stdlib.h>
+#pragma pack(8)
+#include <string.h>
+#pragma pack(8)
+#include <signal.h>
+#pragma pack(8)
+#include <pthread.h>
+#pragma pack(8)
+#include <dlfcn.h>
+#pragma pack(pop)
 #include <types.h>
+#if defined(__APPLE__) && defined(__aarch64__)
+#ifdef __cplusplus
+static_assert(sizeof(struct stat) == 144 && alignof(struct timespec) == 8,
+              "system structs must not be packed");
+#else
+_Static_assert(sizeof(struct stat) == 144 && _Alignof(struct timespec) == 8,
+               "system structs must not be packed");
+#endif
+#endif
 
 #ifndef _MAX_PATH
 #ifndef PATH_MAX

@@ -107,10 +107,16 @@ const unsigned kMaxAllocSize    = UINT_MAX - kUnitSize;
 // Placement operator new
 //
 
+#ifdef _WIN32
 inline void * operator new(size_t, void *p)
 {
     return p;
 }
+#else
+#pragma pack(push, 8)
+#include <new>      // the standard placement new
+#pragma pack(pop)
+#endif
 
 
 ///////////////////////////////////////////////////////////////////////////////

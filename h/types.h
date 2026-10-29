@@ -16,8 +16,14 @@
 #ifndef __TYPES_H
 #define __TYPES_H
 
+// System headers keep their native layout even though most engine code is
+// built with -fpack-struct=1 (on macOS <sys/types.h> declares struct timespec,
+// which struct stat embeds).
+#pragma pack(push, 8)
 #include <limits.h>
+#pragma pack(8)
 #include <stdint.h>
+#pragma pack(8)
 
 /*
  * glibc exposes a legacy LP64 "ulong" typedef from <sys/types.h> whenever
@@ -31,6 +37,7 @@
 #include <sys/types.h>
 #undef ulong
 #endif
+#pragma pack(pop)
 
 #ifndef EXTERN_C
 #ifdef __cplusplus

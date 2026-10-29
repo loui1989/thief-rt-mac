@@ -4,10 +4,13 @@
 #include "../winsrc/lg/thrdtool.h"
 #else
 
+#include <types.h>
+// Natural packing for the standard types and for the classes below, which
+// hold them as members: macOS's pthread functions reject a misaligned mutex.
+#pragma pack(push, 8)
 #include <condition_variable>
 #include <mutex>
 #include <chrono>
-#include <types.h>
 
 #ifndef INFINITE
 #define INFINITE 0xffffffffu
@@ -83,5 +86,6 @@ private:
    std::mutex m_mutex;
    std::condition_variable m_condition;
 };
+#pragma pack(pop)
 
 #endif

@@ -16,6 +16,12 @@
 
 #include <texture.h>
 #include <render_backend.h>
+#ifdef DARK_RT
+#include <render_rt.h>
+// r3d's camera-to-world transform (libsrc/r3d/block.c)
+extern float r3d_rt_c2w[12];
+extern int r3d_rt_c2w_valid;
+#endif
 extern void *g_ModernTextures[LGD3D_MAX_TEXTURES];
 extern grs_bitmap *g_ModernBitmaps[LGD3D_MAX_TEXTURES];
 extern void *g_ModernWhiteTexture;
@@ -47,7 +53,27 @@ typedef struct sLgd3dVertex {
    float sx, sy, sz, rhw;
    uint32 color, specular;
    float tu, tv;
+#ifdef DARK_RT
+   float wx, wy, wz;   // world position, for the ray tracer
+   int wvalid;
+#endif
 } sLgd3dVertex;
+
+#ifdef DARK_RT
+#define rt_set_world(_d, _p) \
+do { \
+   const float *_m = r3d_rt_c2w; \
+   float _x = (float)(_p)->x, _y = (float)(_p)->y, _z = (float)(_p)->z; \
+   (_d)->wx = _m[0]*_x + _m[1]*_y + _m[2]*_z + _m[3]; \
+   (_d)->wy = _m[4]*_x + _m[5]*_y + _m[6]*_z + _m[7]; \
+   (_d)->wz = _m[8]*_x + _m[9]*_y + _m[10]*_z + _m[11]; \
+   (_d)->wvalid = r3d_rt_c2w_valid && g_RenderRTCaptureVertices; \
+} while (0)
+#define rt_clear_world(_d) ((_d)->wvalid = 0)
+#else
+#define rt_set_world(_d, _p) ((void)0)
+#define rt_clear_world(_d) ((void)0)
+#endif
 
 static uint32 PackColor(int r, int g, int b, int a)
 {
@@ -173,6 +199,7 @@ do { \
       else if (__dest->sz < 0.0f) \
          __dest->sz = 0.0f;  }\
    __dest->rhw = (float)(w);  \
+   rt_clear_world(__dest); \
 } while (0)
 
 #define setxyz(dest, src) \
@@ -192,6 +219,7 @@ do { \
    _dest->sx = fix_float(_sx)+x_offset; \
    _dest->sy = fix_float(_sy)+y_offset; \
    setz(_dest, _src->p.z, _src->grp.w); \
+   rt_set_world(_dest, &_src->p); \
 } while (0)
 
 void lgd3d_set_offsets(int x, int y)
@@ -597,12 +625,60 @@ static void ModernConvertVertex(sRenderBackendVertex *d, const sLgd3dVertex *s)
    d->u0=s->tu; d->v0=s->tv; d->u1=d->v1=0.0f;
 }
 
+#ifdef DARK_RT
+// While the main view is drawn the ray tracer takes its triangles with world
+// positions. Triangles built while capture was suppressed (world surfaces,
+// which come from the world representation), lines, points and 2D effects
+// have no place in it and are dropped. Returns TRUE if the draw was consumed.
+static BOOL ModernCapture(int primitive, int count, const sRenderBackendVertex *dst,
+                          const sLgd3dVertex *src, const ushort *indices, BOOL fan)
+{
+   int i, t, kept = 0;
+   float *xyz;
+   sRenderBackendVertex *out;
+   if (!RenderRTCaptureDraws())
+      return FALSE;
+   if (primitive != kRenderBackendTriangles || count < 3)
+      return TRUE;
+   xyz = (float *)temp_malloc(count * 3 * sizeof(float));
+   out = (sRenderBackendVertex *)temp_malloc(count * sizeof(*out));
+   for (t = 0; t + 2 < count; t += 3) {
+      const sLgd3dVertex *v[3];
+      for (i = 0; i < 3; ++i) {
+         int n = t + i, k;
+         if (indices)
+            k = indices[n];
+         else if (fan)
+            k = (n % 3 == 0) ? 0 : (n / 3) + (n % 3);
+         else
+            k = n;
+         v[i] = &src[k];
+      }
+      if (!v[0]->wvalid || !v[1]->wvalid || !v[2]->wvalid)
+         continue;
+      for (i = 0; i < 3; ++i) {
+         xyz[kept*3] = v[i]->wx; xyz[kept*3+1] = v[i]->wy; xyz[kept*3+2] = v[i]->wz;
+         out[kept] = dst[t + i];
+         ++kept;
+      }
+   }
+   if (kept)
+      RenderRTDrawWorld(primitive, out, xyz, kept);
+   temp_free(out);
+   temp_free(xyz);
+   return TRUE;
+}
+#else
+#define ModernCapture(p, c, d, s, i, f) FALSE
+#endif
+
 static void ModernSubmitList(int primitive, int n, const sLgd3dVertex *src)
 {
    int i;
    sRenderBackendVertex *dst=(sRenderBackendVertex *)temp_malloc(n*sizeof(*dst));
    for(i=0;i<n;++i) ModernConvertVertex(&dst[i],&src[i]);
-   RenderBackendDraw(primitive,dst,n,FALSE);
+   if (!ModernCapture(primitive,n,dst,src,NULL,FALSE))
+      RenderBackendDraw(primitive,dst,n,FALSE);
    temp_free(dst);
 }
 
@@ -617,7 +693,8 @@ static void ModernSubmitFan(int n, const sLgd3dVertex *src)
       ModernConvertVertex(&dst[j++],&src[i-1]);
       ModernConvertVertex(&dst[j++],&src[i]);
    }
-   RenderBackendDraw(kRenderBackendTriangles,dst,count,FALSE);
+   if (!ModernCapture(kRenderBackendTriangles,count,dst,src,NULL,TRUE))
+      RenderBackendDraw(kRenderBackendTriangles,dst,count,FALSE);
    temp_free(dst);
 }
 
@@ -626,7 +703,8 @@ static void ModernSubmitIndexed(int count,const ushort *indices,const sLgd3dVert
    int i;
    sRenderBackendVertex *dst=(sRenderBackendVertex *)temp_malloc(count*sizeof(*dst));
    for(i=0;i<count;++i)ModernConvertVertex(&dst[i],&src[indices[i]]);
-   RenderBackendDraw(kRenderBackendTriangles,dst,count,FALSE);
+   if (!ModernCapture(kRenderBackendTriangles,count,dst,src,indices,FALSE))
+      RenderBackendDraw(kRenderBackendTriangles,dst,count,FALSE);
    temp_free(dst);
 }
 
@@ -696,8 +774,13 @@ static sLgd3dVertex *PolyMalloc(int n)
    sLgd3dVertex *retval;
    int i;
 
-   if (lgd3d_punt_buffer)
-      return (sLgd3dVertex *)temp_malloc(n*sizeof(sLgd3dVertex));
+   if (lgd3d_punt_buffer) {
+      retval = (sLgd3dVertex *)temp_malloc(n*sizeof(sLgd3dVertex));
+#ifdef DARK_RT
+      for (i = 0; i < n; ++i) retval[i].wvalid = 0;
+#endif
+      return retval;
+   }
 
    prim_setup();
 
@@ -724,6 +807,9 @@ static sLgd3dVertex *PolyMalloc(int n)
    num_polys++;
    num_poly_verts += n;
    primitives_pending = TRUE;
+#ifdef DARK_RT
+   for (i = 0; i < n; ++i) retval[i].wvalid = 0;
+#endif
 
    return retval;
 }
@@ -742,7 +828,7 @@ static sLgd3dVertex *PointMalloc(int n)
    sLgd3dVertex *retval;
 
    if (lgd3d_punt_buffer)
-      return (sLgd3dVertex *)temp_malloc(n*sizeof(sLgd3dVertex));
+      return (sLgd3dVertex *)temp_malloc(n*sizeof(sLgd3dVertex));   // points are never captured
 
    prim_setup();
    if (num_points + n > MAX_POINTS)

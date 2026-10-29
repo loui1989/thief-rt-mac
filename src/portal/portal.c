@@ -1652,6 +1652,154 @@ BOOL portal_true_two_pass = TRUE;
 BOOL (*pSkyRenderCallback)(void) = 0;
 BOOL bRenderNewSky = FALSE;
 
+#ifdef DARK_RT
+/* ----- Ray tracer (RTGL1) feeds ----------------------------------------- *\
+
+   The path tracer needs the whole level, not just the cells this view
+   traverses, so the world representation is handed over complete whenever
+   the mission's cells change.  Texture ids are resolved to the backend
+   texture showing for them every frame, which keeps animated textures
+   animated.  The view's own surface drawing is suppressed from capture;
+   objects drawn by the portal renderer are captured by lgd3d.
+
+\* ----------------------------------------------------------------------- */
+#include <render_rt.h>
+extern void *lgd3d_rt_texture_for_bitmap(grs_bitmap *bm);
+extern void objlight_rt_submit(void);
+
+static bool portal_rt_is_sky(int texture_id)
+{
+   return texture_id == 0 ||
+      (texture_id >= BACKHACK_IDX && texture_id < TEXMEM_RESERVED_LIMIT);
+}
+
+static uint32 portal_rt_world_serial(void)
+{
+   uint32 serial = 2166136261u;
+   int i;
+   serial = (serial ^ (uint32)wr_num_cells) * 16777619u;
+   for (i = 0; i < wr_num_cells; ++i) {
+      PortalCell *cell = wr_cell[i];
+      serial = (serial ^ (uint32)(uintptr_t)cell) * 16777619u;
+      if (cell)
+         serial = (serial ^ (uint32)(cell->num_polys | (cell->num_vertices << 8))) * 16777619u;
+   }
+   return serial;
+}
+
+#define PORTAL_RT_MAX_TEXTURE_IDS 65536
+static unsigned char portal_rt_texture_seen[PORTAL_RT_MAX_TEXTURE_IDS];
+static int portal_rt_max_texture_id = -1;
+
+static void portal_rt_submit_world(void)
+{
+   uint32 serial;
+   int c;
+
+   if (wr_num_cells <= 0)
+      return;
+   serial = portal_rt_world_serial();
+   if (RenderRTWorldWanted(serial)) {
+      float xyz[3 * 256], uv[2 * 256];
+      memset(portal_rt_texture_seen, 0, sizeof(portal_rt_texture_seen));
+      portal_rt_max_texture_id = -1;
+      RenderRTWorldBegin(serial);
+      for (c = 0; c < wr_num_cells; ++c) {
+         PortalCell *r = WR_CELL(c);
+         int p, voff = 0;
+         int first_portal;
+         if (!r)
+            continue;
+         first_portal = r->num_polys - r->num_portal_polys;
+         for (p = 0; p < r->num_render_polys; voff += r->poly_list[p].num_vertices, ++p) {
+            PortalPolygonCore *pc = &r->poly_list[p];
+            PortalPolygonRenderInfo *ri = &r->render_list[p];
+            int n = pc->num_vertices, i, flags = 0;
+            const mxs_vector *anchor;
+            r3s_texture tex;
+            mxs_real u_scale = 1.0f, v_scale = 1.0f, u_base, v_base;
+            mxs_real uvdot, u2, v2;
+            if (n < 3 || n > 256)
+               continue;
+            if (portal_rt_is_sky(ri->texture_id))
+               flags |= kRenderRTWorldSky;
+            if (p >= first_portal)
+               flags |= kRenderRTWorldWater;
+            if (pc->flags & RENDER_DOESNT_LIGHT)
+               flags |= kRenderRTWorldFullbright;
+            tex = (flags & kRenderRTWorldSky) ? NULL : portal_get_texture(ri->texture_id);
+            if (tex) {
+               u_scale = (mxs_real)ldexp(1.0, 6 - tex->wlog);
+               v_scale = (mxs_real)ldexp(1.0, 6 - tex->hlog);
+               if (tex->flags & BMF_TRANS)
+                  flags |= kRenderRTWorldTransparent;
+            }
+            u_scale /= portal_worldrep_texture_scale;
+            v_scale /= portal_worldrep_texture_scale;
+            u_base = (portal_wrext_u_base[c] ? portal_wrext_u_base[c][p]
+                                             : ri->u_base / 4096.0f) * u_scale;
+            v_base = (portal_wrext_v_base[c] ? portal_wrext_v_base[c][p]
+                                             : ri->v_base / 4096.0f) * v_scale;
+            anchor = &r->vpool[r->vertex_list[voff + ri->texture_anchor]];
+            uvdot = mx_dot_vec(&ri->tex_u, &ri->tex_v);
+            u2 = mx_mag2_vec(&ri->tex_u);
+            v2 = mx_mag2_vec(&ri->tex_v);
+            for (i = 0; i < n; ++i) {
+               mxs_vector *w = &r->vpool[r->vertex_list[voff + i]];
+               mxs_vector delta;
+               mxs_real du, dv;
+               xyz[i*3] = w->x; xyz[i*3+1] = w->y; xyz[i*3+2] = w->z;
+               mx_sub_vec(&delta, w, (mxs_vector *)anchor);
+               du = mx_dot_vec(&delta, &ri->tex_u);
+               dv = mx_dot_vec(&delta, &ri->tex_v);
+               if (u2 <= 0.0f || v2 <= 0.0f) {
+                  uv[i*2] = uv[i*2+1] = 0.0f;
+               } else if (uvdot == 0.0f) {
+                  uv[i*2]   = du * u_scale / u2 + u_base;
+                  uv[i*2+1] = dv * v_scale / v2 + v_base;
+               } else {
+                  mxs_real denom = 1.0f / (u2*v2 - uvdot*uvdot);
+                  uv[i*2]   = u_base + (v2*v_scale*denom) * du - (u_scale*denom*uvdot) * dv;
+                  uv[i*2+1] = v_base + (u2*u_scale*denom) * dv - (v_scale*denom*uvdot) * du;
+               }
+            }
+            RenderRTWorldPolygon(ri->texture_id, flags, n, xyz, uv);
+            if (!(flags & kRenderRTWorldSky) && ri->texture_id < PORTAL_RT_MAX_TEXTURE_IDS) {
+               portal_rt_texture_seen[ri->texture_id] = 1;
+               if (ri->texture_id > portal_rt_max_texture_id)
+                  portal_rt_max_texture_id = ri->texture_id;
+            }
+         }
+      }
+      RenderRTWorldEnd();
+   }
+
+   // the current frame of every world texture
+   for (c = 0; c <= portal_rt_max_texture_id; ++c) {
+      if (portal_rt_texture_seen[c]) {
+         r3s_texture tex = portal_get_texture(c);
+         RenderRTWorldTexture(c, tex ? lgd3d_rt_texture_for_bitmap(tex) : NULL);
+      }
+   }
+}
+
+static void portal_rt_begin(float zoom)
+{
+   mxs_matrix *slew;
+   float p[3], f[3], l[3], u[3];
+   if (!RenderRTActive())
+      return;
+   slew = r3_get_slew_matrix();
+   p[0] = portal_camera_loc.x; p[1] = portal_camera_loc.y; p[2] = portal_camera_loc.z;
+   f[0] = slew->vec[0].x; f[1] = slew->vec[0].y; f[2] = slew->vec[0].z;
+   l[0] = slew->vec[1].x; l[1] = slew->vec[1].y; l[2] = slew->vec[1].z;
+   u[0] = slew->vec[2].x; u[1] = slew->vec[2].y; u[2] = slew->vec[2].z;
+   RenderRTSceneBegin(p, f, l, u, zoom, grd_bm.w, grd_bm.h);
+   portal_rt_submit_world();
+   objlight_rt_submit();
+}
+#endif
+
 void portal_render_scene(Position *pos, float zoom)
 {  PROF
    Location *loc = &pos->loc;
@@ -1673,6 +1821,9 @@ void portal_render_scene(Position *pos, float zoom)
 
    portal_start_3d(pos);
    r3_set_zoom (zoom);
+#ifdef DARK_RT
+   portal_rt_begin(zoom);
+#endif
 
      // tell the scene clipper to clear its clipinfo
 
@@ -1882,6 +2033,11 @@ cleanup:
 
    g2pt_post_render_polys();
 
+#ifdef DARK_RT
+   {
+      // deferred (translucent) objects, particles and overlays are objects
+      const int rt_suppressed = RenderRTSuppressCapture(0);
+#endif
    if (portal_post_render_cback)
       portal_post_render_cback();
 
@@ -1890,12 +2046,19 @@ cleanup:
 
    if (portal_render_overlays_cback)
       portal_render_overlays_cback();
+#ifdef DARK_RT
+      RenderRTSuppressCapture(rt_suppressed);
+   }
+#endif
 
 #ifndef SHIP
    if (portal_test_blend)
       portal_do_blendtest();
 #endif
 
+#ifdef DARK_RT
+   RenderRTSceneEnd();
+#endif
    portal_end_3d();
 
 #ifndef SHIP

@@ -1,19 +1,35 @@
 #pragma once
 
 #if !defined(_WIN32)
+// System structures keep their native layout although most engine code is
+// built with -fpack-struct=1 (see platform_io.h). Some macOS SDK headers end
+// with "#pragma pack()", which resets to the 1-byte default, so natural
+// packing is re-established after each.
+#pragma pack(push, 8)
 #include <alloca.h>
+#pragma pack(8)
 #include <ctype.h>
+#pragma pack(8)
 #include <fcntl.h>
+#pragma pack(8)
 #include <stdio.h>
+#pragma pack(8)
 #include <stdlib.h>
+#pragma pack(8)
 #include <sys/stat.h>
+#pragma pack(8)
 #include <string.h>
+#pragma pack(8)
 #include <strings.h>
+#pragma pack(8)
 #include <math.h>
+#pragma pack(8)
 #include <limits.h>
+#pragma pack(8)
 #define link dark_posix_link
 #include <unistd.h>
 #undef link
+#pragma pack(pop)
 
 #define _alloca alloca
 #define _snprintf snprintf

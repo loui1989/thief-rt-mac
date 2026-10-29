@@ -19,9 +19,11 @@
 #endif
 #include <stdio.h>
 
+#pragma pack(push, 8)
 #include <condition_variable>
 #include <mutex>
 #include <thread>
+#pragma pack(pop)
 
 #include <lgassert.h>
 
@@ -66,6 +68,11 @@ enum {
 class cSndSample;
 class cSndGroupVolumeFadeTask;
 class cMixerThread;
+
+// The mixer and its thread hold std::mutex/condition_variable members, which
+// must keep their natural alignment (macOS's pthread functions reject a
+// misaligned mutex with EINVAL). These classes are never stored on disk.
+#pragma pack(push, 8)
 
 const int kFadeGranularity = 33;
 
@@ -290,6 +297,7 @@ private:
    bool mReplyReady;
    bool mReplySucceeded;
 };
+#pragma pack(pop)
 
 
 //-------------------------------------------------------------------------------
