@@ -1,0 +1,73 @@
+AGENTS.md
+# Prerequisites
+*.d
+
+# Compiled Object files
+*.slo
+*.lo
+*.o
+*.obj
+
+# Precompiled Headers
+*.gch
+*.pch
+
+# Compiled Dynamic libraries
+*.so
+*.dylib
+*.dll
+
+# Fortran module files
+*.mod
+*.smod
+
+# Compiled Static libraries
+*.lai
+*.la
+*.a
+*.lib
+
+# Executables
+*.exe
+*.out
+*.app
+
+
+# MacOS
+.DS_Store
+
+# Visual Studio
+.vs
+.vscode
+Debug
+Release
+*.log
+*.tlog
+*.pdb
+*.rsp
+*.map
+*.zip
+*.dmp
+*.stackdump
+screen*.pcx
+ReleaseGame/
+.codex-build/
+build/
+.gradle/
+local.properties
+
+# Optional local source checkouts; keep external dependencies out of the
+# repository.
+/3rdparty/squirrel/
+/3rdparty/kctools/
+
+# Local game state and diagnostics. Retail Thief 2 data is never part of this
+# repository.
+cam.cfg
+user.bnd
+user2.bnd
+loc_hist.hst
+thief-console.log
+script-debug.log
+
+redist
