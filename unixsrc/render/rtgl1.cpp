@@ -86,6 +86,7 @@ struct Settings {
                               // 1 one bounce, 2 two bounces, 3 one bounce at half rate
    bool volumetric = false;   // haze lit by every light
    int dynres = 0;            // dynamic resolution's target fps, 0 off
+   int maxLights = 64;        // lights given to the path tracer, nearest first; 0 all
    float waterAlpha = 0.55f;
    float scale = 0.5f;      // render scale for upscale modes 0 and 5
    bool fps = false;
@@ -137,6 +138,7 @@ void load_settings()
       else if (k == "gi") g_cfg.gi = std::clamp(int(value), 0, 3);
       else if (k == "volumetric") g_cfg.volumetric = value != 0;
       else if (k == "dynres") g_cfg.dynres = std::clamp(int(value), 0, 240);
+      else if (k == "max_lights") g_cfg.maxLights = std::clamp(int(value), 0, 4096);
    }
    fclose(f);
 }
@@ -152,10 +154,10 @@ void save_settings()
       return;
    fprintf(f, "upscale = %d\nscale = %.2f\nfps = %d\nvsync = %d\nlight = %.3f\nsky = %.3f\n"
               "light_size = %.3f\nglow = %.3f\nwater = %d\nsprite_glow = %.3f\ngi = %d\n"
-              "volumetric = %d\ndynres = %d\n",
+              "volumetric = %d\ndynres = %d\nmax_lights = %d\n",
            g_cfg.upscale, g_cfg.scale, int(g_cfg.fps), int(g_cfg.vsync), g_cfg.light, g_cfg.sky,
            g_cfg.lightSize, g_cfg.glow, g_cfg.water, g_cfg.spriteGlow, g_cfg.gi,
-           int(g_cfg.volumetric), g_cfg.dynres);
+           int(g_cfg.volumetric), g_cfg.dynres, g_cfg.maxLights);
    fclose(f);
 }
 
@@ -289,6 +291,13 @@ bool g_inScene = false;
 bool g_suppress = true;
 bool g_cameraUploaded = false;
 bool g_vsync = true;
+struct PendingLight {
+   uint32_t id;
+   float pos[3], rgb[3], dir[3];
+   float radius, inner, outer, peak, score = 0;
+};
+std::vector<PendingLight> g_pendingLights;
+uint32_t g_lightsTotal = 0, g_frameLightsShown = 0;
 bool g_underwater = false;
 int g_drawableW = 1, g_drawableH = 1;
 uint32_t g_framePrims = 0, g_frameDropped = 0, g_frameLights = 0;
@@ -339,6 +348,7 @@ uint32_t pack_color(float r, float g, float b, float a)
 }
 
 void render_size(int &w, int &h);
+void flush_lights();
 bool metalfx_denoiser_available()
 {
    return rt.rgUtilGetSupportedFeatures &&
@@ -440,8 +450,10 @@ void start_frame()
                  rt.rgUtilGetResultDescription ? rt.rgUtilGetResultDescription(r) : "?");
    }
    g_cameraUploaded = false;
+   g_frameLightsShown = g_frameLights;
    g_framePrims = g_frameDropped = g_frameLights = 0;
    g_lightPositions.clear();
+   g_pendingLights.clear();
    g_primitiveCounters.clear();
 }
 
@@ -1098,13 +1110,13 @@ const char *kUpscaleNames[] = {"Off",
                                "MetalFX Custom"};
 
 enum UiRow {
-   kRowUpscale, kRowScale, kRowDynres, kRowBounces, kRowVolumetric, kRowVsync,
+   kRowUpscale, kRowScale, kRowDynres, kRowBounces, kRowLights, kRowVolumetric, kRowVsync,
    kRowFps, kRowLight, kRowSky, kRowLightSize, kRowGlow, kRowWater,
    kRowInspect, kRowReset, kRowCount
 };
 
 const char *kRowLabels[kRowCount] = {
-   "Upscaler", "Render resolution", "Dynamic resolution", "Bounce light",
+   "Upscaler", "Render resolution", "Dynamic resolution", "Bounce light", "Lights traced",
    "Volumetric light", "VSync", "FPS counter", "Light brightness", "Sky brightness",
    "Light size (soft shadows)", "Lamp glow", "Water",
    "Inspect centre of view", "Reset to defaults",
@@ -1132,6 +1144,10 @@ std::string row_value(int row)
       return buf;
    case kRowBounces:
       return g_cfg.gi == 0 ? "2, half rate" : g_cfg.gi == 1 ? "1" : g_cfg.gi == 2 ? "2" : "1, half rate";
+   case kRowLights:
+      if (g_cfg.maxLights <= 0) return "All";
+      snprintf(buf, sizeof(buf), "nearest %d", g_cfg.maxLights);
+      return buf;
    case kRowVolumetric: return g_cfg.volumetric ? "On" : "Off";
    case kRowVsync: return g_cfg.vsync ? "On" : "Off";
    case kRowFps: return g_cfg.fps ? "On" : "Off";
@@ -1192,6 +1208,15 @@ void change_row(int row, int dir)
       break;
    }
    case kRowBounces: g_cfg.gi = (g_cfg.gi + dir + 4) % 4; break;
+   case kRowLights: {
+      static const int kSteps[] = {16, 32, 48, 64, 96, 128, 256, 0};
+      const int n = int(sizeof(kSteps) / sizeof(kSteps[0]));
+      int i = 0;
+      while (i < n - 1 && kSteps[i] != g_cfg.maxLights)
+         ++i;
+      g_cfg.maxLights = kSteps[(i + dir + n) % n];
+      break;
+   }
    case kRowVolumetric: g_cfg.volumetric = !g_cfg.volumetric; break;
    case kRowVsync: g_cfg.vsync = !g_cfg.vsync; break;
    case kRowFps: g_cfg.fps = !g_cfg.fps; break;
@@ -1280,8 +1305,8 @@ void draw_ui(bool scene)
                   g_ui.fps, g_ui.frameMs, g_ui.worstMs, w, h, g_drawableW, g_drawableH);
       // waiting in rgStartFrame is the GPU still busy with earlier frames
       const double game = std::max(0.0, g_ui.frameMs - g_ui.waitMs - g_ui.drawMs);
-      snprintf(line2, sizeof(line2), "game %4.1f ms   rt submit %4.1f ms   gpu wait %4.1f ms",
-               game, g_ui.drawMs, g_ui.waitMs);
+      snprintf(line2, sizeof(line2), "game %4.1f ms   rt submit %4.1f ms   gpu wait %4.1f ms   lights %u/%u",
+               game, g_ui.drawMs, g_ui.waitMs, g_frameLightsShown, g_lightsTotal);
       const float s = std::round(px * 0.8f);
       const float tw = std::max(text_width(s, line), text_width(s, line2));
       panel(0, 0, tw + 2 * pad, 2 * s + pad * 1.5f, 0.6f);
@@ -1866,6 +1891,7 @@ void RenderRTSceneEnd(void)
 {
    if (!g_active || !g_inScene)
       return;
+   flush_lights();
    upload_world();
    upload_objects();
    ++g_frameNumber;
@@ -2128,31 +2154,50 @@ void RenderRTLight(uint32_t id, const float pos[3], const float rgb[3], float ra
    const float peak = std::max({rgb[0], rgb[1], rgb[2]});
    if (peak <= 0.5f)
       return;
-   const uint32_t color = pack_color(rgb[0] / peak, rgb[1] / peak, rgb[2] / peak, 1);
+   g_lightPositions.push_back(to_rt(pos));
+   PendingLight l;
+   l.id = id;
+   memcpy(l.pos, pos, sizeof(l.pos));
+   memcpy(l.rgb, rgb, sizeof(l.rgb));
+   memcpy(l.dir, dir, sizeof(l.dir));
+   l.radius = radius;
+   l.inner = inner;
+   l.outer = outer;
+   l.peak = peak;
+   g_pendingLights.push_back(l);
+}
+
+} // extern "C"
+
+namespace {
+
+void upload_light(const PendingLight &L)
+{
+   const float peak = L.peak;
+   const uint32_t color = pack_color(L.rgb[0] / peak, L.rgb[1] / peak, L.rgb[2] / peak, 1);
    // Dark's brightness is a light level (0..255 at the source, falling off
    // with distance); RTGL1's intensity is luminous flux. Calibrated by eye.
    // Dark falls off as 1/distance up to the light's radius, RTGL1 as
    // 1/distance^2; a larger source and a lower flux keep the nearby walls
    // from burning out while the far side of a room still receives light.
-   float lumens = peak * 4.0f * g_cfg.light;
-   g_lightPositions.push_back(to_rt(pos));
-   (void)radius;
+   const float lumens = peak * 4.0f * g_cfg.light;
+   const float *dir = L.dir;
    RgLightSphericalEXT sphere{};
    RgLightSpotEXT spot{};
    void *ext;
-   if (inner >= 0.0f && (dir[0] != 0 || dir[1] != 0 || dir[2] != 0)) {
+   if (L.inner >= 0.0f && (dir[0] != 0 || dir[1] != 0 || dir[2] != 0)) {
       const float l = std::sqrt(dir[0] * dir[0] + dir[1] * dir[1] + dir[2] * dir[2]);
       spot = RgLightSpotEXT{
          .sType = RG_STRUCTURE_TYPE_LIGHT_SPOT_EXT,
          .pNext = nullptr,
          .color = color,
          .intensity = lumens,
-         .position = to_rt(pos),
+         .position = to_rt(L.pos),
          .direction = {{dir[0] / l, dir[1] / l, dir[2] / l}},
          .radius = g_cfg.lightSize,
          // Dark stores the cone as cosines
-         .angleOuter = std::acos(std::clamp(outer, -1.0f, 1.0f)),
-         .angleInner = std::acos(std::clamp(inner, -1.0f, 1.0f)),
+         .angleOuter = std::acos(std::clamp(L.outer, -1.0f, 1.0f)),
+         .angleInner = std::acos(std::clamp(L.inner, -1.0f, 1.0f)),
       };
       ext = &spot;
    } else {
@@ -2161,7 +2206,7 @@ void RenderRTLight(uint32_t id, const float pos[3], const float rgb[3], float ra
          .pNext = nullptr,
          .color = color,
          .intensity = lumens,
-         .position = to_rt(pos),
+         .position = to_rt(L.pos),
          .radius = g_cfg.lightSize,
       };
       ext = &sphere;
@@ -2169,12 +2214,59 @@ void RenderRTLight(uint32_t id, const float pos[3], const float rgb[3], float ra
    auto info = RgLightInfo{
       .sType = RG_STRUCTURE_TYPE_LIGHT_INFO,
       .pNext = ext,
-      .uniqueID = 0x400000000ull + id,
+      .uniqueID = 0x400000000ull + L.id,
       .isExportable = false,
    };
    if (rt.rgUploadLight(&info) == RG_RESULT_SUCCESS)
       ++g_frameLights;
 }
+
+// RTGL1 picks each pixel's candidate lights uniformly from ALL the lights it
+// is given (this build has no light grid). A Thief mission has hundreds, so
+// nearly every candidate was a far-away light: the lamp next to you was
+// rarely tried -- splotchy, unstable light that changed with where you stood.
+// Only the lights that matter near the camera are given to it: ranked by
+// brightness over distance squared, a light chosen last frame favoured so the
+// set does not flicker between frames.
+void flush_lights()
+{
+   g_lightsTotal = uint32_t(g_pendingLights.size());
+   const RgFloat3D cam = to_rt(g_camera.pos);
+   const size_t keep = g_cfg.maxLights > 0 ? size_t(g_cfg.maxLights) : g_pendingLights.size();
+   static std::unordered_map<uint32_t, uint32_t> s_chosen;   // id -> frame last chosen
+   static uint32_t s_frame = 0;
+   ++s_frame;
+   if (g_pendingLights.size() > keep) {
+      for (PendingLight &L : g_pendingLights) {
+         const RgFloat3D p = to_rt(L.pos);
+         const float dx = p.data[0] - cam.data[0], dy = p.data[1] - cam.data[1],
+                     dz = p.data[2] - cam.data[2];
+         const float d = std::sqrt(dx * dx + dy * dy + dz * dz);
+         float score = L.peak / std::max(d * d, 9.0f);
+         // a light whose reach (Dark's radius) ends well before the camera
+         const float reach = L.radius * kMetersPerUnit;
+         if (L.radius > 0 && d > reach + 15.0f)
+            score *= 0.05f;
+         auto it = s_chosen.find(L.id);
+         if (it != s_chosen.end() && it->second + 1 == s_frame)
+            score *= 1.5f;
+         L.score = score;
+      }
+      std::nth_element(g_pendingLights.begin(), g_pendingLights.begin() + keep,
+                       g_pendingLights.end(),
+                       [](const PendingLight &a, const PendingLight &b) { return a.score > b.score; });
+      g_pendingLights.resize(keep);
+   }
+   for (const PendingLight &L : g_pendingLights) {
+      upload_light(L);
+      s_chosen[L.id] = s_frame;
+   }
+   g_pendingLights.clear();
+}
+
+} // namespace
+
+extern "C" {
 
 } // extern "C"
 #pragma pack(pop)
