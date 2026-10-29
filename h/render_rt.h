@@ -61,11 +61,24 @@ void RenderRTDrawWorld(int primitive, const sRenderBackendVertex *vertices,
 // seen unchanged in consecutive frames is kept, and drawn while out of view
 // (as long as RenderRTGameObjectPresent says it is still where it was), so
 // lamps, furniture and doors keep casting shadows whatever the camera sees.
-void RenderRTObjectBegin(uint32_t obj);
+// whole: the object is drawn in full, unclipped by the view (a second draw in
+// the same frame, for another cell it reaches into, adds nothing).
+void RenderRTObjectBegin(uint32_t obj, int whole);
 void RenderRTObjectEnd(void);
+// Nonzero if an object that was not drawn this frame should be drawn for the
+// ray tracer: it is not kept from an earlier frame, or it has moved since.
+int RenderRTObjectWanted(uint32_t obj);
 // Implemented by the game: nonzero, with its position and facing, if the
 // object still exists in the world (not destroyed, picked up or contained).
 int RenderRTGameObjectPose(uint32_t obj, float pose[6]);
+// Implemented by the game, called before RenderRTSceneEnd: draws the objects
+// near the camera the view did not (RenderRTObjectWanted decides which).
+void RenderRTGameDrawExtraObjects(void);
+// Implemented by the game: the object's name, for the inspector.
+void RenderRTGameObjectName(uint32_t obj, char *buf, int size);
+
+// Nonzero while the camera is under water.
+void RenderRTCameraMedium(int underwater);
 
 // World representation. Returns nonzero if geometry for this serial must be
 // (re)submitted between RenderRTWorldBegin and RenderRTWorldEnd.

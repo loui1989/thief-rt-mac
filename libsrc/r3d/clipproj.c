@@ -23,6 +23,8 @@
 
 extern float r3d_fast_z;
 
+extern int r3d_rt_noclip;
+extern void r3_rt_zero_codes(int n, r3s_point *src);
 void r3_projectspace_code_points(int n, r3s_point *src)
 {
    uchar *cur, *last;
@@ -31,6 +33,7 @@ void r3_projectspace_code_points(int n, r3s_point *src)
    fix h = fix_make(cur_canv->bm.h,0);
 
    TEST_IN_BLOCK("r3_projectspace_code_points");
+   if (r3d_rt_noclip) { r3_rt_zero_codes(n, src); return; }
 
    cur = (uchar *)src;
    last = cur + n * r3d_glob.cur_stride;

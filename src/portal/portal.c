@@ -1665,6 +1665,8 @@ BOOL bRenderNewSky = FALSE;
 \* ----------------------------------------------------------------------- */
 #include <render_rt.h>
 extern void *lgd3d_rt_texture_for_bitmap(grs_bitmap *bm);
+extern void *portal_rt_water_texture(r3s_texture tex);
+extern float hw_water_tex_scale;
 extern void objlight_rt_submit(void);
 
 static bool portal_rt_is_sky(int texture_id)
@@ -1763,9 +1765,14 @@ static void portal_rt_submit_world(void)
                   uv[i*2+1] = v_base + (u2*u_scale*denom) * dv - (v_scale*denom*uvdot) * du;
                }
             }
+            if (flags & kRenderRTWorldWater)
+               for (i = 0; i < 2 * n; ++i)
+                  uv[i] *= hw_water_tex_scale;   // as ptdrawhw.c draws water
             RenderRTWorldPolygon(ri->texture_id, flags, n, xyz, uv);
             if (!(flags & kRenderRTWorldSky) && ri->texture_id < PORTAL_RT_MAX_TEXTURE_IDS) {
-               portal_rt_texture_seen[ri->texture_id] = 1;
+               // 2: a water surface, drawn through its medium's palette
+               portal_rt_texture_seen[ri->texture_id] =
+                  (flags & kRenderRTWorldWater) ? 2 : 1;
                if (ri->texture_id > portal_rt_max_texture_id)
                   portal_rt_max_texture_id = ri->texture_id;
             }
@@ -1778,12 +1785,17 @@ static void portal_rt_submit_world(void)
    for (c = 0; c <= portal_rt_max_texture_id; ++c) {
       if (portal_rt_texture_seen[c]) {
          r3s_texture tex = portal_get_texture(c);
-         RenderRTWorldTexture(c, tex ? lgd3d_rt_texture_for_bitmap(tex) : NULL);
+         void *handle = NULL;
+         if (tex && portal_rt_texture_seen[c] == 2)
+            handle = portal_rt_water_texture(tex);
+         if (tex && !handle)
+            handle = lgd3d_rt_texture_for_bitmap(tex);
+         RenderRTWorldTexture(c, handle);
       }
    }
 }
 
-static void portal_rt_begin(float zoom)
+static void portal_rt_begin(float zoom, int cell)
 {
    mxs_matrix *slew;
    float p[3], f[3], l[3], u[3];
@@ -1795,6 +1807,9 @@ static void portal_rt_begin(float zoom)
    l[0] = slew->vec[1].x; l[1] = slew->vec[1].y; l[2] = slew->vec[1].z;
    u[0] = slew->vec[2].x; u[1] = slew->vec[2].y; u[2] = slew->vec[2].z;
    RenderRTSceneBegin(p, f, l, u, zoom, grd_bm.w, grd_bm.h);
+   // MEDIA_WATER (engfeat/media.h) is 2
+   RenderRTCameraMedium(cell >= 0 && cell < wr_num_cells && WR_CELL(cell) &&
+                        WR_CELL(cell)->medium == 2);
    portal_rt_submit_world();
    objlight_rt_submit();
 }
@@ -1822,7 +1837,7 @@ void portal_render_scene(Position *pos, float zoom)
    portal_start_3d(pos);
    r3_set_zoom (zoom);
 #ifdef DARK_RT
-   portal_rt_begin(zoom);
+   portal_rt_begin(zoom, cell);
 #endif
 
      // tell the scene clipper to clear its clipinfo
@@ -2057,6 +2072,12 @@ cleanup:
 #endif
 
 #ifdef DARK_RT
+   {
+      // nearby objects out of view: their shadows and the light they block
+      const int rt_suppressed = RenderRTSuppressCapture(0);
+      RenderRTGameDrawExtraObjects();
+      RenderRTSuppressCapture(rt_suppressed);
+   }
    RenderRTSceneEnd();
 #endif
    portal_end_3d();

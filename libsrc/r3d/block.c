@@ -20,6 +20,18 @@ int r3d_rt_c2w_valid = 0;
 // 65536 * z camera units (screen sx = x * w + x_off, in 16.16 fixed point):
 // lets lgd3d's screen-space sprites be placed in the world.
 int r3d_rt_project_space = 0;
+// Nonzero while the ray tracer captures a whole object: every point is coded
+// as inside the view, so nothing of it is clipped or culled by the frustum
+// (lgd3d never rasterizes captured triangles; their world positions come
+// from camera space, which stays valid behind the camera too).
+int r3d_rt_noclip = 0;
+
+void r3_rt_zero_codes(int n, r3s_point *src)
+{
+   uchar *cur = (uchar *)src, *last = cur + n * r3d_glob.cur_stride;
+   for (; cur < last; cur += r3d_glob.cur_stride)
+      ((r3s_point *)cur)->ccodes = 0;
+}
 
 void _r3_rt_update_c2w(void)
 {

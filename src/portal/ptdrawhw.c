@@ -27,6 +27,7 @@
 #include <memall.h>
 #ifdef DARK_RT
 #include <render_rt.h>
+#include <render_backend.h>
 #endif
 #include <dbmem.h>   // must be last header! 
 
@@ -226,6 +227,66 @@ static void init_water_pal(water_info *info, ushort alpha, ushort argb, uchar *p
 
 ushort pt_default_water_texture_flags = BMF_TRANS;
 
+#ifdef DARK_RT
+// The ray tracer's copy of a water texture. Water textures are drawn through
+// their medium's alpha palette (and their bitmap's align is taken over as the
+// index of that palette), so the ordinary texture of the same bitmap has the
+// wrong colours and no translucency.
+#define PT_RT_WATER_CACHE 64
+static struct { r3s_texture bm; ushort *pal; void *handle; } pt_rt_water[PT_RT_WATER_CACHE];
+static int pt_rt_water_n = 0, pt_rt_water_next = 0;
+
+static void pt_rt_water_flush(void)
+{
+   int i;
+   for (i = 0; i < pt_rt_water_n; ++i)
+      if (pt_rt_water[i].handle)
+         RenderBackendDestroyTexture(pt_rt_water[i].handle);
+   pt_rt_water_n = pt_rt_water_next = 0;
+}
+
+void *portal_rt_water_texture(r3s_texture tex)
+{
+   ushort *pal;
+   uchar *rgba;
+   int i, x, y, slot;
+   void *handle;
+   if (!tex || tex->type != BMT_FLAT8 || !tex->bits || tex->w <= 0 || tex->h <= 0 ||
+       !water_info_list || num_water_textures <= 0)
+      return NULL;
+   pal = water_info_list[tex->align < num_water_textures ? tex->align : 0].pal;
+   if (!pal)
+      return NULL;
+   for (i = 0; i < pt_rt_water_n; ++i)
+      if (pt_rt_water[i].bm == tex && pt_rt_water[i].pal == pal)
+         return pt_rt_water[i].handle;
+   rgba = (uchar *)Malloc(tex->w * tex->h * 4);
+   for (y = 0; y < tex->h; ++y)
+      for (x = 0; x < tex->w; ++x) {
+         ushort p = pal[tex->bits[y * tex->row + x]];
+         uchar *d = rgba + (y * tex->w + x) * 4;
+         d[0] = (uchar)(((p >> 8) & 15) * 17);
+         d[1] = (uchar)(((p >> 4) & 15) * 17);
+         d[2] = (uchar)((p & 15) * 17);
+         d[3] = (uchar)(((p >> 12) & 15) * 17);
+      }
+   handle = RenderBackendCreateTexture(tex->w, tex->h, rgba, tex->w * 4);
+   Free(rgba);
+   if (pt_rt_water_n < PT_RT_WATER_CACHE) {
+      slot = pt_rt_water_n++;
+   } else {
+      slot = pt_rt_water_next;
+      pt_rt_water_next = (pt_rt_water_next + 1) % PT_RT_WATER_CACHE;
+      if (pt_rt_water[slot].handle)
+         RenderBackendDestroyTexture(pt_rt_water[slot].handle);
+   }
+   pt_rt_water[slot].bm = tex;
+   pt_rt_water[slot].pal = pal;
+   pt_rt_water[slot].handle = handle;
+   return handle;
+}
+#endif
+
 /////////////////////////////////////////////////////////////////////////////
 // Setup water hack. Must be called before water can be rendered in hardware.
 // num_textures = number of water textures;
@@ -242,6 +303,9 @@ void portal_setup_water_hack(int num_textures, r3s_texture *tex_list, float *alp
 {
    int i;
 
+#ifdef DARK_RT
+   pt_rt_water_flush();
+#endif
    if (water_info_list != NULL) {
       for (i=0; i<num_water_textures; i++) {
          water_info *info = &water_info_list[i];

@@ -1037,6 +1037,44 @@ static void do_quad_light(r3s_point *p, float r, grs_bitmap *bm)
    sLgd3dVertex *vl;
    uint32 c;
 
+#ifdef DARK_RT
+   // A camera-facing sprite (a light's glow, a particle) for the ray tracer:
+   // the whole quad, uncropped by the screen, placed in the world from the
+   // centre point and the sprite's size on screen.
+   if (g_RenderRTCaptureVertices && r3d_rt_project_space) {
+      static const float qx[4] = {-1, 1, 1, -1}, qy[4] = {-1, -1, 1, 1};
+      int i;
+      const float k = 65536.0f * (float)p->p.z;
+      if (p->p.z <= 0.0f)
+         return;
+      c = get_color()|0xff000000;
+      gr_set_fill_type(FILL_BLEND);
+      lgd3d_set_alpha_pal(hack_light_alpha_pal);
+      lgd3d_set_texture(bm);
+      vl = PolyMalloc(4);
+      for (i = 0; i < 4; ++i) {
+         mxs_vector c3;
+         vl[i].tu = qx[i] < 0 ? 0.0f : 1.0f;
+         vl[i].tv = qy[i] < 0 ? 0.0f : 1.0f;
+         vl[i].sx = x + qx[i] * r;
+         vl[i].sy = y + qy[i] * r;
+         vl[i].color = c;
+         vl[i].specular = fog_specular;
+         setz(&vl[i], p->p.z, p->grp.w);
+         c3.x = p->p.x + qx[i] * r * k;
+         c3.y = p->p.y + qy[i] * r * k;
+         c3.z = p->p.z;
+         rt_set_world(&vl[i], &c3);
+      }
+      g_RenderRTEmissiveSprite = 1;
+      PolyFree(4, vl);
+      flush_polys();
+      g_RenderRTEmissiveSprite = 0;
+      gr_set_fill_type(FILL_NORM);
+      return;
+   }
+#endif
+
    if ((x+r < lgd3d_clip.left) || (x-r > lgd3d_clip.right) ||
        (y+r < lgd3d_clip.top) || (y-r > lgd3d_clip.bot))
       return;
@@ -1098,26 +1136,6 @@ static void do_quad_light(r3s_point *p, float r, grs_bitmap *bm)
    vl[3].specular = fog_specular;
    setz(&vl[3], p->p.z, p->grp.w);
 
-#ifdef DARK_RT
-   // A camera-facing sprite (a light's glow, a particle): place its corners in
-   // the world from the centre point and the sprite's size on screen.
-   if (g_RenderRTCaptureVertices && r3d_rt_project_space) {
-      int i;
-      const float k = 65536.0f * (float)p->p.z;
-      for (i = 0; i < 4; ++i) {
-         mxs_vector c3;
-         c3.x = p->p.x + (vl[i].sx - x) * k;
-         c3.y = p->p.y + (vl[i].sy - y) * k;
-         c3.z = p->p.z;
-         rt_set_world(&vl[i], &c3);
-      }
-      g_RenderRTEmissiveSprite = 1;
-      PolyFree(4, vl);
-      flush_polys();
-      g_RenderRTEmissiveSprite = 0;
-   }
-   else
-#endif
    PolyFree(4, vl);
 
    gr_set_fill_type(FILL_NORM);

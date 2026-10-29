@@ -79,8 +79,13 @@ struct Settings {
    int upscale = 3;
    float light = 1.0f;
    float sky = 1.0f;
-   float glow = 1.0f;
-   int water = 0;
+   float glow = 1.0f;         // light fixtures
+   float spriteGlow = 0.35f;  // glow and particle sprites
+   int water = 0;             // 0 translucent (as the game), 1 RTGL1 water, 2 opaque
+   int bounces = 1;           // indirect light: 0 half rate, 1, 2
+   bool volumetric = false;   // haze lit by every light
+   int denoiser = 0;          // 0 RTGL1's, 1 MetalFX denoising upscaler
+   int dynres = 0;            // dynamic resolution's target fps, 0 off
    float waterAlpha = 0.55f;
    float scale = 0.5f;      // render scale for upscale modes 0 and 5
    bool fps = false;
@@ -127,7 +132,12 @@ void load_settings()
       else if (k == "sky") g_cfg.sky = std::clamp(value, 0.0f, 20.0f);
       else if (k == "light_size") g_cfg.lightSize = std::clamp(value, 0.02f, 2.0f);
       else if (k == "glow") g_cfg.glow = std::clamp(value, 0.0f, 10.0f);
-      else if (k == "water") g_cfg.water = value != 0 ? 1 : 0;
+      else if (k == "water") g_cfg.water = std::clamp(int(value), 0, 2);
+      else if (k == "sprite_glow") g_cfg.spriteGlow = std::clamp(value, 0.0f, 10.0f);
+      else if (k == "bounces") g_cfg.bounces = std::clamp(int(value), 0, 2);
+      else if (k == "volumetric") g_cfg.volumetric = value != 0;
+      else if (k == "denoiser") g_cfg.denoiser = std::clamp(int(value), 0, 1);
+      else if (k == "dynres") g_cfg.dynres = std::clamp(int(value), 0, 240);
    }
    fclose(f);
 }
@@ -142,9 +152,11 @@ void save_settings()
    if (!f)
       return;
    fprintf(f, "upscale = %d\nscale = %.2f\nfps = %d\nvsync = %d\nlight = %.3f\nsky = %.3f\n"
-              "light_size = %.3f\nglow = %.3f\nwater = %d\n",
+              "light_size = %.3f\nglow = %.3f\nwater = %d\nsprite_glow = %.3f\nbounces = %d\n"
+              "volumetric = %d\ndenoiser = %d\ndynres = %d\n",
            g_cfg.upscale, g_cfg.scale, int(g_cfg.fps), int(g_cfg.vsync), g_cfg.light, g_cfg.sky,
-           g_cfg.lightSize, g_cfg.glow, g_cfg.water);
+           g_cfg.lightSize, g_cfg.glow, g_cfg.water, g_cfg.spriteGlow, g_cfg.bounces,
+           int(g_cfg.volumetric), g_cfg.denoiser, g_cfg.dynres);
    fclose(f);
 }
 
@@ -157,6 +169,11 @@ struct Ui {
    double windowStart = 0, lastPresent = 0;
    int windowFrames = 0;
    double fps = 0, frameMs = 0, worstMs = 0, windowWorst = 0;
+   // where a frame's time goes, averaged over the same window: the game's own
+   // work, waiting in rgStartFrame for the GPU, submitting in rgDrawFrame
+   double waitSum = 0, drawSum = 0, waitMs = 0, drawMs = 0;
+   std::string status;        // a line shown in the panel for a while
+   double statusUntil = 0;
 } g_ui;
 
 // ---- textures ----------------------------------------------------------
@@ -268,6 +285,7 @@ bool g_inScene = false;
 bool g_suppress = true;
 bool g_cameraUploaded = false;
 bool g_vsync = true;
+bool g_underwater = false;
 int g_drawableW = 1, g_drawableH = 1;
 uint32_t g_framePrims = 0, g_frameDropped = 0, g_frameLights = 0;
 // this frame's light positions (meters), for making light fixtures glow
@@ -316,6 +334,13 @@ uint32_t pack_color(float r, float g, float b, float a)
    return c(r) | (c(g) << 8) | (c(b) << 16) | (c(a) << 24);
 }
 
+void render_size(int &w, int &h);
+bool metalfx_denoiser_available()
+{
+   return rt.rgUtilGetSupportedFeatures &&
+          (rt.rgUtilGetSupportedFeatures() & RG_FEATURE_METALFX_DENOISER) != 0;
+}
+
 void start_frame()
 {
    if (g_frameStarted || !g_active)
@@ -338,13 +363,46 @@ void start_frame()
    const float scale = std::clamp(g_cfg.scale, g_cfg.upscale == 5 ? 0.34f : 0.25f, 1.0f);
    const RgExtent2D custom{uint32_t(std::max(1, int(g_drawableW * scale))),
                            uint32_t(std::max(1, int(g_drawableH * scale)))};
-   if (g_cfg.upscale >= 1 && g_cfg.upscale <= 5) {
+   resolution.frameGeneration = RG_FRAME_GENERATION_MODE_OFF;
+   resolution.denoiser = RG_DENOISER_DEFAULT;
+   const bool metalfx = g_cfg.upscale >= 1 && g_cfg.upscale <= 5;
+   const bool mfxDenoiser = metalfx && g_cfg.denoiser == 1 && metalfx_denoiser_available();
+   // Dynamic resolution (the Metal backend reads RTGL1_DYNRES_* every frame):
+   // the size asked for here is the largest; each frame's follows the GPU time.
+   // Not with the MetalFX denoiser, which needs a fixed size.
+   const bool dyn = g_cfg.dynres > 0 && !mfxDenoiser;
+   {
+      static int s_fps = -1;
+      const int fps = dyn ? std::clamp(g_cfg.dynres, 20, 240) : 0;
+      if (fps != s_fps) {
+         s_fps = fps;
+         if (fps) {
+            char v[16];
+            snprintf(v, sizeof(v), "%d", fps);
+            setenv("RTGL1_DYNRES_FPS", v, 1);
+            setenv("RTGL1_DYNRES_MIN", "0.3", 1);
+         } else {
+            unsetenv("RTGL1_DYNRES_FPS");
+         }
+      }
+   }
+   int maxW, maxH;
+   render_size(maxW, maxH);
+   if (metalfx) {
       // on Metal the AMD FSR2 slot is the MetalFX temporal scaler
       resolution.upscaleTechnique = RG_RENDER_UPSCALE_TECHNIQUE_AMD_FSR2;
       resolution.sharpenTechnique = RG_RENDER_SHARPEN_TECHNIQUE_AMD_CAS;
       if (g_cfg.upscale == 5) {
          resolution.resolutionMode = RG_RENDER_RESOLUTION_MODE_CUSTOM;
          resolution.customRenderSize = custom;
+      }
+      if (mfxDenoiser) {
+         resolution.denoiser = RG_DENOISER_METALFX;
+         resolution.rayReconstruction = 1;
+      }
+      if (dyn) {
+         resolution.resolutionMode = RG_RENDER_RESOLUTION_MODE_CUSTOM;
+         resolution.customRenderSize = {uint32_t(maxW), uint32_t(maxH)};
       }
    } else {
       resolution.upscaleTechnique = RG_RENDER_UPSCALE_TECHNIQUE_LINEAR;
@@ -366,7 +424,9 @@ void start_frame()
       .pResultStaticSceneStatus = nullptr,
       .staticSceneAnimationTime = 0,
    };
+   const double t0 = now_seconds();
    RgResult r = rt.rgStartFrame(&info);
+   g_ui.waitSum += now_seconds() - t0;
    g_frameStarted = r == RG_RESULT_SUCCESS;
    if (!g_frameStarted) {
       static int warned = 0;
@@ -419,6 +479,12 @@ struct CapturedPrim {
    std::string texture;   // RTGL1 name, "" for untextured
    RgMeshPrimitiveFlags flags = 0;
    float emissive = 0.0f;
+   // for the inspector
+   const RtTexture *tex = nullptr;
+   uint32_t texSerial = 0;
+   int blend = 0;
+   bool alphaTest = false, sprite = false;
+   float avgColor[4] = {};  // the game's vertex colours, before they were replaced
 };
 
 // What an object looked like the last time the engine drew it. Objects the
@@ -436,6 +502,7 @@ struct CachedObject {
    bool posed = false;
    float pose[6] = {};
    float center[3] = {};   // meters
+   bool whole = false;     // captured unclipped by the view
 };
 
 // cached objects farther than this from the camera are not drawn out of view
@@ -443,6 +510,7 @@ constexpr float kKeepDistance = 40.0f;
 
 std::unordered_map<uint32_t, CachedObject> g_objects;
 uint32_t g_currentObject = 0;
+bool g_currentWhole = false;
 std::vector<CapturedPrim> g_currentCapture;
 uint32_t g_frameNumber = 1;
 bool g_emissiveSpriteNow = false;
@@ -553,13 +621,15 @@ void upload_world()
          flags |= RG_MESH_PRIMITIVE_ALPHA_TESTED;
       float alpha = 1.0f;
       if (g.flags & kRenderRTWorldWater) {
+         flags &= ~RgMeshPrimitiveFlags(RG_MESH_PRIMITIVE_ALPHA_TESTED);
          if (g_cfg.water == 1) {
             flags |= RG_MESH_PRIMITIVE_WATER;    // RTGL1's reflective/refractive water
-         } else {
-            // Thief's own water texture, see-through, as the game draws it
-            flags = (flags & ~RgMeshPrimitiveFlags(RG_MESH_PRIMITIVE_ALPHA_TESTED)) |
-                    RG_MESH_PRIMITIVE_TRANSLUCENT;
-            alpha = g_cfg.waterAlpha;
+         } else if (g_cfg.water == 0) {
+            // Thief's water texture through its medium's palette (portal.c),
+            // which carries the water's colour and translucency
+            flags |= RG_MESH_PRIMITIVE_TRANSLUCENT;
+            if (!tex || !tex->hasAlpha)
+               alpha = g_cfg.waterAlpha;
          }
       }
       auto prim = RgMeshPrimitiveInfo{
@@ -1007,14 +1077,20 @@ const char *kUpscaleNames[] = {"Off",
                                "MetalFX Custom"};
 
 enum UiRow {
-   kRowUpscale, kRowScale, kRowVsync, kRowFps, kRowLight, kRowSky, kRowLightSize,
-   kRowGlow, kRowWater, kRowReset, kRowCount
+   kRowUpscale, kRowScale, kRowDynres, kRowDenoiser, kRowBounces, kRowVolumetric, kRowVsync,
+   kRowFps, kRowLight, kRowSky, kRowLightSize, kRowGlow, kRowSpriteGlow, kRowWater,
+   kRowInspect, kRowReset, kRowCount
 };
 
 const char *kRowLabels[kRowCount] = {
-   "Upscaler", "Render resolution", "VSync", "FPS counter", "Light brightness",
-   "Sky brightness", "Light size (soft shadows)", "Lamp glow", "Water", "Reset to defaults",
+   "Upscaler", "Render resolution", "Dynamic resolution", "Denoiser", "Bounce light",
+   "Volumetric light", "VSync", "FPS counter", "Light brightness", "Sky brightness",
+   "Light size (soft shadows)", "Lamp glow", "Particle glow", "Water",
+   "Inspect centre of view", "Reset to defaults",
 };
+
+// rows that do something when chosen rather than having a value
+bool row_is_action(int row) { return row == kRowInspect || row == kRowReset; }
 
 std::string row_value(int row)
 {
@@ -1029,6 +1105,18 @@ std::string row_value(int row)
       else
          snprintf(buf, sizeof(buf), "%d%%  %dx%d", int(std::lround(g_cfg.scale * 100)), w, h);
       return buf;
+   case kRowDynres:
+      if (g_cfg.dynres <= 0) return "Off";
+      snprintf(buf, sizeof(buf), "aim for %d fps", g_cfg.dynres);
+      return buf;
+   case kRowDenoiser:
+      if (g_cfg.denoiser == 1)
+         return metalfx_denoiser_available() ? (g_cfg.upscale >= 1 ? "MetalFX" : "MetalFX (needs upscaler)")
+                                             : "MetalFX (not on this Mac)";
+      return "RTGL1";
+   case kRowBounces:
+      return g_cfg.bounces == 0 ? "1, half rate" : g_cfg.bounces == 1 ? "1" : "2";
+   case kRowVolumetric: return g_cfg.volumetric ? "On" : "Off";
    case kRowVsync: return g_cfg.vsync ? "On" : "Off";
    case kRowFps: return g_cfg.fps ? "On" : "Off";
    case kRowLight: snprintf(buf, sizeof(buf), "%.2fx", g_cfg.light); return buf;
@@ -1038,7 +1126,12 @@ std::string row_value(int row)
       if (g_cfg.glow <= 0.0f) return "Off";
       snprintf(buf, sizeof(buf), "%.2f", g_cfg.glow);
       return buf;
-   case kRowWater: return g_cfg.water == 1 ? "Opaque" : "Translucent";
+   case kRowSpriteGlow:
+      if (g_cfg.spriteGlow <= 0.0f) return "Off";
+      snprintf(buf, sizeof(buf), "%.2f", g_cfg.spriteGlow);
+      return buf;
+   case kRowWater:
+      return g_cfg.water == 1 ? "Reflective (RTGL1)" : g_cfg.water == 2 ? "Opaque" : "Translucent";
    default: return "";
    }
 }
@@ -1058,8 +1151,11 @@ float step_mul(float v, int dir, float lo, float hi)
    return std::clamp(steps[std::clamp(i, 0, n - 1)], lo, hi);
 }
 
+void inspect_view();
+
 void change_row(int row, int dir)
 {
+   static const int kDynres[] = {0, 30, 40, 50, 60, 72, 90, 120};
    switch (row) {
    case kRowUpscale: g_cfg.upscale = (g_cfg.upscale + dir + 6) % 6; break;
    case kRowScale: {
@@ -1075,6 +1171,17 @@ void change_row(int row, int dir)
       g_cfg.scale = std::clamp(s, lo, 1.0f);
       break;
    }
+   case kRowDynres: {
+      const int n = int(sizeof(kDynres) / sizeof(kDynres[0]));
+      int i = 0;
+      while (i < n - 1 && kDynres[i] < g_cfg.dynres)
+         ++i;
+      g_cfg.dynres = kDynres[(i + dir + n) % n];
+      break;
+   }
+   case kRowDenoiser: g_cfg.denoiser = g_cfg.denoiser ? 0 : 1; break;
+   case kRowBounces: g_cfg.bounces = (g_cfg.bounces + dir + 3) % 3; break;
+   case kRowVolumetric: g_cfg.volumetric = !g_cfg.volumetric; break;
    case kRowVsync: g_cfg.vsync = !g_cfg.vsync; break;
    case kRowFps: g_cfg.fps = !g_cfg.fps; break;
    case kRowLight: g_cfg.light = step_mul(g_cfg.light, dir, 0.05f, 20.0f); break;
@@ -1089,7 +1196,12 @@ void change_row(int row, int dir)
    case kRowGlow:
       g_cfg.glow = std::clamp(std::round(g_cfg.glow * 4.0f) / 4.0f + 0.25f * dir, 0.0f, 5.0f);
       break;
-   case kRowWater: g_cfg.water = g_cfg.water == 1 ? 0 : 1; break;
+   case kRowSpriteGlow:
+      g_cfg.spriteGlow = std::clamp(std::round(g_cfg.spriteGlow * 20.0f) / 20.0f + 0.05f * dir,
+                                    0.0f, 3.0f);
+      break;
+   case kRowWater: g_cfg.water = (g_cfg.water + dir + 3) % 3; break;
+   case kRowInspect: inspect_view(); return;
    case kRowReset: {
       const bool debug = g_cfg.debug, flip = g_cfg.flip;
       g_cfg = kDefaults;
@@ -1117,6 +1229,9 @@ void count_frame(bool scene)
       g_ui.fps = g_ui.windowFrames / (t - g_ui.windowStart);
       g_ui.frameMs = 1000.0 / std::max(g_ui.fps, 1e-3);
       g_ui.worstMs = g_ui.windowWorst;
+      g_ui.waitMs = g_ui.waitSum * 1000.0 / g_ui.windowFrames;
+      g_ui.drawMs = g_ui.drawSum * 1000.0 / g_ui.windowFrames;
+      g_ui.waitSum = g_ui.drawSum = 0;
       g_ui.windowStart = t;
       g_ui.windowFrames = 0;
       g_ui.windowWorst = 0;
@@ -1149,12 +1264,22 @@ void draw_ui(bool scene)
    if (g_cfg.fps) {
       int w, h;
       render_size(w, h);
-      char line[128];
-      snprintf(line, sizeof(line), "%3.0f fps  %5.1f ms (worst %5.1f)  %dx%d\x7f%dx%d",
-               g_ui.fps, g_ui.frameMs, g_ui.worstMs, w, h, g_drawableW, g_drawableH);
+      char line[128], line2[128];
+      if (g_cfg.dynres > 0 && !(g_cfg.denoiser == 1 && g_cfg.upscale >= 1 && metalfx_denoiser_available()))
+         snprintf(line, sizeof(line), "%3.0f fps  %5.1f ms (worst %5.1f)  dynamic \x7f%dx%d",
+                  g_ui.fps, g_ui.frameMs, g_ui.worstMs, g_drawableW, g_drawableH);
+      else
+         snprintf(line, sizeof(line), "%3.0f fps  %5.1f ms (worst %5.1f)  %dx%d\x7f%dx%d",
+                  g_ui.fps, g_ui.frameMs, g_ui.worstMs, w, h, g_drawableW, g_drawableH);
+      // waiting in rgStartFrame is the GPU still busy with earlier frames
+      const double game = std::max(0.0, g_ui.frameMs - g_ui.waitMs - g_ui.drawMs);
+      snprintf(line2, sizeof(line2), "game %4.1f ms   rt submit %4.1f ms   gpu wait %4.1f ms",
+               game, g_ui.drawMs, g_ui.waitMs);
       const float s = std::round(px * 0.8f);
-      panel(0, 0, text_width(s, line) + 2 * pad, s + pad, 0.6f);
+      const float tw = std::max(text_width(s, line), text_width(s, line2));
+      panel(0, 0, tw + 2 * pad, 2 * s + pad * 1.5f, 0.6f);
       text(fg, pad, pad * 0.5f, s, line, white);
+      text(fg, pad, pad * 0.5f + s * 1.1f, s, line2, dim);
    }
 
    if (hint && !g_ui.open) {
@@ -1169,9 +1294,9 @@ void draw_ui(bool scene)
    if (g_ui.open) {
       const float rowH = px * 1.5f;
       const float labelW = text_width(px, "Light size (soft shadows)") + px * 2.0f;
-      const float valueW = text_width(px, "MetalFX Ultra Performance") + px;
+      const float valueW = text_width(px, "< MetalFX (not on this Mac) >") + px;
       const float w = labelW + valueW + 4 * pad + px * 2.0f;
-      const float h = rowH * (kRowCount + 3.5f) + 2 * pad;
+      const float h = rowH * (kRowCount + 4.5f) + 2 * pad;
       const float x0 = std::round((g_drawableW - w) * 0.5f);
       const float y0 = std::round((g_drawableH - h) * 0.5f);
       panel(x0, y0, x0 + w, y0 + h, 0.82f);
@@ -1185,7 +1310,7 @@ void draw_ui(bool scene)
          const uint32_t c = sel ? white : dim;
          text(fg, x0 + 2 * pad, y, px, kRowLabels[r], c);
          std::string v = row_value(r);
-         if (sel && r != kRowReset)
+         if (sel && !row_is_action(r))
             v = "< " + v + " >";
          text(fg, x0 + 2 * pad + labelW, y, px, v.c_str(), sel ? gold : c);
          y += rowH;
@@ -1193,6 +1318,8 @@ void draw_ui(bool scene)
       y += rowH * 0.5f;
       const float s = std::round(px * 0.75f);
       text(fg, x0 + 2 * pad, y, s, "Up/Down: choose   Left/Right: change   Esc: close", dim);
+      if (!g_ui.status.empty() && now_seconds() < g_ui.statusUntil)
+         text(fg, x0 + 2 * pad, y + rowH, s, g_ui.status.c_str(), gold);
    }
 
    upload_2d(0x2ffffff10ull, bg.data(), uint32_t(bg.size()), nullptr, true, g_drawableW,
@@ -1208,9 +1335,137 @@ void draw_frame(bool sceneDrawn)
    // Thief's skies are night skies. RTGL1's default sky colour is a bright
    // grey that lit every outdoor surface like daylight. Linking this struct
    // replaces all of RTGL1's sky defaults, so every field is set.
+   // RTGL1 uses its defaults only for a struct that is not linked, so the
+   // linked ones repeat its defaults (DrawFrameInfo.h) and change only ours.
+   auto refl = RgDrawFrameReflectRefractParams{
+      .sType = RG_STRUCTURE_TYPE_DRAW_FRAME_REFLECT_REFRACT_PARAMS,
+      .pNext = nullptr,
+      .maxReflectRefractDepth = 2,
+      .typeOfMediaAroundCamera = g_underwater ? RG_MEDIA_TYPE_WATER : RG_MEDIA_TYPE_VACUUM,
+      .indexOfRefractionGlass = 1.52f,
+      .indexOfRefractionWater = 1.33f,
+      .thinMediaWidth = 0.1f,
+      .waterWaveSpeed = 0.4f,
+      .waterWaveNormalStrength = 0.6f,
+      // Thief's water: a murky green-blue
+      .waterColor = {{0.22f, 0.42f, 0.38f}},
+      .acidColor = {{0.0f, 0.66f, 0.55f}},
+      .acidDensity = 10.0f,
+      .waterWaveTextureDerivativesMultiplier = 1.0f,
+      .waterTextureAreaScale = 1.0f,
+      .portalNormalTwirl = false,
+      .stylizedWaterStrength = 0.0f,
+      .stylizedWaterCaustic = 1.5f,
+      .stylizedWaterReflMax = 0.75f,
+      .stylizedWaterRoughness = 0.10f,
+      .stylizedWaterGlow = 0.04f,
+      .stylizedWaterVeinRef = 0.1f,
+      .stylizedLiquidTint = {{{1 / 255.f, 1 / 255.f, 15 / 255.f}},
+                             {{1 / 255.f, 5 / 255.f, 1 / 255.f}},
+                             {{9 / 255.f, 3 / 255.f, 1 / 255.f}},
+                             {{20 / 255.f, 1 / 255.f, 1 / 255.f}}},
+      .stylizedLiquidCrest = {{{0.55f, 0.80f, 1.00f}},
+                              {{50 / 255.f, 150 / 255.f, 50 / 255.f}},
+                              {{120 / 255.f, 78 / 255.f, 38 / 255.f}},
+                              {{1.00f, 0.45f, 0.40f}}},
+      .stylizedLiquidRelief = {0.0f, 0.0f, 1.0f, 1.0f},
+      .stylizedLiquidFlow = {0.0f, 0.0f, 0.0f, 1.0f},
+      .stylizedLiquidRefl = {1.0f, 1.0f, 0.0f, 1.0f},
+      .stylizedLiquidRough = {0.0f, 0.0f, 0.80f, 0.0f},
+      .liquidNoSplit = 0.0f,
+      .stylizedLiquidCaustics = {1.0f, 0.0f, 0.0f, 0.0f},
+      .liquidFlowSpeed = 0.5f,
+      .liquidFlowScale = 6.0f,
+      .liquidFlowAspect = 3.0f,
+      .liquidFlowDebug = 0.0f,
+      .lavaEmisBoost = 6.0f,
+      .lavaFlowStrength = 0.45f,
+      .lavaFlowSpeed = 0.03f,
+      .lavaFlowScale = 0.12f,
+      .lavaFlowPixel = 0.25f,
+      .lavaPulse = 0.10f,
+      .lavaPulseSpeed = 0.35f,
+      .lavaGiBoost = 1.0f,
+      .lavaDebug = 0.0f,
+      .lavaTint = {{1.0f, 0.55f, 0.30f}},
+      .stylizedWaterDebug = 0.0f,
+      .stylizedWaterReflMin = 0.1f,
+      .waterCausticGain = 1.2f,
+      .waterCausticScale = 0.8f,
+      .waterCausticSpeed = 0.35f,
+      .waterCausticDist = 6.0f,
+      .waterCausticRise = 2.0f,
+      .waterCausticSlant = 0.6f,
+      .waterCausticWallBoost = 4.0f,
+   };
+   auto volumetric = RgDrawFrameVolumetricParams{
+      .sType = RG_STRUCTURE_TYPE_DRAW_FRAME_VOLUMETRIC_PARAMS,
+      .pNext = &refl,
+      // RTGL1's default is on, with a bright ambient haze: costly, and it
+      // greyed Thief's darkness. Optional, lit by the lamps when on.
+      .enable = g_cfg.volumetric,
+      .maxHistoryLength = 8.0f,
+      .useSimpleDepthBased = false,
+      .volumetricFar = 40.0f,
+      .ambientColor = {{0.004f, 0.005f, 0.008f}},
+      .scaterring = 0.3f,
+      .assymetry = 0.6f,
+      .useIlluminationVolume = false,
+      .fallbackSourceColor = {{0, 0, 0}},
+      .fallbackSourceDirection = {{0, 0, -1}},
+      .lightMultiplier = 1.0f,
+      .illuminateFromAllLights = true,
+      .mediaColor = {{1.0f, 1.0f, 1.0f}},
+      .mediaColorFar = {{1.0f, 1.0f, 1.0f}},
+      .farScattering = 0.3f,
+      .densityCurve = 1.0f,
+      .occludeEmission = false,
+      .ditherRadius = 2.0f,
+      .ditherRadiusZ = 1.0f,
+      .spatialBlur = 1.0f,
+      .lightNearFade = 0.3f,
+      .depthGate = 0.0f,
+      .depthGateBias = 0.0f,
+      .depthGateFeather = 1.0f,
+      .depthGateTaps = 5,
+   };
+   auto illum = RgDrawFrameIlluminationParams{
+      .sType = RG_STRUCTURE_TYPE_DRAW_FRAME_ILLUMINATION_PARAMS,
+      .pNext = &volumetric,
+      .maxBounceShadows = 2,
+      .indirectBounces = uint32_t(std::max(1, g_cfg.bounces)),
+      .indirectLegacyBounceWeight = true,
+      .cellWorldSize = 1.0f,
+      .directDiffuseSensitivityToChange = 0.5f,
+      .indirectDiffuseSensitivityToChange = 0.2f,
+      .specularSensitivityToChange = 0.5f,
+      .polygonalLightSpotlightFactor = 2.0f,
+      .lightUniqueIdIgnoreFirstPersonViewerShadows = nullptr,
+      .enableRrTemporalPrefilter = false,
+      .rrFireflyThreshold = 0.0f,
+      .rrFireflyMinLum = 0.01f,
+      .restirBlueNoise = true,
+      .shadowSamples = 1,
+      .debugRestirM = 0,
+      .debugVisibility = 0,
+      .restirTemporalJitter = 2.0f,
+      .rrSpecularHitDistance = true,
+      .directSamples = 1,
+      // 0: bounce light traced for half of the pixels each frame
+      .indirectSamples = g_cfg.bounces == 0 ? 0u : 1u,
+      .restirInitialSamples = 8,
+      .restirSpatialSamples = 8,
+      .restirSpatialRadius = 30.0f,
+      .restirTemporalMCap = 20,
+      .rrGuideMin = 0.01f,
+      .rrGuideMode = 1,
+      .restirIndirAntilag = 1,
+      .rrPreExposure = true,
+      .rrPreExposureDebug = false,
+   };
    auto sky = RgDrawFrameSkyParams{
       .sType = RG_STRUCTURE_TYPE_DRAW_FRAME_SKY_PARAMS,
-      .pNext = nullptr,
+      .pNext = &illum,
       .skyType = RG_SKY_TYPE_COLOR,
       .skyColorDefault = {{0.035f, 0.045f, 0.075f}},
       .skyColorMultiplier = g_cfg.sky,
@@ -1251,7 +1506,9 @@ void draw_frame(bool sceneDrawn)
       };
       rt.rgUploadCamera(&cam);
    }
+   const double t0 = now_seconds();
    RgResult r = rt.rgDrawFrame(&info);
+   g_ui.drawSum += now_seconds() - t0;
    if (r != RG_RESULT_SUCCESS) {
       static int warned = 0;
       if (warned++ < 5)
@@ -1322,6 +1579,162 @@ void Present(int drawableWidth, int drawableHeight, bool vsync)
    draw_frame(scene);
    g_canvas.valid = false;
 }
+
+} // namespace darkrt
+
+namespace {
+
+// ---- inspector: what is at the centre of the view, written to logs/ --------
+
+bool ray_triangle(const float o[3], const float d[3], const float *a, const float *b,
+                  const float *c, float &t)
+{
+   const float e1[3] = {b[0] - a[0], b[1] - a[1], b[2] - a[2]};
+   const float e2[3] = {c[0] - a[0], c[1] - a[1], c[2] - a[2]};
+   const float p[3] = {d[1] * e2[2] - d[2] * e2[1], d[2] * e2[0] - d[0] * e2[2],
+                       d[0] * e2[1] - d[1] * e2[0]};
+   const float det = e1[0] * p[0] + e1[1] * p[1] + e1[2] * p[2];
+   if (std::fabs(det) < 1e-9f)
+      return false;
+   const float inv = 1.0f / det;
+   const float s[3] = {o[0] - a[0], o[1] - a[1], o[2] - a[2]};
+   const float u = (s[0] * p[0] + s[1] * p[1] + s[2] * p[2]) * inv;
+   if (u < 0 || u > 1)
+      return false;
+   const float q[3] = {s[1] * e1[2] - s[2] * e1[1], s[2] * e1[0] - s[0] * e1[2],
+                       s[0] * e1[1] - s[1] * e1[0]};
+   const float v = (d[0] * q[0] + d[1] * q[1] + d[2] * q[2]) * inv;
+   if (v < 0 || u + v > 1)
+      return false;
+   t = (e2[0] * q[0] + e2[1] * q[1] + e2[2] * q[2]) * inv;
+   return t > 0.01f;
+}
+
+std::string logs_dir()
+{
+   return g_rtDir.empty() ? std::string("logs") : g_rtDir + "/../logs";
+}
+
+// The texture as seen by the ray tracer, as a PPM and its alpha as a PGM.
+void dump_texture(const RtTexture *t, const std::string &base)
+{
+   if (!t || t->rgba.empty())
+      return;
+   FILE *f = fopen((base + ".ppm").c_str(), "wb");
+   FILE *a = fopen((base + "-alpha.pgm").c_str(), "wb");
+   if (f) fprintf(f, "P6\n%d %d\n255\n", t->width, t->height);
+   if (a) fprintf(a, "P5\n%d %d\n255\n", t->width, t->height);
+   for (size_t i = 0; i < size_t(t->width) * t->height; ++i) {
+      if (f) fwrite(&t->rgba[i * 4], 1, 3, f);
+      if (a) fwrite(&t->rgba[i * 4 + 3], 1, 1, a);
+   }
+   if (f) fclose(f);
+   if (a) fclose(a);
+}
+
+void inspect_view()
+{
+   const RgFloat3D o3 = to_rt(g_camera.pos);
+   const float o[3] = {o3.data[0], o3.data[1], o3.data[2]};
+   float d[3] = {g_camera.fwd[0], g_camera.fwd[1], g_camera.fwd[2]};
+   const float len = std::sqrt(d[0] * d[0] + d[1] * d[1] + d[2] * d[2]);
+   for (float &x : d)
+      x /= std::max(len, 1e-6f);
+
+   float best = 1e30f;
+   uint32_t bestObj = 0;
+   size_t bestPrim = 0, bestGroup = SIZE_MAX;
+   for (const auto &e : g_objects)
+      for (size_t i = 0; i < e.second.prims.size(); ++i) {
+         const auto &v = e.second.prims[i].verts;
+         for (size_t k = 0; k + 2 < v.size(); k += 3) {
+            float t;
+            if (ray_triangle(o, d, v[k].position, v[k + 1].position, v[k + 2].position, t) &&
+                t < best) {
+               best = t, bestObj = e.first, bestPrim = i, bestGroup = SIZE_MAX;
+            }
+         }
+      }
+   for (size_t g = 0; g < g_world.size(); ++g) {
+      const WorldGroup &w = g_world[g];
+      for (size_t k = 0; k + 2 < w.indices.size(); k += 3) {
+         float t;
+         if (ray_triangle(o, d, w.verts[w.indices[k]].position, w.verts[w.indices[k + 1]].position,
+                          w.verts[w.indices[k + 2]].position, t) &&
+             t < best) {
+            best = t, bestObj = 0, bestGroup = g;
+         }
+      }
+   }
+
+   static int n = 0;
+   ++n;
+   const std::string dir = logs_dir();
+   mkdir(dir.c_str(), 0755);
+   FILE *log = fopen((dir + "/rt-inspect.txt").c_str(), "a");
+   auto out = [&](const char *fmt, ...) {
+      char buf[512];
+      va_list ap;
+      va_start(ap, fmt);
+      vsnprintf(buf, sizeof(buf), fmt, ap);
+      va_end(ap);
+      fputs(buf, stderr);
+      if (log)
+         fputs(buf, log);
+   };
+   out("\n=== RT inspect #%d: camera (%.2f %.2f %.2f) m, looking (%.3f %.3f %.3f)\n", n, o[0], o[1],
+       o[2], d[0], d[1], d[2]);
+   char what[160];
+   if (best >= 1e29f) {
+      out("nothing hit\n");
+      snprintf(what, sizeof(what), "Inspect: nothing at the centre");
+   } else if (bestObj) {
+      char name[128];
+      RenderRTGameObjectName(bestObj, name, sizeof(name));
+      const CachedObject &c = g_objects[bestObj];
+      out("object %u \"%s\" at %.2f m: %zu primitives, whole %d, drawn frame %u (now %u)\n",
+          bestObj, name, best, c.prims.size(), int(c.whole), c.frame, g_frameNumber);
+      for (size_t i = 0; i < c.prims.size() && i < 64; ++i) {
+         const CapturedPrim &p = c.prims[i];
+         const RtTexture *t = (p.tex && p.tex->serial == p.texSerial) ? p.tex : nullptr;
+         out("  %s[%zu] %zu verts, texture \"%s\" %dx%d%s%s, flags 0x%x, emissive %.2f, blend %d, "
+             "alphatest %d, sprite %d, game colour %.2f %.2f %.2f a %.2f\n",
+             i == bestPrim ? "*" : " ", i, p.verts.size(), p.texture.c_str(), t ? t->width : 0,
+             t ? t->height : 0, t && t->white ? " white" : "", t && t->hasAlpha ? " alpha" : "",
+             unsigned(p.flags), p.emissive, p.blend, int(p.alphaTest), int(p.sprite),
+             p.avgColor[0], p.avgColor[1], p.avgColor[2], p.avgColor[3]);
+         if (i == bestPrim && t) {
+            char base[64];
+            snprintf(base, sizeof(base), "/inspect-%d-%s", n, t->name);
+            dump_texture(t, dir + base);
+            out("    texture saved as logs%s.ppm\n", base);
+         }
+      }
+      snprintf(what, sizeof(what), "Inspect: %s (object %u) logged", name, bestObj);
+   } else {
+      const WorldGroup &w = g_world[bestGroup];
+      auto found = g_worldTextures.find(w.textureId);
+      const RtTexture *t = found == g_worldTextures.end() ? nullptr : found->second;
+      out("world surface at %.2f m: texture id %d, flags 0x%x, texture %s %dx%d%s\n", best,
+          w.textureId, w.flags, t ? t->name : "-", t ? t->width : 0, t ? t->height : 0,
+          t && t->hasAlpha ? " alpha" : "");
+      if (t) {
+         char base[64];
+         snprintf(base, sizeof(base), "/inspect-%d-%s", n, t->name);
+         dump_texture(t, dir + base);
+         out("    texture saved as logs%s.ppm\n", base);
+      }
+      snprintf(what, sizeof(what), "Inspect: world texture %d logged", w.textureId);
+   }
+   if (log)
+      fclose(log);
+   g_ui.status = std::string(what) + " to logs/rt-inspect.txt";
+   g_ui.statusUntil = now_seconds() + 6.0;
+}
+
+} // namespace
+
+namespace darkrt {
 
 bool HandleKey(int scancode, int mods, bool down, bool repeat)
 {
@@ -1481,9 +1894,12 @@ void RenderRTDrawWorld(int primitive, const sRenderBackendVertex *v, const float
                                   : pack_color(v[i].r, v[i].g, v[i].b, v[i].a);
    }
    if (sprite) {
-      // a glow or particle sprite: light-emitting, never casting shadows
-      prim.flags |= RG_MESH_PRIMITIVE_TRANSLUCENT | RG_MESH_PRIMITIVE_NO_SHADOW;
-      prim.emissive = g_cfg.glow;
+      // a glow or particle sprite: faintly self-lit, never casting shadows.
+      // Strongly emissive, the bloom turned the soft round particles into
+      // glowing squares.
+      prim.flags |= RG_MESH_PRIMITIVE_TRANSLUCENT | RG_MESH_PRIMITIVE_NO_SHADOW |
+                    RG_MESH_PRIMITIVE_SPRITE | RG_MESH_PRIMITIVE_NO_WATER_CAUSTICS;
+      prim.emissive = g_cfg.spriteGlow;
    } else if (g_blend == kRenderBackendBlendAdd) {
       prim.flags |= RG_MESH_PRIMITIVE_TRANSLUCENT;
       prim.emissive = 1.0f;
@@ -1493,9 +1909,21 @@ void RenderRTDrawWorld(int primitive, const sRenderBackendVertex *v, const float
       prim.flags |= RG_MESH_PRIMITIVE_ALPHA_TESTED;
    }
 
+   prim.tex = tex;
+   prim.texSerial = tex ? tex->serial : 0;
+   prim.blend = g_blend;
+   prim.alphaTest = g_alphaTest;
+   prim.sprite = sprite;
+   for (int i = 0; i < count; ++i) {
+      prim.avgColor[0] += v[i].r / count;
+      prim.avgColor[1] += v[i].g / count;
+      prim.avgColor[2] += v[i].b / count;
+      prim.avgColor[3] += v[i].a / count;
+   }
+
    // A light fixture's bulb, flame or glass sits at the light it carries and
    // is drawn self-lit (full white): make it glow, so lamps are seen to be lit.
-   if (g_cfg.glow > 0.0f && allWhite && !g_lightPositions.empty() && name) {
+   if (!sprite && g_cfg.glow > 0.0f && allWhite && !g_lightPositions.empty() && name) {
       float c[3] = {0, 0, 0};
       for (const RgPrimitiveVertex &d : prim.verts)
          for (int k = 0; k < 3; ++k)
@@ -1527,11 +1955,33 @@ void RenderRTDrawWorld(int primitive, const sRenderBackendVertex *v, const float
    upload_captured(0x300000000ull + (uint64_t(key) << 12) + n, prim);
 }
 
-void RenderRTObjectBegin(uint32_t obj)
+void RenderRTObjectBegin(uint32_t obj, int whole)
 {
    g_currentObject = g_inScene ? obj : 0;
+   g_currentWhole = whole != 0;
    g_currentCapture.clear();
 }
+
+int RenderRTObjectWanted(uint32_t obj)
+{
+   if (!g_inScene)
+      return 0;
+   auto it = g_objects.find(obj);
+   if (it == g_objects.end())
+      return 1;
+   const CachedObject &c = it->second;
+   if (c.frame == g_frameNumber)
+      return 0;   // drawn this frame
+   float pose[6];
+   if (!c.posed || !RenderRTGameObjectPose(obj, pose))
+      return 1;
+   for (int k = 0; k < 3; ++k)
+      if (std::fabs(pose[k] - c.pose[k]) >= 0.01f)
+         return 1;
+   return (pose[3] != c.pose[3] || pose[4] != c.pose[4] || pose[5] != c.pose[5]) ? 1 : 0;
+}
+
+void RenderRTCameraMedium(int underwater) { g_underwater = underwater != 0; }
 
 void RenderRTObjectEnd(void)
 {
@@ -1541,11 +1991,19 @@ void RenderRTObjectEnd(void)
       return;
    CachedObject &c = g_objects[obj];
    if (c.frame == g_frameNumber) {
-      // drawn twice this frame (split across cells): keep both parts
-      for (CapturedPrim &p : g_currentCapture)
-         c.prims.push_back(std::move(p));
-      c.hash = hash_prims(c.prims);
+      // drawn twice this frame (split across cells): keep both parts, unless
+      // the first one already had all of it
+      if (g_currentWhole && !c.whole) {
+         c.prims = std::move(g_currentCapture);
+         c.whole = true;
+         c.hash = hash_prims(c.prims);
+      } else if (!c.whole) {
+         for (CapturedPrim &p : g_currentCapture)
+            c.prims.push_back(std::move(p));
+         c.hash = hash_prims(c.prims);
+      }
    } else {
+      c.whole = g_currentWhole;
       const uint64_t h = hash_prims(g_currentCapture);
       c.unchanged = (h == c.hash) ? c.unchanged + 1 : 0;
       c.hash = h;

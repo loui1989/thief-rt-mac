@@ -14,12 +14,15 @@
 #include <clipoff.h>
 #include <_test.h>
 
+extern int r3d_rt_noclip;
+extern void r3_rt_zero_codes(int n, r3s_point *src);
 void r3_clipspace_code_points(int n, r3s_point *src)
 {
    uchar *cur, *last;
    mxs_real nearxxx = r3d_near_plane;
 
    TEST_IN_BLOCK("r3_clipspace_code_points");
+   if (r3d_rt_noclip) { r3_rt_zero_codes(n, src); return; }
 
    cur = (uchar *)src;
    last = cur + n * r3d_glob.cur_stride;

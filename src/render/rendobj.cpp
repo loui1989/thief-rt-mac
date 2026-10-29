@@ -125,6 +125,7 @@ extern void set_mm_sort(bool);
 #ifdef DARK_RT
 #include <render_rt.h>
 EXTERN void lgd3d_render_flush(void);
+EXTERN int r3d_rt_noclip;
 #endif
 #include <dbmem.h>
 
@@ -2434,11 +2435,18 @@ BOOL rendobj_core_render_object(ObjID obj, int fragment, int idx, uchar *clut,
    // Tell the ray tracer which object the following triangles belong to, so
    // a static object can keep casting shadows while it is out of view.
    // lgd3d batches, so pending triangles are flushed to the right owner.
+   // A model drawn in one piece is captured whole, unclipped by the view:
+   // what is off screen still shadows what is on it.
    const BOOL rt_object = g_lgd3d && RenderRTCaptureDraws();
+   int rt_type = rt_object ? rendobj_type(obj) : OM_TYPE_DEFAULT;
+   const BOOL rt_whole = rt_object && fragment == OBJ_NO_SPLIT &&
+                         (rt_type == OM_TYPE_MD || rt_type == OM_TYPE_MESH);
    if (rt_object)
    {
       lgd3d_render_flush();
-      RenderRTObjectBegin(obj);
+      RenderRTObjectBegin(obj, rt_whole);
+      if (rt_whole)
+         r3d_rt_noclip = 1;
    }
 #endif
    rval = rendfunc(idx, obj, fragment, 0, clut);
@@ -2446,6 +2454,7 @@ BOOL rendobj_core_render_object(ObjID obj, int fragment, int idx, uchar *clut,
    if (rt_object)
    {
       lgd3d_render_flush();
+      r3d_rt_noclip = 0;
       RenderRTObjectEnd();
    }
 #endif
@@ -3066,5 +3075,46 @@ extern "C" int RenderRTGameObjectPose(uint32_t obj, float pose[6])
    pose[4] = pos->fac.ty;
    pose[5] = pos->fac.tz;
    return 1;
+}
+
+// Models near the camera that the view did not draw, for the ray tracer:
+// once each while they stay where they are (it keeps them), every frame
+// while they move. At most a few per frame, so walking into a crowded room
+// does not stall a frame.
+extern "C" void RenderRTGameDrawExtraObjects(void)
+{
+   const float kRadius = 60.0f;   // feet, ~18 m
+   int budget = 24;
+   ObjID player;
+   if (!g_lgd3d || !RenderRTCaptureDraws())
+      return;
+   player = PlayerObjectExists() ? PlayerObject() : OBJ_NULL;
+   for (ObjID obj = 1; obj < gMaxObjID && budget > 0; ++obj)
+   {
+      if (obj == player || !ObjectExists(obj) || !ObjHasRefs(obj))
+         continue;
+      Position *pos = ObjPosGet(obj);
+      if (!pos || mx_dist2_vec(&pos->loc.vec, &portal_camera_loc) > kRadius * kRadius)
+         continue;
+      const int type = rendobj_type(obj);
+      if (type != OM_TYPE_MD && type != OM_TYPE_MESH)
+         continue;
+      if (ObjRenderType(obj) == kRenderNotAtAll)
+         continue;
+      if (!RenderRTObjectWanted((uint32_t)obj))
+         continue;
+      int idx;
+      model_funcs *ptmf = rendobj_get_model_funcs(obj, &idx);
+      if (!ptmf || !ptmf->render)
+         continue;
+      rendobj_core_render_object(obj, OBJ_NO_SPLIT, idx, NULL, ptmf->render, ptmf);
+      --budget;
+   }
+}
+
+extern "C" void RenderRTGameObjectName(uint32_t obj, char *buf, int size)
+{
+   const char *name = ObjEditName((ObjID)obj);
+   snprintf(buf, size, "%s", name ? name : "?");
 }
 #endif
