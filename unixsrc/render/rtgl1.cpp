@@ -506,7 +506,7 @@ struct CachedObject {
 };
 
 // cached objects farther than this from the camera are not drawn out of view
-constexpr float kKeepDistance = 40.0f;
+constexpr float kKeepDistance = 60.0f;
 
 std::unordered_map<uint32_t, CachedObject> g_objects;
 uint32_t g_currentObject = 0;
@@ -1078,14 +1078,14 @@ const char *kUpscaleNames[] = {"Off",
 
 enum UiRow {
    kRowUpscale, kRowScale, kRowDynres, kRowDenoiser, kRowBounces, kRowVolumetric, kRowVsync,
-   kRowFps, kRowLight, kRowSky, kRowLightSize, kRowGlow, kRowSpriteGlow, kRowWater,
+   kRowFps, kRowLight, kRowSky, kRowLightSize, kRowGlow, kRowWater,
    kRowInspect, kRowReset, kRowCount
 };
 
 const char *kRowLabels[kRowCount] = {
    "Upscaler", "Render resolution", "Dynamic resolution", "Denoiser", "Bounce light",
    "Volumetric light", "VSync", "FPS counter", "Light brightness", "Sky brightness",
-   "Light size (soft shadows)", "Lamp glow", "Particle glow", "Water",
+   "Light size (soft shadows)", "Lamp glow", "Water",
    "Inspect centre of view", "Reset to defaults",
 };
 
@@ -1125,10 +1125,6 @@ std::string row_value(int row)
    case kRowGlow:
       if (g_cfg.glow <= 0.0f) return "Off";
       snprintf(buf, sizeof(buf), "%.2f", g_cfg.glow);
-      return buf;
-   case kRowSpriteGlow:
-      if (g_cfg.spriteGlow <= 0.0f) return "Off";
-      snprintf(buf, sizeof(buf), "%.2f", g_cfg.spriteGlow);
       return buf;
    case kRowWater:
       return g_cfg.water == 1 ? "Reflective (RTGL1)" : g_cfg.water == 2 ? "Opaque" : "Translucent";
@@ -1195,10 +1191,6 @@ void change_row(int row, int dir)
       break;
    case kRowGlow:
       g_cfg.glow = std::clamp(std::round(g_cfg.glow * 4.0f) / 4.0f + 0.25f * dir, 0.0f, 5.0f);
-      break;
-   case kRowSpriteGlow:
-      g_cfg.spriteGlow = std::clamp(std::round(g_cfg.spriteGlow * 20.0f) / 20.0f + 0.05f * dir,
-                                    0.0f, 3.0f);
       break;
    case kRowWater: g_cfg.water = (g_cfg.water + dir + 3) % 3; break;
    case kRowInspect: inspect_view(); return;
@@ -1453,7 +1445,8 @@ void draw_frame(bool sceneDrawn)
       .directSamples = 1,
       // 0: bounce light traced for half of the pixels each frame
       .indirectSamples = g_cfg.bounces == 0 ? 0u : 1u,
-      .restirInitialSamples = 8,
+      // more candidate lights per pixel (no extra rays): Thief has many small lights
+      .restirInitialSamples = 12,
       .restirSpatialSamples = 8,
       .restirSpatialRadius = 30.0f,
       .restirTemporalMCap = 20,
@@ -1894,12 +1887,12 @@ void RenderRTDrawWorld(int primitive, const sRenderBackendVertex *v, const float
                                   : pack_color(v[i].r, v[i].g, v[i].b, v[i].a);
    }
    if (sprite) {
-      // a glow or particle sprite: faintly self-lit, never casting shadows.
-      // Strongly emissive, the bloom turned the soft round particles into
-      // glowing squares.
+      // a glow or particle sprite, never casting shadows. Not emissive: RTGL1
+      // adds a translucent primitive's emission without its texture's alpha,
+      // so any glow at all turned the soft round particles into squares.
       prim.flags |= RG_MESH_PRIMITIVE_TRANSLUCENT | RG_MESH_PRIMITIVE_NO_SHADOW |
-                    RG_MESH_PRIMITIVE_SPRITE | RG_MESH_PRIMITIVE_NO_WATER_CAUSTICS;
-      prim.emissive = g_cfg.spriteGlow;
+                    RG_MESH_PRIMITIVE_NO_WATER_CAUSTICS;
+      prim.emissive = 0.0f;
    } else if (g_blend == kRenderBackendBlendAdd) {
       prim.flags |= RG_MESH_PRIMITIVE_TRANSLUCENT;
       prim.emissive = 1.0f;

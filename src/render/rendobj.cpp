@@ -2597,6 +2597,19 @@ void rendobj_render_object(ObjID obj, uchar *clut, ulong fragment)
       goto done;
    }
 
+#ifdef DARK_RT
+   // An object reaching into several cells is drawn once per cell, clipped to
+   // each. The ray tracer has no use for that (it rasterizes nothing) and a
+   // clipped capture shadows only with the part in view, so it takes the
+   // object whole, the first time it is met this frame.
+   if (g_lgd3d && RenderRTCaptureDraws())
+   {
+      if (obj_dealt[obj] && ObjPosGet(obj))
+         rendobj_core_render_object(obj, OBJ_NO_SPLIT, idx, clut, ptmf->render, ptmf);
+      goto done;
+   }
+#endif
+
 #ifdef HACK_CACHE
 #ifndef SHIP
    if (always_slow_split)
@@ -3083,7 +3096,7 @@ extern "C" int RenderRTGameObjectPose(uint32_t obj, float pose[6])
 // does not stall a frame.
 extern "C" void RenderRTGameDrawExtraObjects(void)
 {
-   const float kRadius = 60.0f;   // feet, ~18 m
+   const float kRadius = 130.0f;  // feet, ~40 m
    int budget = 24;
    ObjID player;
    if (!g_lgd3d || !RenderRTCaptureDraws())
