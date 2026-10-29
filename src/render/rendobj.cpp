@@ -2444,7 +2444,9 @@ BOOL rendobj_core_render_object(ObjID obj, int fragment, int idx, uchar *clut,
    if (rt_object)
    {
       lgd3d_render_flush();
-      RenderRTObjectBegin(obj, rt_whole);
+      RenderRTObjectBegin(obj, (rt_whole ? kRenderRTObjectWhole : 0) |
+                               (rt_type != OM_TYPE_MD && rt_type != OM_TYPE_MESH
+                                   ? kRenderRTObjectNoShadow : 0));
       if (rt_whole)
          r3d_rt_noclip = 1;
    }

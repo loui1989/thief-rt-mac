@@ -534,6 +534,7 @@ constexpr float kKeepDistance = 60.0f;
 std::unordered_map<uint32_t, CachedObject> g_objects;
 uint32_t g_currentObject = 0;
 bool g_currentWhole = false;
+bool g_currentNoShadow = false;
 std::vector<CapturedPrim> g_currentCapture;
 uint32_t g_frameNumber = 1;
 bool g_emissiveSpriteNow = false;
@@ -1802,7 +1803,9 @@ void inspect_view()
          if (dx * dx + dy * dy + dz * dz > 16.0f)
             continue;
          size_t tris = 0, shadowTris = 0;
+         unsigned allFlags = 0;
          for (const CapturedPrim &p : c.prims) {
+            allFlags |= unsigned(p.flags);
             tris += p.verts.size() / 3;
             if (p.flags & RG_MESH_PRIMITIVE_SHADOW_ONLY)
                shadowTris += p.verts.size() / 3;
@@ -1810,9 +1813,9 @@ void inspect_view()
          char name[128];
          RenderRTGameObjectName(e.first, name, sizeof(name));
          out("  object %u \"%s\": %zu triangles (%zu shadow-only) in %zu primitives, whole %d, "
-             "drawn frame %u (now %u), posed %d\n",
+             "drawn frame %u (now %u), posed %d, flags 0x%x\n",
              e.first, name, tris, shadowTris, c.prims.size(), int(c.whole), c.frame, g_frameNumber,
-             int(c.posed));
+             int(c.posed), allFlags);
       }
    }
    if (log)
@@ -2004,6 +2007,9 @@ void RenderRTDrawWorld(int primitive, const sRenderBackendVertex *v, const float
       prim.flags |= RG_MESH_PRIMITIVE_ALPHA_TESTED;
    }
 
+   // a camera-facing bitmap object: seen, but it must not shadow anything
+   if (g_currentObject && g_currentNoShadow && !g_RenderRTShadowOnly)
+      prim.flags |= RG_MESH_PRIMITIVE_NO_SHADOW;
    prim.tex = tex;
    prim.texSerial = tex ? tex->serial : 0;
    prim.blend = g_blend;
@@ -2075,10 +2081,11 @@ void RenderRTDrawWorld(int primitive, const sRenderBackendVertex *v, const float
       emit(std::move(e.second));
 }
 
-void RenderRTObjectBegin(uint32_t obj, int whole)
+void RenderRTObjectBegin(uint32_t obj, int flags)
 {
    g_currentObject = g_inScene ? obj : 0;
-   g_currentWhole = whole != 0;
+   g_currentWhole = (flags & kRenderRTObjectWhole) != 0;
+   g_currentNoShadow = (flags & kRenderRTObjectNoShadow) != 0;
    g_currentCapture.clear();
 }
 
