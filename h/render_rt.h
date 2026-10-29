@@ -97,8 +97,10 @@ void RenderRTWorldTexture(int textureId, void *texture);
 // Lights, every frame between SceneBegin and SceneEnd. rgb is Dark's light
 // brightness (0..~255 per channel), radius 0 means unlimited. For a spot
 // light dir is set and inner/outer are cosines; inner < 0 for point lights.
+// reaches: the level's lighting has it shining on a cell near or in view.
 void RenderRTLight(uint32_t id, const float pos[3], const float rgb[3],
-                   float radius, const float dir[3], float inner, float outer);
+                   float radius, const float dir[3], float inner, float outer,
+                   int reaches);
 
 #ifdef __cplusplus
 }

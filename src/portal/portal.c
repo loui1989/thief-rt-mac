@@ -1795,6 +1795,93 @@ static void portal_rt_submit_world(void)
    }
 }
 
+// Which static lights can matter for this view: the lights the level's
+// lighting found shining on the cells around the camera (reached through
+// portals, within a radius, in view or not: bounce light and shadows come from
+// there too) and on the cells drawn last frame (a lit street seen far away).
+// The ray tracer is given only these, so its few candidate lights per pixel
+// are not spent on lamps behind the walls.
+#define PORTAL_RT_LIGHT_BITS 65536
+static unsigned char portal_rt_light_bits[PORTAL_RT_LIGHT_BITS / 8];
+static unsigned int *portal_rt_cell_stamp;
+static int portal_rt_cell_stamp_size;
+static unsigned int portal_rt_stamp;
+
+static void portal_rt_mark_cell_lights(int c)
+{
+   ushort *lt;
+   int k, n;
+   if (c < 0 || c >= wr_num_cells || !WR_CELL(c))
+      return;
+   lt = WR_CELL(c)->light_indices;
+   if (!lt)
+      return;
+   n = lt[0];
+   for (k = 1; k <= n; ++k)
+      portal_rt_light_bits[lt[k] >> 3] |= (unsigned char)(1 << (lt[k] & 7));
+}
+
+static void portal_rt_find_lights(int start)
+{
+   static int *queue;
+   static int queue_size;
+   const float radius = 30.0f / 0.3048f;   // metres, in Dark units
+   int head = 0, tail = 0, i;
+   memset(portal_rt_light_bits, 0, sizeof(portal_rt_light_bits));
+   if (wr_num_cells <= 0)
+      return;
+   if (portal_rt_cell_stamp_size < wr_num_cells) {
+      free(portal_rt_cell_stamp);
+      free(queue);
+      portal_rt_cell_stamp = (unsigned int *)calloc(wr_num_cells, sizeof(unsigned int));
+      queue = (int *)malloc(sizeof(int) * wr_num_cells);
+      portal_rt_cell_stamp_size = portal_rt_cell_stamp ? wr_num_cells : 0;
+      queue_size = wr_num_cells;
+      if (!portal_rt_cell_stamp || !queue)
+         return;
+   }
+   if (++portal_rt_stamp == 0) {
+      memset(portal_rt_cell_stamp, 0, sizeof(unsigned int) * portal_rt_cell_stamp_size);
+      portal_rt_stamp = 1;
+   }
+   for (i = 0; i < r_sorted_count && i < MAX_ACTIVE_REGIONS; ++i)
+      portal_rt_mark_cell_lights(active_regions[i]);
+   if (start < 0 || start >= wr_num_cells || !WR_CELL(start))
+      return;
+   queue[tail++] = start;
+   portal_rt_cell_stamp[start] = portal_rt_stamp;
+   while (head < tail) {
+      PortalCell *cell = WR_CELL(queue[head++]);
+      PortalPolygonCore *portal = cell->portal_poly_list;
+      int n = cell->num_portal_polys;
+      portal_rt_mark_cell_lights(queue[head - 1]);
+      while (n-- > 0) {
+         const int d = portal->destination;
+         ++portal;
+         if (d < 0 || d >= wr_num_cells || portal_rt_cell_stamp[d] == portal_rt_stamp || !WR_CELL(d))
+            continue;
+         portal_rt_cell_stamp[d] = portal_rt_stamp;
+         {
+            const mxs_vector *c = &WR_CELL(d)->sphere_center;
+            const float dx = c->x - portal_camera_loc.x, dy = c->y - portal_camera_loc.y,
+                        dz = c->z - portal_camera_loc.z;
+            const float r = radius + WR_CELL(d)->sphere_radius;
+            if (dx * dx + dy * dy + dz * dz > r * r)
+               continue;
+         }
+         if (tail < queue_size)
+            queue[tail++] = d;
+      }
+   }
+}
+
+int portal_rt_light_relevant(int light)
+{
+   if (light < 0 || light >= PORTAL_RT_LIGHT_BITS)
+      return 1;
+   return (portal_rt_light_bits[light >> 3] >> (light & 7)) & 1;
+}
+
 static void portal_rt_begin(float zoom, int cell)
 {
    mxs_matrix *slew;
@@ -1811,6 +1898,7 @@ static void portal_rt_begin(float zoom, int cell)
    RenderRTCameraMedium(cell >= 0 && cell < wr_num_cells && WR_CELL(cell) &&
                         WR_CELL(cell)->medium == 2);
    portal_rt_submit_world();
+   portal_rt_find_lights(cell);
    objlight_rt_submit();
 }
 #endif

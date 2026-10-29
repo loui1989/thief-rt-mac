@@ -623,6 +623,7 @@ float blame_object_lighting(ObjID o)
 
 #ifdef DARK_RT
 #include <render_rt.h>
+extern int portal_rt_light_relevant(int light);
 // Hand the object-light table to the ray tracer: every static and animated
 // light (their current brightness, as the game set it this frame) and this
 // frame's dynamic lights.  Brightness goes back to Dark's 0..255 scale.
@@ -645,7 +646,8 @@ void objlight_rt_submit(void)
       pos[0] = l->loc.x; pos[1] = l->loc.y; pos[2] = l->loc.z;
       dir[0] = l->dir.x; dir[1] = l->dir.y; dir[2] = l->dir.z;
       RenderRTLight(i >= num_light ? 0x10000u + (uint32_t)(i - num_light) : (uint32_t)i,
-                    pos, rgb, l->radius, dir, l->inner, l->outer);
+                    pos, rgb, l->radius, dir, l->inner, l->outer,
+                    i >= num_light || portal_rt_light_relevant(i));
    }
 }
 #endif

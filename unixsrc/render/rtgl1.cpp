@@ -88,6 +88,7 @@ struct Settings {
    bool volumetric = false;   // haze lit by every light
    int dynres = 0;            // dynamic resolution's target fps, 0 off
    int maxLights = 64;        // lights given to the path tracer, nearest first; 0 all
+   bool lightCull = true;     // skip lights the level's lighting has on no cell near or in view
    float minRoughness = 0.7f; // no surface glossier than this (1: no glossy highlights)
    int debugView = 0;         // 0 off, 1 shadow visibility, 2 direct diffuse, 3 specular, 4 bounce
    float waterAlpha = 0.55f;
@@ -142,6 +143,7 @@ void load_settings()
       else if (k == "volumetric") g_cfg.volumetric = value != 0;
       else if (k == "dynres") g_cfg.dynres = std::clamp(int(value), 0, 240);
       else if (k == "max_lights") g_cfg.maxLights = std::clamp(int(value), 0, 4096);
+      else if (k == "light_cull") g_cfg.lightCull = value != 0;
       else if (k == "min_roughness") g_cfg.minRoughness = std::clamp(value, 0.0f, 1.0f);
    }
    fclose(f);
@@ -158,10 +160,11 @@ void save_settings()
       return;
    fprintf(f, "upscale = %d\nscale = %.2f\nfps = %d\nvsync = %d\nlight = %.3f\nsky = %.3f\n"
               "light_size = %.3f\nglow = %.3f\nwater = %d\nsprite_glow = %.3f\ngi = %d\n"
-              "volumetric = %d\ndynres = %d\nmax_lights = %d\nmin_roughness = %.2f\n",
+              "volumetric = %d\ndynres = %d\nmax_lights = %d\nmin_roughness = %.2f\nlight_cull = %d\n",
            g_cfg.upscale, g_cfg.scale, int(g_cfg.fps), int(g_cfg.vsync), g_cfg.light, g_cfg.sky,
            g_cfg.lightSize, g_cfg.glow, g_cfg.water, g_cfg.spriteGlow, g_cfg.gi,
-           int(g_cfg.volumetric), g_cfg.dynres, g_cfg.maxLights, g_cfg.minRoughness);
+           int(g_cfg.volumetric), g_cfg.dynres, g_cfg.maxLights, g_cfg.minRoughness,
+           int(g_cfg.lightCull));
    fclose(f);
 }
 
@@ -310,9 +313,10 @@ struct PendingLight {
    uint32_t id;
    float pos[3], rgb[3], dir[3];
    float radius, inner, outer, peak, score = 0;
+   bool reaches = true;   // shines on a cell near the camera or in view
 };
 std::vector<PendingLight> g_pendingLights;
-uint32_t g_lightsTotal = 0, g_frameLightsShown = 0;
+uint32_t g_lightsTotal = 0, g_frameLightsShown = 0, g_lightsReaching = 0;
 std::vector<PendingLight> g_lastLights;   // last frame's, for the inspector
 std::vector<PendingLight> g_frozenLights;  // while g_freeze
 bool g_underwater = false;
@@ -1202,13 +1206,14 @@ const char *kUpscaleNames[] = {"Off",
                                "MetalFX Custom"};
 
 enum UiRow {
-   kRowUpscale, kRowScale, kRowDynres, kRowBounces, kRowLights, kRowVolumetric, kRowVsync,
+   kRowUpscale, kRowScale, kRowDynres, kRowBounces, kRowLights, kRowLightCull, kRowVolumetric, kRowVsync,
    kRowFps, kRowLight, kRowSky, kRowLightSize, kRowRough, kRowGlow, kRowWater,
    kRowDebug, kRowFreeze, kRowBackFaces, kRowReuse, kRowInspect, kRowReset, kRowCount
 };
 
 const char *kRowLabels[kRowCount] = {
    "Upscaler", "Render resolution", "Dynamic resolution", "Bounce light", "Lights traced",
+   "Lights behind walls",
    "Volumetric light", "VSync", "FPS counter", "Light brightness", "Sky brightness",
    "Light size (soft shadows)", "Surface roughness", "Lamp glow", "Water",
    "Debug view", "Freeze scene (test)", "Back faces (test)", "Light sampling (test)", "Inspect centre of view", "Reset to defaults",
@@ -1240,6 +1245,7 @@ std::string row_value(int row)
       if (g_cfg.maxLights <= 0) return "All";
       snprintf(buf, sizeof(buf), "nearest %d", g_cfg.maxLights);
       return buf;
+   case kRowLightCull: return g_cfg.lightCull ? "Skipped" : "Traced";
    case kRowVolumetric: return g_cfg.volumetric ? "On" : "Off";
    case kRowVsync: return g_cfg.vsync ? "On" : "Off";
    case kRowFps: return g_cfg.fps ? "On" : "Off";
@@ -1324,6 +1330,7 @@ void change_row(int row, int dir)
       g_cfg.maxLights = kSteps[(i + dir + n) % n];
       break;
    }
+   case kRowLightCull: g_cfg.lightCull = !g_cfg.lightCull; break;
    case kRowVolumetric: g_cfg.volumetric = !g_cfg.volumetric; break;
    case kRowVsync: g_cfg.vsync = !g_cfg.vsync; break;
    case kRowFps: g_cfg.fps = !g_cfg.fps; break;
@@ -1424,8 +1431,8 @@ void draw_ui(bool scene)
                   g_ui.fps, g_ui.frameMs, g_ui.worstMs, w, h, g_drawableW, g_drawableH);
       // waiting in rgStartFrame is the GPU still busy with earlier frames
       const double game = std::max(0.0, g_ui.frameMs - g_ui.waitMs - g_ui.drawMs);
-      snprintf(line2, sizeof(line2), "game %4.1f ms   rt submit %4.1f ms   gpu wait %4.1f ms   lights %u/%u",
-               game, g_ui.drawMs, g_ui.waitMs, g_frameLightsShown, g_lightsTotal);
+      snprintf(line2, sizeof(line2), "game %4.1f ms   rt submit %4.1f ms   gpu wait %4.1f ms   lights %u/%u/%u",
+               game, g_ui.drawMs, g_ui.waitMs, g_frameLightsShown, g_lightsReaching, g_lightsTotal);
       const float s = std::round(px * 0.8f);
       const float tw = std::max(text_width(s, line), text_width(s, line2));
       panel(0, 0, tw + 2 * pad, 2 * s + pad * 1.5f, 0.6f);
@@ -1580,6 +1587,9 @@ void draw_frame(bool sceneDrawn)
       .depthGateFeather = 1.0f,
       .depthGateTaps = 5,
    };
+   int renderW = 0, renderH = 0;
+   render_size(renderW, renderH);
+   const float spatialRadius = std::clamp(30.0f * float(renderW) / 1152.0f, 30.0f, 80.0f);
    auto illum = RgDrawFrameIlluminationParams{
       .sType = RG_STRUCTURE_TYPE_DRAW_FRAME_ILLUMINATION_PARAMS,
       .pNext = &volumetric,
@@ -1610,7 +1620,9 @@ void draw_frame(bool sceneDrawn)
       // more candidate lights per pixel (no extra rays): Thief has many small lights
       .restirInitialSamples = 12,
       .restirSpatialSamples = (g_reuseTest == 1 || g_reuseTest == 2) ? 0u : 8u,
-      .restirSpatialRadius = 30.0f,
+      // in pixels: 30 at ~1150 wide (Blood RT's), wider at higher resolutions so
+      // neighbours are taken from as far across the surface as there
+      .restirSpatialRadius = spatialRadius,
       .restirTemporalMCap = g_reuseTest == 2 ? 1u : 20u,
       .rrGuideMin = 0.01f,
       .rrGuideMode = 1,
@@ -2368,7 +2380,7 @@ void RenderRTWorldTexture(int textureId, void *texture)
 }
 
 void RenderRTLight(uint32_t id, const float pos[3], const float rgb[3], float radius,
-                   const float dir[3], float inner, float outer)
+                   const float dir[3], float inner, float outer, int reaches)
 {
    if (!g_inScene)
       return;
@@ -2385,6 +2397,7 @@ void RenderRTLight(uint32_t id, const float pos[3], const float rgb[3], float ra
    l.inner = inner;
    l.outer = outer;
    l.peak = peak;
+   l.reaches = reaches != 0;
    g_pendingLights.push_back(l);
 }
 
@@ -2458,6 +2471,14 @@ void flush_lights()
       return;
    }
    g_lightsTotal = uint32_t(g_pendingLights.size());
+   // A light that shines on none of the cells around the camera or in view
+   // is behind walls (the level's own lighting says so): every candidate
+   // RTGL1 spent on it would be shadowed, the splotches in dark places.
+   if (g_cfg.lightCull)
+      g_pendingLights.erase(std::remove_if(g_pendingLights.begin(), g_pendingLights.end(),
+                                           [](const PendingLight &L) { return !L.reaches; }),
+                            g_pendingLights.end());
+   g_lightsReaching = uint32_t(g_pendingLights.size());
    const RgFloat3D cam = to_rt(g_camera.pos);
    const size_t keep = g_cfg.maxLights > 0 ? size_t(g_cfg.maxLights) : g_pendingLights.size();
    static std::unordered_map<uint32_t, uint32_t> s_chosen;   // id -> frame last chosen
