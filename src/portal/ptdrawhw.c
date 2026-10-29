@@ -25,6 +25,9 @@
 
 #include <profile.h>
 #include <memall.h>
+#ifdef DARK_RT
+#include <render_rt.h>
+#endif
 #include <dbmem.h>   // must be last header! 
 
 #define STATS_ON
