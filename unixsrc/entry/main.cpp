@@ -345,6 +345,11 @@ int main(int argc, char *argv[])
     PlatformDiagnosticsStartSession(engineArgc > 0 ? arguments[0] : nullptr,
                                     engineArgc, arguments.data());
     const int result = _AppMain(engineArgc, arguments.data());
+#if defined(__APPLE__)
+    // see cUnixApplication::Quit: skip library static destructors
+    std::fflush(nullptr);
+    _exit(result);
+#endif
 #ifdef __ANDROID__
     char resultMessage[96];
     std::snprintf(resultMessage, sizeof(resultMessage),

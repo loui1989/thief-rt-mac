@@ -69,6 +69,8 @@ struct Settings {
    int upscale = 3;
    float light = 1.0f;
    float sky = 1.0f;
+   float glow = 1.0f;
+   float lightSize = 0.25f;
    bool flip = false;
    bool debug = false;
 } g_cfg;
@@ -188,6 +190,8 @@ bool g_cameraUploaded = false;
 bool g_vsync = true;
 int g_drawableW = 1, g_drawableH = 1;
 uint32_t g_framePrims = 0, g_frameDropped = 0, g_frameLights = 0;
+// this frame's light positions (meters), for making light fixtures glow
+std::vector<RgFloat3D> g_lightPositions;
 
 struct Camera {
    float pos[3], fwd[3], left[3], up[3];
@@ -282,6 +286,7 @@ void start_frame()
    }
    g_cameraUploaded = false;
    g_framePrims = g_frameDropped = g_frameLights = 0;
+   g_lightPositions.clear();
    g_primitiveCounters.clear();
 }
 
@@ -412,6 +417,8 @@ bool Open(SDL_Window *window)
    g_cfg.sky = env_float("THIEF_RT_SKY", 1.0f);
    g_cfg.flip = env_float("THIEF_RT_FLIP", 0) != 0;
    g_cfg.debug = env_float("THIEF_RT_DEBUG", 0) != 0;
+   g_cfg.glow = env_float("THIEF_RT_GLOW", 1.0f);
+   g_cfg.lightSize = env_float("THIEF_RT_LIGHT_SIZE", 0.25f);
 
    g_metalView = SDL_Metal_CreateView(window);
    if (!g_metalView) {
@@ -692,9 +699,28 @@ void quad(RgPrimitiveVertex *v, float x0, float y0, float x1, float y1, uint32_t
 void draw_frame(bool sceneDrawn)
 {
    double current = now_seconds();
+   // Thief's skies are night skies. RTGL1's default sky colour is a bright
+   // grey that lit every outdoor surface like daylight. Linking this struct
+   // replaces all of RTGL1's sky defaults, so every field is set.
+   auto sky = RgDrawFrameSkyParams{
+      .sType = RG_STRUCTURE_TYPE_DRAW_FRAME_SKY_PARAMS,
+      .pNext = nullptr,
+      .skyType = RG_SKY_TYPE_COLOR,
+      .skyColorDefault = {{0.035f, 0.045f, 0.075f}},
+      .skyColorMultiplier = g_cfg.sky,
+      .skyColorSaturation = 1.0f,
+      .skyViewerPosition = {{0, 0, 0}},
+      .pSkyCubemapTextureName = nullptr,
+      .skyCubemapRotationTransform = {},
+      .sunRequireSky = 0.0f,
+      .sunLeakDebug = 0.0f,
+      .sunLeakDebugMul = 1.0f,
+      .sunSkyProbeMaxDist = 10000.0f,
+      .sunSplit = 0.0f,
+   };
    auto info = RgDrawFrameInfo{
       .sType = RG_STRUCTURE_TYPE_DRAW_FRAME_INFO,
-      .pNext = nullptr,
+      .pNext = &sky,
       .rayLength = 2000.0f,
       .disableRayTracedGeometry = sceneDrawn ? 0u : 1u,
       .disableRasterization = false,
@@ -917,6 +943,31 @@ void RenderRTDrawWorld(int primitive, const sRenderBackendVertex *v, const float
    }
    if (g_blend == kRenderBackendBlendMultiply)
       return;   // a lightmap or shadow pass over something already submitted
+
+   // A light fixture's bulb, flame or glass sits at the light it carries:
+   // make what is drawn there glow, so lamps are seen to be lit.
+   if (g_cfg.glow > 0.0f && !g_lightPositions.empty() && name) {
+      float c[3] = {0, 0, 0};
+      for (const RgPrimitiveVertex &d : verts)
+         for (int k = 0; k < 3; ++k)
+            c[k] += d.position[k];
+      for (float &x : c)
+         x /= float(verts.size());
+      float extent = 0;
+      for (const RgPrimitiveVertex &d : verts) {
+         const float dx = d.position[0] - c[0], dy = d.position[1] - c[1], dz = d.position[2] - c[2];
+         extent = std::max(extent, dx * dx + dy * dy + dz * dz);
+      }
+      // only small parts: never a wall or a whole statue near a torch
+      if (extent < 0.6f * 0.6f)
+         for (const RgFloat3D &l : g_lightPositions) {
+            const float dx = l.data[0] - c[0], dy = l.data[1] - c[1], dz = l.data[2] - c[2];
+            if (dx * dx + dy * dy + dz * dz < 0.35f * 0.35f) {
+               emissive = std::max(emissive, g_cfg.glow);
+               break;
+            }
+         }
+   }
    const uint32_t key = tex ? tex->serial : 0;
    const uint32_t n = g_primitiveCounters[key]++;
    const uint64_t id = 0x300000000ull + (uint64_t(key) << 12) + n;
@@ -1019,7 +1070,11 @@ void RenderRTLight(uint32_t id, const float pos[3], const float rgb[3], float ra
    const uint32_t color = pack_color(rgb[0] / peak, rgb[1] / peak, rgb[2] / peak, 1);
    // Dark's brightness is a light level (0..255 at the source, falling off
    // with distance); RTGL1's intensity is luminous flux. Calibrated by eye.
-   float lumens = peak * 40.0f * g_cfg.light;
+   // Dark falls off as 1/distance up to the light's radius, RTGL1 as
+   // 1/distance^2; a larger source and a lower flux keep the nearby walls
+   // from burning out while the far side of a room still receives light.
+   float lumens = peak * 4.0f * g_cfg.light;
+   g_lightPositions.push_back(to_rt(pos));
    (void)radius;
    RgLightSphericalEXT sphere{};
    RgLightSpotEXT spot{};
@@ -1033,7 +1088,7 @@ void RenderRTLight(uint32_t id, const float pos[3], const float rgb[3], float ra
          .intensity = lumens,
          .position = to_rt(pos),
          .direction = {{dir[0] / l, dir[1] / l, dir[2] / l}},
-         .radius = 0.05f,
+         .radius = g_cfg.lightSize,
          // Dark stores the cone as cosines
          .angleOuter = std::acos(std::clamp(outer, -1.0f, 1.0f)),
          .angleInner = std::acos(std::clamp(inner, -1.0f, 1.0f)),
@@ -1046,7 +1101,7 @@ void RenderRTLight(uint32_t id, const float pos[3], const float rgb[3], float ra
          .color = color,
          .intensity = lumens,
          .position = to_rt(pos),
-         .radius = 0.05f,
+         .radius = g_cfg.lightSize,
       };
       ext = &sphere;
    }

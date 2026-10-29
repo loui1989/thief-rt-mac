@@ -603,7 +603,9 @@ tResult LGAPI CoreEngineAppInit()
    if (!config_is_defined("game_hardware"))
       config_set_int("game_hardware", 1);
 
-#ifdef __ANDROID__
+#if defined(__ANDROID__) || defined(__APPLE__)
+   // macOS: the window can be any shape (and fullscreen is a fullscreen
+   // window), so gameplay likewise follows it rather than a fixed mode.
    // Android always owns a fullscreen surface.  Fit therefore means using
    // that surface's settled pixel dimensions for the gameplay canvas, not
    // stretching a legacy 4:3 canvas across it.  Menus keep their fixed

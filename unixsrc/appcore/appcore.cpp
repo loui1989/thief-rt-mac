@@ -42,7 +42,15 @@ public:
       // Shut the engine down while every library is still intact; the
       // atexit copy of this handler then has nothing left to do.
       AppOnExit();
+#if defined(__APPLE__)
+      // Nothing of ours is left to tear down, and the system frameworks the
+      // ray tracer loads (MetalFX, MPSGraph) abort in their own static
+      // destructors when a library's globals are destroyed in exit()'s order.
+      std::fflush(nullptr);
+      _exit(0);
+#else
       std::exit(0);
+#endif
    }
    void Abort(const char *reason) override
    {
