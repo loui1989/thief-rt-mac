@@ -41,9 +41,17 @@ static BOOL g_fReturnedFromMain;
 
 void AppOnExit()
 {
+    // Unix runs this explicitly before exit(): by the time atexit handlers
+    // run, libraries loaded with dlopen (OpenAL Soft) have already destroyed
+    // their own state, and shutting down sound through them aborts.
+    static BOOL s_running;
+    if (s_running)
+        return;
+    s_running = TRUE;
     // Tell the app the components are about to go away
     if (g_fCallAppExit)
         AppExit();
+    g_fCallAppExit = FALSE;
     if (pAppAggregate)
     {
         pAppAggregate->End();
@@ -57,6 +65,7 @@ void AppOnExit()
         //AssertMsg1(!g_fReturnedFromMain || ulRefsRemaining == 1, "Reference of application object is incorrect on exit (was %d, expected 1)", ulRefsRemaining);
         pAppAggregate = NULL;
     }
+    s_running = FALSE;
 }
 
 ///////////////////////////////////////////////////////////////////////////////
@@ -131,6 +140,10 @@ int LGAPI _AppMain(int argc, const char *argv[])
     int mainRetVal = AppMain(argc, argv);
     ANDROID_STARTUP_TRACE("AppMain returned");
     g_fReturnedFromMain = TRUE;
+#if !defined(_WIN32)
+    // see AppOnExit: shut down before exit() runs library destructors
+    AppOnExit();
+#endif
     return mainRetVal;
 }
 

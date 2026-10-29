@@ -12,6 +12,8 @@
 #include <appapi.h>
 #include <platform_services.h>
 
+void AppOnExit();   // libsrc/appcore/appcore.cpp
+
 class cUnixApplication : public IApplication
 {
    DECLARE_SIMPLE_AGGREGATION(cUnixApplication);
@@ -37,6 +39,9 @@ public:
    void Quit() override
    {
       for (auto *sink : m_sinks) sink->OnQuit();
+      // Shut the engine down while every library is still intact; the
+      // atexit copy of this handler then has nothing left to do.
+      AppOnExit();
       std::exit(0);
    }
    void Abort(const char *reason) override
