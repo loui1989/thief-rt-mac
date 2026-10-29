@@ -271,6 +271,17 @@ if(DARK_BUILD_ENGINE)
 
   add_library(dark_engine_config INTERFACE)
   target_include_directories(dark_engine_config INTERFACE ${dark_include_dirs})
+
+  # The RTGL1 path tracer (macOS, Metal): DARK_RTGL1_INCLUDE names the folder
+  # that holds RTGL1/RTGL1.h. The library itself is loaded at run time.
+  set(DARK_RTGL1_INCLUDE "" CACHE PATH "RTGL1 include folder (enables the ray tracer)")
+  if(APPLE AND DARK_RTGL1_INCLUDE AND EXISTS "${DARK_RTGL1_INCLUDE}/RTGL1/RTGL1.h")
+    set(DARK_RT ON)
+    target_compile_definitions(dark_engine_config INTERFACE DARK_RT=1)
+    message(STATUS "Ray tracing renderer: RTGL1 (${DARK_RTGL1_INCLUDE})")
+  else()
+    set(DARK_RT OFF)
+  endif()
   target_compile_definitions(dark_engine_config INTERFACE
     RGB_LIGHTING BIG_LIGHTMAPS SOFTWARE_RGB SCHEMA_LOADING
     $<$<PLATFORM_ID:Linux>:_DEFAULT_SOURCE>
@@ -486,6 +497,12 @@ if(DARK_BUILD_ENGINE)
     )
     target_link_libraries(dark_unix_providers PUBLIC dark_engine_packed)
     target_link_libraries(dark_unix_providers PUBLIC SDL2::SDL2)
+    if(DARK_RT)
+      target_sources(dark_unix_providers PRIVATE unixsrc/render/rtgl1.cpp)
+      target_include_directories(dark_unix_providers PRIVATE "${DARK_RTGL1_INCLUDE}")
+      set_source_files_properties(unixsrc/render/rtgl1.cpp PROPERTIES
+        COMPILE_OPTIONS "-std=c++20")
+    endif()
     if(TARGET dark_squirrel)
       target_compile_definitions(dark_unix_providers PRIVATE
         DARK_ENABLE_SQUIRREL=1)

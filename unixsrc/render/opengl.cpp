@@ -1,6 +1,9 @@
 #define GL_GLEXT_PROTOTYPES
 #pragma pack(push, 8)
 #include <SDL2/SDL.h>
+#ifdef DARK_RT
+#include <SDL2/SDL_metal.h>
+#endif
 #ifdef DARK_OPENGL_ES
 #include <GLES3/gl3.h>
 #elif defined(__APPLE__)
@@ -29,6 +32,9 @@
 
 #include "app_icon_data.h"
 #include "runtime.h"
+#ifdef DARK_RT
+#include "rt_backend_internal.h"
+#endif
 
 extern "C" void DarkInputKey(uchar scan, int down);
 extern "C" void DarkInputMouse(short x, short y, uchar type, uchar buttons, char wheel);
@@ -45,6 +51,8 @@ struct Texture {
 };
 SDL_Window *g_window;
 SDL_GLContext g_context;
+// The RTGL1 path tracer presents instead of OpenGL (rt_backend_internal.h).
+bool g_rt;
 SDL_Cursor *g_invisibleCursor;
 int g_width, g_height, g_clientWidth, g_clientHeight;
 bool g_scene, g_scale = true, g_fit = true, g_preserve, g_quit;
@@ -80,6 +88,9 @@ GLuint g_sceneProgram, g_sceneBuffer, g_sceneVertexArray;
 GLint g_viewportUniform, g_useTexture1Uniform, g_fogEnabledUniform;
 GLint g_fogColorUniform, g_alphaTestUniform, g_transparentBlackUniform;
 
+void window_drawable_size(int &w, int &h);
+void viewport(int &x, int &y, int &w, int &h);
+
 // Window coordinates are in points; on HiDPI displays (macOS Retina, scaled
 // Wayland) the GL drawable has more pixels than the window has points.
 void drawable_scale(float &sx, float &sy)
@@ -87,12 +98,34 @@ void drawable_scale(float &sx, float &sy)
    sx = sy = 1.0f;
    if (!g_window || g_clientWidth <= 0 || g_clientHeight <= 0) return;
    int dw = 0, dh = 0;
-   SDL_GL_GetDrawableSize(g_window, &dw, &dh);
+   window_drawable_size(dw, dh);
    if (dw > 0 && dh > 0) {
       sx = static_cast<float>(dw) / g_clientWidth;
       sy = static_cast<float>(dh) / g_clientHeight;
    }
 }
+
+void window_drawable_size(int &w, int &h)
+{
+   w = g_clientWidth; h = g_clientHeight;
+   if (!g_window) return;
+#ifdef DARK_RT
+   if (g_rt) { SDL_Metal_GetDrawableSize(g_window, &w, &h); return; }
+#endif
+   SDL_GL_GetDrawableSize(g_window, &w, &h);
+}
+
+#ifdef DARK_RT
+// viewport() in drawable pixels, for the ray tracer
+darkrt::Rect rt_viewport_rect()
+{
+   int x, y, w, h; viewport(x, y, w, h);
+   int dw, dh; window_drawable_size(dw, dh);
+   const float sx = g_clientWidth > 0 ? float(dw) / g_clientWidth : 1.0f;
+   const float sy = g_clientHeight > 0 ? float(dh) / g_clientHeight : 1.0f;
+   return darkrt::Rect{x * sx, y * sy, w * sx, h * sy};
+}
+#endif
 
 void set_gl_viewport(int x, int y, int w, int h)
 {
@@ -327,6 +360,7 @@ void logical_point(int &x, int &y)
 
 void set_swap_interval(int interval)
 {
+   if (g_rt) { g_swapInterval = interval; return; }
    if (!g_context || g_swapInterval == interval)
       return;
    // Remember the request even when the compositor cannot provide it.  Some
@@ -408,6 +442,15 @@ void update_relative_mouse()
 
 void swap_presented_frame()
 {
+#ifdef DARK_RT
+   if (g_rt) {
+      if (!g_presentPending) return;
+      int dw, dh; window_drawable_size(dw, dh);
+      darkrt::Present(dw, dh, g_swapInterval == 1);
+      g_presentPending = false;
+      return;
+   }
+#endif
    if (!g_context || !g_presentPending)
       return;
    // Automated capture only needs the completed back buffer.  Some headless
@@ -579,7 +622,7 @@ bool capture_frame(const char *path)
 
 bool DarkRenderOpen(int width, int height, const char *title)
 {
-   if (g_context) {
+   if (g_context || g_rt) {
       // A logical mode change can replace the display device and its backing
       // pixel vector during an application frame. Do not retain a pointer to
       // the preceding mode's canvas.
@@ -635,6 +678,34 @@ bool DarkRenderOpen(int width, int height, const char *title)
 #endif
    SDL_GL_SetAttribute(SDL_GL_DOUBLEBUFFER, 1);
    SDL_GL_SetAttribute(SDL_GL_DEPTH_SIZE, 24);
+#ifdef DARK_RT
+   if (darkrt::Wanted()) {
+      g_window = SDL_CreateWindow(title ? title : "Dark Engine",
+         SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED, width, height,
+         SDL_WINDOW_METAL | SDL_WINDOW_RESIZABLE | SDL_WINDOW_ALLOW_HIGHDPI);
+      if (g_window && darkrt::Open(g_window)) {
+         g_rt = true;
+         set_window_icon();
+      } else if (g_window) {
+         SDL_DestroyWindow(g_window);
+         g_window = nullptr;
+      }
+   }
+   if (g_rt) {
+      const Uint8 blank[8] = {};
+      g_invisibleCursor = SDL_CreateCursor(blank, blank, 8, 8, 0, 0);
+      if (g_invisibleCursor) SDL_SetCursor(g_invisibleCursor);
+      SDL_ShowCursor(SDL_DISABLE);
+      fprintf(stderr, "macOS video backend: SDL/%s, RTGL1 path tracer\n",
+         SDL_GetCurrentVideoDriver());
+      g_width = g_clientWidth = width; g_height = g_clientHeight = height;
+      SDL_GetWindowSize(g_window, &g_clientWidth, &g_clientHeight);
+      g_quit = false; g_resizePending = false;
+      g_focused = (SDL_GetWindowFlags(g_window) & SDL_WINDOW_INPUT_FOCUS) != 0;
+      update_relative_mouse();
+      return true;
+   }
+#endif
    g_window = SDL_CreateWindow(title ? title : "Dark Engine",
       SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED, width, height,
       SDL_WINDOW_OPENGL | SDL_WINDOW_RESIZABLE | SDL_WINDOW_ALLOW_HIGHDPI);
@@ -677,6 +748,10 @@ void DarkRenderClose(void)
       destroy_scene_pipeline();
    }
    if (g_context) SDL_GL_DeleteContext(g_context);
+#ifdef DARK_RT
+   if (g_rt) darkrt::Close();
+   g_rt = false;
+#endif
    if (g_window) SDL_DestroyWindow(g_window);
    if (g_invisibleCursor) {
       SDL_SetCursor(SDL_GetDefaultCursor());
@@ -907,6 +982,18 @@ void DarkRenderSetRelativeMouse(bool enabled)
 static void present_legacy_frame(const void *pixels, int width, int height,
    int rowBytes, int depth, const uint8_t *palette)
 {
+#ifdef DARK_RT
+   if (g_rt) {
+      if (!pixels) return;
+      darkrt::SetCanvas(pixels, width, height, rowBytes, depth, palette, g_scene,
+         rt_viewport_rect());
+      if (g_scene && g_presentedGeneration != g_sceneGeneration) {
+         g_presentedGeneration = g_sceneGeneration; ++g_hardwareFrameCount;
+      }
+      g_presentPending = true;
+      return;
+   }
+#endif
    if (!g_context || !pixels) return; SDL_GL_MakeCurrent(g_window, g_context);
    int vx, vy, vw, vh; viewport(vx, vy, vw, vh);
    if (!g_scene) {
@@ -1009,6 +1096,20 @@ void DarkRenderPresent(const void *pixels, int width, int height, int rowBytes,
 bool DarkRenderPresentMovieFrame(const void *rgba, int width, int height,
                                  int rowBytes)
 {
+#ifdef DARK_RT
+   if (g_rt) {
+      if (!rgba || width <= 0 || height <= 0 || rowBytes < width * 4)
+         return false;
+      g_scene = false;
+      int dw, dh; window_drawable_size(dw, dh);
+      // letterbox the movie at its own aspect
+      float vw = float(dw), vh = float(dh);
+      const float aspect = float(width) / float(height);
+      if (vw / vh > aspect) vw = vh * aspect; else vh = vw / aspect;
+      const darkrt::Rect vp{(dw - vw) * 0.5f, (dh - vh) * 0.5f, vw, vh};
+      return darkrt::MovieFrame(rgba, width, height, rowBytes, vp, dw, dh);
+   }
+#endif
    if (!g_context || !rgba || width <= 0 || height <= 0 ||
        rowBytes < width * 4)
       return false;
@@ -1083,7 +1184,7 @@ bool DarkRenderPresentMovieFrame(const void *rgba, int width, int height,
 }
 
 extern "C" {
-int RenderBackendAvailable(void) { return g_context != nullptr; }
+int RenderBackendAvailable(void) { return g_context != nullptr || g_rt; }
 void RenderBackendSetScaleToWindow(int enabled) { g_scale = enabled != 0; }
 void RenderBackendSetFitToViewport(int enabled) { g_fit = enabled != 0; }
 void RenderBackendSetInteractiveResize(int) {}
@@ -1092,17 +1193,20 @@ int RenderBackendPreserveCanvas(void) { return g_preserve; }
 void RenderBackendSetWindowedClientSizeHint(int, int) {}
 int RenderBackendGetSettledClientSize(int *width, int *height)
 {
-   if (!width || !height || !g_context ||
+   if (!width || !height || !(g_context || g_rt) ||
        g_clientWidth <= 0 || g_clientHeight <= 0)
       return 0;
    *width = g_clientWidth;
    *height = g_clientHeight;
    return 1;
 }
-int RenderBackendClientToLogicalPoint(int *x, int *y) { if (!x || !y || !g_context) return 0; logical_point(*x, *y); return 1; }
-int RenderBackendLogicalToClientPoint(int *x, int *y) { int vx,vy,vw,vh; if (!x || !y || !g_context) return 0; viewport(vx,vy,vw,vh); *x=vx+*x*vw/g_width; *y=vy+*y*vh/g_height; return 1; }
+int RenderBackendClientToLogicalPoint(int *x, int *y) { if (!x || !y || !(g_context || g_rt)) return 0; logical_point(*x, *y); return 1; }
+int RenderBackendLogicalToClientPoint(int *x, int *y) { int vx,vy,vw,vh; if (!x || !y || !(g_context || g_rt)) return 0; viewport(vx,vy,vw,vh); *x=vx+*x*vw/g_width; *y=vy+*y*vh/g_height; return 1; }
 int RenderBackendBeginFrame(void)
 {
+#ifdef DARK_RT
+   if (g_rt) { set_swap_interval(1); g_scene=true; ++g_sceneGeneration; darkrt::BeginSceneFrame(); return 1; }
+#endif
    if (!g_context) return 0; SDL_GL_MakeCurrent(g_window, g_context);
    set_swap_interval(1);
    int x,y,w,h; viewport(x,y,w,h); set_gl_viewport(x,y,w,h); glClearColor(0,0,0,1);
@@ -1110,27 +1214,41 @@ int RenderBackendBeginFrame(void)
    apply_depth_state(); apply_blend_state();
    g_scene=true;++g_sceneGeneration;return 1;
 }
-void RenderBackendEndFrame(void) { glFlush(); }
+void RenderBackendEndFrame(void) { if (!g_rt) glFlush(); }
 void RenderBackendDeactivateScene(void) { g_scene=false;set_swap_interval(0); }
 void RenderBackendClearDepth(void)
 {
    if (g_context) clear_depth();
 }
-void RenderBackendSetDepth(int compare, int write) { g_depthCompare=compare!=0;g_depthWrite=write!=0;apply_depth_state(); }
+void RenderBackendSetDepth(int compare, int write) { g_depthCompare=compare!=0;g_depthWrite=write!=0;if(!g_rt)apply_depth_state(); }
 void RenderBackendSetBlend(int mode)
 {
-   g_blendMode=mode;apply_blend_state();
+   g_blendMode=mode;
+#ifdef DARK_RT
+   if (g_rt) { darkrt::SetBlend(mode); return; }
+#endif
+   apply_blend_state();
 }
-void RenderBackendSetAlphaTest(int enabled) { g_alphaTest=enabled; }
+void RenderBackendSetAlphaTest(int enabled)
+{
+   g_alphaTest=enabled;
+#ifdef DARK_RT
+   if (g_rt) darkrt::SetAlphaTest(enabled);
+#endif
+}
 void RenderBackendSetSampler(int level, int wrap, int smooth)
 {
    if (level < 0 || level >= 2) return;
+   if (g_rt) return;
    g_samplerWrap[level]=wrap!=0;g_samplerSmooth[level]=smooth!=0;
    Texture *texture=static_cast<Texture*>(g_textures[level]);if(texture)bind_texture(level,texture);
 }
 void RenderBackendSetFog(int enabled, uint32_t rgb) { g_fog=enabled;g_fogColor=rgb; }
 void *RenderBackendCreateTexture(int width,int height,const void *rgba,int rowBytes)
 {
+#ifdef DARK_RT
+   if (g_rt) return darkrt::CreateTexture(width,height,rgba,rowBytes);
+#endif
    if(width<=0||height<=0||!rgba||rowBytes<width*4)return nullptr;
    std::vector<uint8_t> storage;
    const void *pixels=tight_texture_pixels(width,height,rgba,rowBytes,storage);
@@ -1141,6 +1259,9 @@ void *RenderBackendCreateTexture(int width,int height,const void *rgba,int rowBy
 }
 int RenderBackendUpdateTexture(void *handle,int width,int height,const void *rgba,int rowBytes)
 {
+#ifdef DARK_RT
+   if (g_rt) return darkrt::UpdateTexture(handle,width,height,rgba,rowBytes);
+#endif
    Texture *texture = static_cast<Texture *>(handle);
    if (!g_context || !texture || width <= 0 || height <= 0 || !rgba ||
        rowBytes < width * 4)
@@ -1200,10 +1321,21 @@ int RenderBackendUpdateTexture(void *handle,int width,int height,const void *rgb
    texture->height = height;
    return 1;
 }
-void RenderBackendDestroyTexture(void *handle) { Texture*t=static_cast<Texture*>(handle);if(!t)return;for(void*&bound:g_textures)if(bound==t)bound=nullptr;glDeleteTextures(1,&t->name);delete t; }
-void RenderBackendBindTexture(int level,void *texture) { if(level>=0&&level<2){g_textures[level]=texture;bind_texture(level,static_cast<Texture*>(texture));} }
+void RenderBackendDestroyTexture(void *handle) {
+#ifdef DARK_RT
+   if (g_rt) { darkrt::DestroyTexture(handle); return; }
+#endif
+   Texture*t=static_cast<Texture*>(handle);if(!t)return;for(void*&bound:g_textures)if(bound==t)bound=nullptr;glDeleteTextures(1,&t->name);delete t; }
+void RenderBackendBindTexture(int level,void *texture) {
+#ifdef DARK_RT
+   if (g_rt) { if(level>=0&&level<2) g_textures[level]=texture; darkrt::BindTexture(level,texture); return; }
+#endif
+   if(level>=0&&level<2){g_textures[level]=texture;bind_texture(level,static_cast<Texture*>(texture));} }
 int RenderBackendDraw(int primitive,const sRenderBackendVertex *vertices,int count,int second)
 {
+#ifdef DARK_RT
+   if(g_rt) return darkrt::Draw(primitive,vertices,count,g_width,g_height,rt_viewport_rect());
+#endif
    if(!g_context||!vertices||count<=0)return 0; bind_texture(0,static_cast<Texture*>(g_textures[0]));
    bind_texture(1,second?static_cast<Texture*>(g_textures[1]):nullptr);
    glActiveTexture(GL_TEXTURE0);

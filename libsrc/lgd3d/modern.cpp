@@ -429,3 +429,22 @@ extern "C" BOOL lgd3d_get_error(uint32 *code, uint32 *result) {
     *result = 0;
   return FALSE;
 }
+
+#ifdef DARK_RT
+// The backend texture currently holding a bitmap, loading it through the
+// texture manager if it is not resident. The ray tracer keeps its own copy of
+// every texture the backend has created, so the handle stays usable after the
+// texture manager swaps the bitmap out again.
+extern "C" void *lgd3d_rt_texture_for_bitmap(grs_bitmap *bm) {
+  if (!bm || !g_tmgr)
+    return NULL;
+  if (!(bm->flags & BMF_LOADED))
+    g_tmgr->load_texture(bm);
+  if (!(bm->flags & BMF_LOADED))
+    return NULL;
+  const int id = (int)(uintptr_t)bm->bits;
+  if (id < 0 || id >= LGD3D_MAX_TEXTURES || g_ModernBitmaps[id] != bm)
+    return NULL;
+  return g_ModernTextures[id];
+}
+#endif
