@@ -45,7 +45,9 @@
 #include <cstring>
 #include <deque>
 #include <string>
+#include <array>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 #include <dlfcn.h>
 #include <limits.h>
@@ -2006,12 +2008,9 @@ void RenderRTDrawWorld(int primitive, const sRenderBackendVertex *v, const float
       d.color = (name && !sprite) ? pack_color(1, 1, 1, v[i].a)
                                   : pack_color(v[i].r, v[i].g, v[i].b, v[i].a);
    }
-   if (g_RenderRTShadowOnly) {
-      // a face turned away from the camera: it blocks light, but is not seen
-      // (two-sided model parts are pairs of coincident opposite faces)
-      prim.flags = RG_MESH_PRIMITIVE_SHADOW_ONLY |
-                   ((tex && tex->cutout && g_alphaTest) ? RgMeshPrimitiveFlags(RG_MESH_PRIMITIVE_ALPHA_TESTED) : 0u);
-   } else if (sprite) {
+   // (faces turned away from the camera, g_RenderRTShadowOnly, are ordinary
+   // geometry: RenderRTObjectEnd keeps one of each coincident pair)
+   if (sprite) {
       // a glow or particle sprite, never casting shadows. Not emissive: RTGL1
       // adds a translucent primitive's emission without its texture's alpha,
       // so any glow at all turned the soft round particles into squares.
@@ -2044,7 +2043,7 @@ void RenderRTDrawWorld(int primitive, const sRenderBackendVertex *v, const float
 
    // A light fixture's bulb, flame or glass sits at the light it carries and
    // is drawn self-lit (full white): make it glow, so lamps are seen to be lit.
-   if (!sprite && !g_RenderRTShadowOnly && g_cfg.glow > 0.0f && allWhite && !g_lightPositions.empty() && name) {
+   if (!sprite && g_cfg.glow > 0.0f && allWhite && !g_lightPositions.empty() && name) {
       float c[3] = {0, 0, 0};
       for (const RgPrimitiveVertex &d : prim.verts)
          for (int k = 0; k < 3; ++k)
@@ -2062,6 +2061,8 @@ void RenderRTDrawWorld(int primitive, const sRenderBackendVertex *v, const float
             const float dx = l.data[0] - c[0], dy = l.data[1] - c[1], dz = l.data[2] - c[2];
             if (dx * dx + dy * dy + dz * dz < 0.5f * 0.5f) {
                prim.emissive = std::max(prim.emissive, g_cfg.glow);
+               // a lantern's glass lets its light out
+               prim.flags |= RG_MESH_PRIMITIVE_NO_SHADOW;
                break;
             }
          }
@@ -2130,12 +2131,54 @@ int RenderRTObjectWanted(uint32_t obj)
 
 void RenderRTCameraMedium(int underwater) { g_underwater = underwater != 0; }
 
+} // extern "C"
+
+namespace {
+
+// A model captured whole has both faces of its thin parts (a lamp shade, a
+// sign): two coincident triangles, one per side. Both visible, they fought;
+// one visible and one shadow-only (which one depending on where the camera
+// was), the lamp's light changed as you walked. One of each pair is kept,
+// the same one whatever the view: the scene no longer depends on the camera.
+void drop_coincident_faces(std::vector<CapturedPrim> &prims)
+{
+   std::unordered_set<uint64_t> seen;
+   for (CapturedPrim &p : prims) {
+      std::vector<RgPrimitiveVertex> kept;
+      kept.reserve(p.verts.size());
+      for (size_t t = 0; t + 2 < p.verts.size(); t += 3) {
+         std::array<std::array<int32_t, 3>, 3> k;
+         for (int i = 0; i < 3; ++i)
+            for (int j = 0; j < 3; ++j)
+               k[i][j] = int32_t(std::lround(p.verts[t + i].position[j] * 1000.0f));   // mm
+         std::sort(k.begin(), k.end());
+         uint64_t h = 1469598103934665603ull;
+         for (const auto &v : k)
+            for (int32_t x : v)
+               h = (h ^ uint32_t(x)) * 1099511628211ull;
+         if (!seen.insert(h).second)
+            continue;
+         kept.insert(kept.end(), p.verts.begin() + t, p.verts.begin() + t + 3);
+      }
+      p.verts.swap(kept);
+   }
+   prims.erase(std::remove_if(prims.begin(), prims.end(),
+                              [](const CapturedPrim &p) { return p.verts.empty(); }),
+               prims.end());
+}
+
+} // namespace
+
+extern "C" {
+
 void RenderRTObjectEnd(void)
 {
    const uint32_t obj = g_currentObject;
    g_currentObject = 0;
    if (!obj || !g_inScene)
       return;
+   if (g_currentWhole)
+      drop_coincident_faces(g_currentCapture);
    CachedObject &c = g_objects[obj];
    if (c.frame == g_frameNumber) {
       // drawn twice this frame (split across cells): keep both parts, unless
