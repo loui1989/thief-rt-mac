@@ -299,6 +299,7 @@ struct PendingLight {
 };
 std::vector<PendingLight> g_pendingLights;
 uint32_t g_lightsTotal = 0, g_frameLightsShown = 0;
+std::vector<PendingLight> g_lastLights;   // last frame's, for the inspector
 bool g_underwater = false;
 int g_drawableW = 1, g_drawableH = 1;
 uint32_t g_framePrims = 0, g_frameDropped = 0, g_frameLights = 0;
@@ -1777,6 +1778,43 @@ void inspect_view()
       }
       snprintf(what, sizeof(what), "Inspect: world texture %d logged", w.textureId);
    }
+   if (best < 1e29f) {
+      // what lights and shadows the point: the lights given to the path
+      // tracer last frame near it, and the models near it
+      const float hit[3] = {o[0] + d[0] * best, o[1] + d[1] * best, o[2] + d[2] * best};
+      out("hit point (%.2f %.2f %.2f) m; lights traced last frame within 12 m (of %u in the mission):\n",
+          hit[0], hit[1], hit[2], g_lightsTotal);
+      for (const PendingLight &L : g_lastLights) {
+         const RgFloat3D p = to_rt(L.pos);
+         const float dx = p.data[0] - hit[0], dy = p.data[1] - hit[1], dz = p.data[2] - hit[2];
+         const float dist = std::sqrt(dx * dx + dy * dy + dz * dz);
+         if (dist > 12.0f)
+            continue;
+         out("  light %u at (%.2f %.2f %.2f), %.2f m away: rgb %.0f %.0f %.0f, radius %.1f ft, "
+             "%s inner %.3f outer %.3f dir (%.2f %.2f %.2f)\n",
+             L.id, p.data[0], p.data[1], p.data[2], dist, L.rgb[0], L.rgb[1], L.rgb[2], L.radius,
+             L.inner >= 0 ? "spot" : "point", L.inner, L.outer, L.dir[0], L.dir[1], L.dir[2]);
+      }
+      out("models within 4 m of the hit point:\n");
+      for (const auto &e : g_objects) {
+         const CachedObject &c = e.second;
+         const float dx = c.center[0] - hit[0], dy = c.center[1] - hit[1], dz = c.center[2] - hit[2];
+         if (dx * dx + dy * dy + dz * dz > 16.0f)
+            continue;
+         size_t tris = 0, shadowTris = 0;
+         for (const CapturedPrim &p : c.prims) {
+            tris += p.verts.size() / 3;
+            if (p.flags & RG_MESH_PRIMITIVE_SHADOW_ONLY)
+               shadowTris += p.verts.size() / 3;
+         }
+         char name[128];
+         RenderRTGameObjectName(e.first, name, sizeof(name));
+         out("  object %u \"%s\": %zu triangles (%zu shadow-only) in %zu primitives, whole %d, "
+             "drawn frame %u (now %u), posed %d\n",
+             e.first, name, tris, shadowTris, c.prims.size(), int(c.whole), c.frame, g_frameNumber,
+             int(c.posed));
+      }
+   }
    if (log)
       fclose(log);
    g_ui.status = std::string(what) + " to logs/rt-inspect.txt";
@@ -2296,6 +2334,7 @@ void flush_lights()
       upload_light(L);
       s_chosen[L.id] = s_frame;
    }
+   g_lastLights = g_pendingLights;
    g_pendingLights.clear();
 }
 
