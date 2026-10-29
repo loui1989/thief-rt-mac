@@ -636,13 +636,14 @@ void upload_2d(uint64_t id, const RgPrimitiveVertex *verts, uint32_t count,
                const char *texture, bool blend, int canvasW, int canvasH,
                const darkrt::Rect &vp)
 {
-   // GL-style orthographic projection of the canvas; column-major
+   // Orthographic projection of the canvas, column-major, into Metal/Vulkan
+   // clip space, where y points down: canvas y = 0 is the top of the screen
    const float w = float(std::max(canvasW, 1)), h = float(std::max(canvasH, 1));
    const float proj[16] = {
       2.0f / w, 0, 0, 0,
-      0, -2.0f / h, 0, 0,
-      0, 0, -1, 0,
-      -1, 1, 0, 1,
+      0, 2.0f / h, 0, 0,
+      0, 0, 1, 0,
+      -1, -1, 0, 1,
    };
    static const float view[16] = {1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1};
    const RgViewport viewport{vp.x, vp.y, vp.w, vp.h, 0.0f, 1.0f};
