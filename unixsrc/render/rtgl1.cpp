@@ -295,6 +295,10 @@ bool g_inScene = false;
 bool g_suppress = true;
 bool g_cameraUploaded = false;
 bool g_vsync = true;
+// Test switch (panel): the scene given to the path tracer stops changing --
+// models and lights stay as they were -- while the camera still moves. What
+// still changes as you walk is then the path tracer's own doing.
+bool g_freeze = false;
 struct PendingLight {
    uint32_t id;
    float pos[3], rgb[3], dir[3];
@@ -303,6 +307,7 @@ struct PendingLight {
 std::vector<PendingLight> g_pendingLights;
 uint32_t g_lightsTotal = 0, g_frameLightsShown = 0;
 std::vector<PendingLight> g_lastLights;   // last frame's, for the inspector
+std::vector<PendingLight> g_frozenLights;  // while g_freeze
 bool g_underwater = false;
 int g_drawableW = 1, g_drawableH = 1;
 uint32_t g_framePrims = 0, g_frameDropped = 0, g_frameLights = 0;
@@ -588,6 +593,13 @@ uint32_t g_cachedDrawn = 0;
 void upload_objects()
 {
    g_cachedDrawn = 0;
+   if (g_freeze) {
+      // the test switch: the models exactly as they were when it was set
+      for (const auto &e : g_objects)
+         for (size_t i = 0; i < e.second.prims.size(); ++i)
+            upload_captured(0x500000000ull + (uint64_t(e.first) << 12) + i, e.second.prims[i]);
+      return;
+   }
    for (auto it = g_objects.begin(); it != g_objects.end();) {
       const uint32_t obj = it->first;
       CachedObject &c = it->second;
@@ -1122,14 +1134,14 @@ const char *kUpscaleNames[] = {"Off",
 enum UiRow {
    kRowUpscale, kRowScale, kRowDynres, kRowBounces, kRowLights, kRowVolumetric, kRowVsync,
    kRowFps, kRowLight, kRowSky, kRowLightSize, kRowRough, kRowGlow, kRowWater,
-   kRowDebug, kRowInspect, kRowReset, kRowCount
+   kRowDebug, kRowFreeze, kRowInspect, kRowReset, kRowCount
 };
 
 const char *kRowLabels[kRowCount] = {
    "Upscaler", "Render resolution", "Dynamic resolution", "Bounce light", "Lights traced",
    "Volumetric light", "VSync", "FPS counter", "Light brightness", "Sky brightness",
    "Light size (soft shadows)", "Surface roughness", "Lamp glow", "Water",
-   "Debug view", "Inspect centre of view", "Reset to defaults",
+   "Debug view", "Freeze scene (test)", "Inspect centre of view", "Reset to defaults",
 };
 
 // rows that do something when chosen rather than having a value
@@ -1164,6 +1176,7 @@ std::string row_value(int row)
    case kRowLight: snprintf(buf, sizeof(buf), "%.2fx", g_cfg.light); return buf;
    case kRowSky: snprintf(buf, sizeof(buf), "%.2fx", g_cfg.sky); return buf;
    case kRowLightSize: snprintf(buf, sizeof(buf), "%.2f m", g_cfg.lightSize); return buf;
+   case kRowFreeze: return g_freeze ? "On (frozen)" : "Off";
    case kRowDebug: {
       static const char *kViews[] = {"Off", "Shadows only", "Direct light only", "Glossy only",
                                      "Bounce light only"};
@@ -1249,6 +1262,11 @@ void change_row(int row, int dir)
                                    0.05f, 1.5f);
       break;
    case kRowDebug: g_cfg.debugView = (g_cfg.debugView + dir + 5) % 5; return;   // not saved
+   case kRowFreeze:
+      g_freeze = !g_freeze;
+      if (g_freeze)
+         g_frozenLights = g_lastLights;
+      return;   // not saved
    case kRowRough:
       g_cfg.minRoughness = std::clamp(std::round(g_cfg.minRoughness * 20.0f) / 20.0f + 0.05f * dir,
                                       0.0f, 1.0f);
@@ -2072,6 +2090,8 @@ void RenderRTDrawWorld(int primitive, const sRenderBackendVertex *v, const float
          g_currentCapture.push_back(std::move(p));
          return;
       }
+      if (g_freeze)
+         return;
       const uint32_t key = tex ? tex->serial : 0;
       const uint32_t n = g_primitiveCounters[key]++;
       upload_captured(0x300000000ull + (uint64_t(key) << 12) + n, p);
@@ -2136,6 +2156,10 @@ void RenderRTObjectEnd(void)
    g_currentObject = 0;
    if (!obj || !g_inScene)
       return;
+   if (g_freeze) {
+      g_currentCapture.clear();
+      return;
+   }
    CachedObject &c = g_objects[obj];
    if (c.frame == g_frameNumber) {
       // drawn twice this frame (split across cells): keep both parts, unless
@@ -2330,6 +2354,12 @@ void upload_light(const PendingLight &L)
 // set does not flicker between frames.
 void flush_lights()
 {
+   if (g_freeze) {
+      for (const PendingLight &L : g_frozenLights)
+         upload_light(L);
+      g_pendingLights.clear();
+      return;
+   }
    g_lightsTotal = uint32_t(g_pendingLights.size());
    const RgFloat3D cam = to_rt(g_camera.pos);
    const size_t keep = g_cfg.maxLights > 0 ? size_t(g_cfg.maxLights) : g_pendingLights.size();
