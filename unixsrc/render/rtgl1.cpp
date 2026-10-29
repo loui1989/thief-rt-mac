@@ -541,6 +541,8 @@ struct CachedObject {
    float pose[6] = {};
    float center[3] = {};   // meters
    bool whole = false;     // captured unclipped by the view
+   std::vector<RgNormalPacked32> normals;   // of prims' vertices, computed for normalsHash
+   uint64_t normalsHash = 0;
 };
 
 // cached objects farther than this from the camera are not drawn out of view
@@ -572,6 +574,67 @@ uint64_t hash_prims(const std::vector<CapturedPrim> &prims)
       mix(p.texture.data(), p.texture.size());
    }
    return h;
+}
+
+// Vertex normals for captured triangles. The game hands over only positions;
+// a zero normal decodes in RTGL1 as straight down, and the shader then bends
+// that toward each pixel's view direction to keep it plausible -- so models
+// were lit by the angle you looked at them from, changing as you walked up to
+// them. Smooth across edges up to 60 degrees (round lamp shades, posts), keep
+// sharper creases (box corners, the two faces of a thin part) hard.
+void compute_normals(CapturedPrim *prims, size_t count)
+{
+   struct Tri { float n[3]; };
+   std::vector<Tri> tris;
+   std::unordered_map<uint64_t, std::vector<uint32_t>> at;   // position -> corners
+   auto key = [](const float *p) {
+      auto q = [](float x) { return uint64_t(uint32_t(int32_t(std::lround(x * 1024.0f))) & 0x1fffffu); };
+      return q(p[0]) | (q(p[1]) << 21) | (q(p[2]) << 42);
+   };
+   std::vector<std::pair<uint32_t, uint32_t>> corners;   // (prim, vertex)
+   for (size_t pi = 0; pi < count; ++pi) {
+      std::vector<RgPrimitiveVertex> &v = prims[pi].verts;
+      for (size_t t = 0; t + 2 < v.size(); t += 3) {
+         const float *a = v[t].position, *b = v[t + 1].position, *c = v[t + 2].position;
+         const float e1[3] = {b[0] - a[0], b[1] - a[1], b[2] - a[2]};
+         const float e2[3] = {c[0] - a[0], c[1] - a[1], c[2] - a[2]};
+         Tri tri{{e1[1] * e2[2] - e1[2] * e2[1], e1[2] * e2[0] - e1[0] * e2[2],
+                  e1[0] * e2[1] - e1[1] * e2[0]}};
+         tris.push_back(tri);
+         for (int k = 0; k < 3; ++k) {
+            at[key(v[t + k].position)].push_back(uint32_t(corners.size()));
+            corners.emplace_back(uint32_t(pi), uint32_t(t + k));
+         }
+      }
+   }
+   auto unit = [](const float *n, float *out) {
+      const float l = std::sqrt(n[0] * n[0] + n[1] * n[1] + n[2] * n[2]);
+      for (int k = 0; k < 3; ++k)
+         out[k] = l > 1e-12f ? n[k] / l : (k == 2 ? 1.0f : 0.0f);
+      return l > 1e-12f;
+   };
+   std::vector<float> unitN(tris.size() * 3);
+   for (size_t i = 0; i < tris.size(); ++i)
+      unit(tris[i].n, &unitN[i * 3]);
+   const float kCos = 0.5f;
+   for (size_t ci = 0; ci < corners.size(); ++ci) {
+      const size_t ti = ci / 3;
+      const float *mine = &unitN[ti * 3];
+      RgPrimitiveVertex &dst = prims[corners[ci].first].verts[corners[ci].second];
+      float sum[3] = {0, 0, 0};
+      for (uint32_t other : at[key(dst.position)]) {
+         const size_t oi = other / 3;
+         const float *on = &unitN[oi * 3];
+         if (oi != ti && mine[0] * on[0] + mine[1] * on[1] + mine[2] * on[2] < kCos)
+            continue;
+         for (int k = 0; k < 3; ++k)
+            sum[k] += tris[oi].n[k];   // area weighted
+      }
+      float n[3];
+      if (!unit(sum, n))
+         memcpy(n, mine, sizeof(n));
+      dst.normalPacked = rt.rgUtilPackNormal ? rt.rgUtilPackNormal(n[0], n[1], n[2]) : 0;
+   }
 }
 
 void upload_captured(uint64_t id, const CapturedPrim &p)
@@ -2108,6 +2171,7 @@ void RenderRTDrawWorld(int primitive, const sRenderBackendVertex *v, const float
       }
       if (g_freeze)
          return;
+      compute_normals(&p, 1);
       const uint32_t key = tex ? tex->serial : 0;
       const uint32_t n = g_primitiveCounters[key]++;
       upload_captured(0x300000000ull + (uint64_t(key) << 12) + n, p);
@@ -2207,6 +2271,23 @@ void RenderRTObjectEnd(void)
          }
       for (int k = 0; k < 3; ++k)
          c.center[k] = n ? float(sum[k] / double(n)) : 0.0f;
+   }
+   // the normals are recomputed only when the shape changed
+   size_t total = 0;
+   for (const CapturedPrim &p : c.prims)
+      total += p.verts.size();
+   if (c.normals.size() == total && c.normalsHash == c.hash) {
+      size_t i = 0;
+      for (CapturedPrim &p : c.prims)
+         for (RgPrimitiveVertex &v : p.verts)
+            v.normalPacked = c.normals[i++];
+   } else {
+      compute_normals(c.prims.data(), c.prims.size());
+      c.normals.clear();
+      for (const CapturedPrim &p : c.prims)
+         for (const RgPrimitiveVertex &v : p.verts)
+            c.normals.push_back(v.normalPacked);
+      c.normalsHash = c.hash;
    }
    g_currentCapture.clear();
 }
