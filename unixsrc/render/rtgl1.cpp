@@ -14,12 +14,18 @@
 //   * lgd3d's 2D draws after the main view, then the legacy 2D canvas (HUD,
 //     menus, text), composited over the path-traced image.
 //
-// Settings (environment, read at start):
+// Settings: Cmd+, (or F10) in game opens the ray tracing settings panel;
+// changes apply at once and are saved to
+// ~/Library/Application Support/Dark Engine Restored/rt_settings.txt.
+// Environment variables, when set, override the saved values at start:
 //   THIEF_RT=1            use the ray tracer (run.sh sets it)
-//   THIEF_RT_UPSCALE      0 native, 1 quality, 2 balanced, 3 performance (default),
-//                         4 ultra performance  (MetalFX)
+//   THIEF_RT_UPSCALE      0 off (render scale), 1 quality, 2 balanced,
+//                         3 performance (default), 4 ultra performance,
+//                         5 custom render scale  (MetalFX)
+//   THIEF_RT_SCALE        render scale for modes 0 and 5 (0.25 .. 1)
 //   THIEF_RT_LIGHT        light brightness multiplier (default 1)
 //   THIEF_RT_SKY          sky brightness (default 1)
+//   THIEF_RT_FPS=1        frame rate counter
 //   THIEF_RT_FLIP=1       mirror the camera's right vector (diagnostic)
 //   THIEF_RT_DEBUG=1      RTGL1 info messages, per-second statistics
 
@@ -48,11 +54,15 @@
 #if defined(__APPLE__)
 #include <mach-o/dyld.h>
 #endif
+// SDK headers end with "#pragma pack()", which restores the engine's packing
+#pragma pack(8)
 
 #include <render_rt.h>
 #include "rt_backend_internal.h"
+#include "rt_font.h"
 
 extern "C" int g_RenderRTCaptureVertices = 0;
+extern "C" int g_RenderRTEmissiveSprite = 0;
 
 namespace {
 
@@ -70,6 +80,11 @@ struct Settings {
    float light = 1.0f;
    float sky = 1.0f;
    float glow = 1.0f;
+   int water = 0;
+   float waterAlpha = 0.55f;
+   float scale = 0.5f;      // render scale for upscale modes 0 and 5
+   bool fps = false;
+   bool vsync = true;
    float lightSize = 0.25f;
    bool flip = false;
    bool debug = false;
@@ -80,6 +95,69 @@ float env_float(const char *name, float fallback)
    const char *v = getenv(name);
    return v && *v ? (float)atof(v) : fallback;
 }
+
+const Settings kDefaults;
+
+std::string settings_path()
+{
+   const char *home = getenv("HOME");
+   if (!home || !*home)
+      return "rt_settings.txt";
+#if defined(__APPLE__)
+   return std::string(home) + "/Library/Application Support/Dark Engine Restored/rt_settings.txt";
+#else
+   return std::string(home) + "/.config/dark-engine-restored/rt_settings.txt";
+#endif
+}
+
+void load_settings()
+{
+   FILE *f = fopen(settings_path().c_str(), "r");
+   if (!f)
+      return;
+   char key[64];
+   float value;
+   while (fscanf(f, " %63[a-z_] = %f", key, &value) == 2) {
+      const std::string k = key;
+      if (k == "upscale") g_cfg.upscale = std::clamp(int(value), 0, 5);
+      else if (k == "scale") g_cfg.scale = std::clamp(value, 0.25f, 1.0f);
+      else if (k == "fps") g_cfg.fps = value != 0;
+      else if (k == "vsync") g_cfg.vsync = value != 0;
+      else if (k == "light") g_cfg.light = std::clamp(value, 0.05f, 20.0f);
+      else if (k == "sky") g_cfg.sky = std::clamp(value, 0.0f, 20.0f);
+      else if (k == "light_size") g_cfg.lightSize = std::clamp(value, 0.02f, 2.0f);
+      else if (k == "glow") g_cfg.glow = std::clamp(value, 0.0f, 10.0f);
+      else if (k == "water") g_cfg.water = value != 0 ? 1 : 0;
+   }
+   fclose(f);
+}
+
+void save_settings()
+{
+   const std::string path = settings_path();
+   // the folder normally exists already (the game path is remembered there)
+   const std::string dir = path.substr(0, path.rfind('/'));
+   mkdir(dir.c_str(), 0755);
+   FILE *f = fopen(path.c_str(), "w");
+   if (!f)
+      return;
+   fprintf(f, "upscale = %d\nscale = %.2f\nfps = %d\nvsync = %d\nlight = %.3f\nsky = %.3f\n"
+              "light_size = %.3f\nglow = %.3f\nwater = %d\n",
+           g_cfg.upscale, g_cfg.scale, int(g_cfg.fps), int(g_cfg.vsync), g_cfg.light, g_cfg.sky,
+           g_cfg.lightSize, g_cfg.glow, g_cfg.water);
+   fclose(f);
+}
+
+// the settings panel and frame counter
+struct Ui {
+   bool open = false;
+   int row = 0;
+   bool fontProvided = false;
+   double hintUntil = -1;     // the "Cmd+, settings" hint, after the first scene
+   double windowStart = 0, lastPresent = 0;
+   int windowFrames = 0;
+   double fps = 0, frameMs = 0, worstMs = 0, windowWorst = 0;
+} g_ui;
 
 // ---- textures ----------------------------------------------------------
 
@@ -155,10 +233,12 @@ const char *texture_name(RtTexture *t)
 struct FrameTexture {
    const char *name;
    bool provided = false;
-   std::vector<uint8_t> rgba;
+   bool dirty = true;
+   std::vector<uint8_t> rgba, scratch;
    int width = 0, height = 0;
    void upload()
    {
+      dirty = false;
       if (provided)
          rt.rgMarkOriginalTextureAsDeleted(name);
       auto details = RgOriginalTextureDetailsEXT{
@@ -251,15 +331,25 @@ void start_frame()
    case 4: resolution.resolutionMode = RG_RENDER_RESOLUTION_MODE_ULTRA_PERFORMANCE; break;
    default: break;
    }
-   if (g_cfg.upscale >= 1 && g_cfg.upscale <= 4) {
+   // 0: no upscaler, traced at rt_scale of the window (1 = native) and
+   //    stretched; 1..4: MetalFX quality .. ultra performance; 5: MetalFX from
+   //    rt_scale of the window.
+   // MetalFX's temporal scaler upscales at most 3x per axis
+   const float scale = std::clamp(g_cfg.scale, g_cfg.upscale == 5 ? 0.34f : 0.25f, 1.0f);
+   const RgExtent2D custom{uint32_t(std::max(1, int(g_drawableW * scale))),
+                           uint32_t(std::max(1, int(g_drawableH * scale)))};
+   if (g_cfg.upscale >= 1 && g_cfg.upscale <= 5) {
       // on Metal the AMD FSR2 slot is the MetalFX temporal scaler
       resolution.upscaleTechnique = RG_RENDER_UPSCALE_TECHNIQUE_AMD_FSR2;
       resolution.sharpenTechnique = RG_RENDER_SHARPEN_TECHNIQUE_AMD_CAS;
+      if (g_cfg.upscale == 5) {
+         resolution.resolutionMode = RG_RENDER_RESOLUTION_MODE_CUSTOM;
+         resolution.customRenderSize = custom;
+      }
    } else {
       resolution.upscaleTechnique = RG_RENDER_UPSCALE_TECHNIQUE_LINEAR;
       resolution.resolutionMode = RG_RENDER_RESOLUTION_MODE_CUSTOM;
-      resolution.customRenderSize = {uint32_t(std::max(1, g_drawableW)),
-                                     uint32_t(std::max(1, g_drawableH))};
+      resolution.customRenderSize = custom;
       resolution.sharpenTechnique = RG_RENDER_SHARPEN_TECHNIQUE_NONE;
    }
    auto info = RgStartFrameInfo{
@@ -321,6 +411,119 @@ bool upload(uint64_t id, const RgMeshPrimitiveInfo &prim, bool firstPerson = fal
    return false;
 }
 
+// ---- captured objects -------------------------------------------------------
+
+// A triangle list lgd3d drew for the main view, in RTGL1 terms.
+struct CapturedPrim {
+   std::vector<RgPrimitiveVertex> verts;
+   std::string texture;   // RTGL1 name, "" for untextured
+   RgMeshPrimitiveFlags flags = 0;
+   float emissive = 0.0f;
+};
+
+// What an object looked like the last time the engine drew it. Objects the
+// portal renderer does not draw (out of view) would otherwise vanish from the
+// traced scene, taking their shadows -- and the light a lamp's shade blocks --
+// with them, so lighting changed with the view direction. An object that has
+// not moved since it was last drawn (lamps, furniture, closed doors, idle AI)
+// is kept while out of view, for as long as the game says it still exists
+// where it was, and it is near enough to the camera to matter.
+struct CachedObject {
+   std::vector<CapturedPrim> prims;
+   uint64_t hash = 0;
+   uint32_t frame = 0;
+   int unchanged = 0;
+   bool posed = false;
+   float pose[6] = {};
+   float center[3] = {};   // meters
+};
+
+// cached objects farther than this from the camera are not drawn out of view
+constexpr float kKeepDistance = 40.0f;
+
+std::unordered_map<uint32_t, CachedObject> g_objects;
+uint32_t g_currentObject = 0;
+std::vector<CapturedPrim> g_currentCapture;
+uint32_t g_frameNumber = 1;
+bool g_emissiveSpriteNow = false;
+
+uint64_t hash_prims(const std::vector<CapturedPrim> &prims)
+{
+   uint64_t h = 1469598103934665603ull;
+   auto mix = [&h](const void *data, size_t n) {
+      const uint8_t *b = static_cast<const uint8_t *>(data);
+      for (size_t i = 0; i < n; ++i)
+         h = (h ^ b[i]) * 1099511628211ull;
+   };
+   for (const CapturedPrim &p : prims) {
+      for (const RgPrimitiveVertex &v : p.verts) {
+         // quantized: lighting jitter in the vertex colours is not a change
+         int32_t q[3] = {int32_t(v.position[0] * 256), int32_t(v.position[1] * 256),
+                         int32_t(v.position[2] * 256)};
+         mix(q, sizeof(q));
+      }
+      mix(p.texture.data(), p.texture.size());
+   }
+   return h;
+}
+
+void upload_captured(uint64_t id, const CapturedPrim &p)
+{
+   auto prim = RgMeshPrimitiveInfo{
+      .sType = RG_STRUCTURE_TYPE_MESH_PRIMITIVE_INFO,
+      .pNext = nullptr,
+      .flags = p.flags,
+      .primitiveIndexInMesh = 0,
+      .pVertices = p.verts.data(),
+      .vertexCount = uint32_t(p.verts.size()),
+      .pIndices = nullptr,
+      .indexCount = 0,
+      .pTextureName = p.texture.empty() ? nullptr : p.texture.c_str(),
+      .textureFrame = 0,
+      .color = pack_color(1, 1, 1, 1),
+      .emissive = p.emissive,
+      .classicLight = 1.0f,
+      .emissiveGi = 0.0f,
+   };
+   upload(id, prim);
+}
+
+uint32_t g_cachedDrawn = 0;
+
+void upload_objects()
+{
+   g_cachedDrawn = 0;
+   for (auto it = g_objects.begin(); it != g_objects.end();) {
+      const uint32_t obj = it->first;
+      CachedObject &c = it->second;
+      bool draw = c.frame == g_frameNumber;
+      if (!draw) {
+         float pose[6];
+         const RgFloat3D cam = to_rt(g_camera.pos);
+         const float dx = c.center[0] - cam.data[0], dy = c.center[1] - cam.data[1],
+                     dz = c.center[2] - cam.data[2];
+         if (dx * dx + dy * dy + dz * dz > kKeepDistance * kKeepDistance) {
+            ++it;   // remembered, but too far away to shadow anything seen
+            continue;
+         }
+         const bool keep = c.posed && RenderRTGameObjectPose(obj, pose) &&
+                           std::fabs(pose[0] - c.pose[0]) < 0.01f &&
+                           std::fabs(pose[1] - c.pose[1]) < 0.01f &&
+                           std::fabs(pose[2] - c.pose[2]) < 0.01f &&
+                           pose[3] == c.pose[3] && pose[4] == c.pose[4] && pose[5] == c.pose[5];
+         if (!keep) {
+            it = g_objects.erase(it);
+            continue;
+         }
+         draw = true;
+         ++g_cachedDrawn;
+      }
+      for (size_t i = 0; i < c.prims.size(); ++i)
+         upload_captured(0x500000000ull + (uint64_t(obj) << 12) + i, c.prims[i]);
+      ++it;
+   }
+}
+
 // ---- world representation -------------------------------------------------
 
 struct WorldGroup {
@@ -348,8 +551,17 @@ void upload_world()
       RgMeshPrimitiveFlags flags = 0;
       if ((g.flags & kRenderRTWorldTransparent) || (tex && tex->hasAlpha))
          flags |= RG_MESH_PRIMITIVE_ALPHA_TESTED;
-      if (g.flags & kRenderRTWorldWater)
-         flags |= RG_MESH_PRIMITIVE_WATER;
+      float alpha = 1.0f;
+      if (g.flags & kRenderRTWorldWater) {
+         if (g_cfg.water == 1) {
+            flags |= RG_MESH_PRIMITIVE_WATER;    // RTGL1's reflective/refractive water
+         } else {
+            // Thief's own water texture, see-through, as the game draws it
+            flags = (flags & ~RgMeshPrimitiveFlags(RG_MESH_PRIMITIVE_ALPHA_TESTED)) |
+                    RG_MESH_PRIMITIVE_TRANSLUCENT;
+            alpha = g_cfg.waterAlpha;
+         }
+      }
       auto prim = RgMeshPrimitiveInfo{
          .sType = RG_STRUCTURE_TYPE_MESH_PRIMITIVE_INFO,
          .pNext = nullptr,
@@ -361,7 +573,7 @@ void upload_world()
          .indexCount = uint32_t(g.indices.size()),
          .pTextureName = texture_name(tex),
          .textureFrame = 0,
-         .color = pack_color(1, 1, 1, 1),
+         .color = pack_color(1, 1, 1, alpha),
          .emissive = (g.flags & kRenderRTWorldFullbright) ? 0.25f : 0.0f,
          .classicLight = 1.0f,
          .emissiveGi = 0.0f,
@@ -412,13 +624,17 @@ bool Wanted()
 
 bool Open(SDL_Window *window)
 {
-   g_cfg.upscale = std::clamp(int(env_float("THIEF_RT_UPSCALE", 3)), 0, 4);
-   g_cfg.light = env_float("THIEF_RT_LIGHT", 1.0f);
-   g_cfg.sky = env_float("THIEF_RT_SKY", 1.0f);
+   load_settings();
+   g_cfg.upscale = std::clamp(int(env_float("THIEF_RT_UPSCALE", float(g_cfg.upscale))), 0, 5);
+   g_cfg.scale = std::clamp(env_float("THIEF_RT_SCALE", g_cfg.scale), 0.25f, 1.0f);
+   g_cfg.light = env_float("THIEF_RT_LIGHT", g_cfg.light);
+   g_cfg.sky = env_float("THIEF_RT_SKY", g_cfg.sky);
    g_cfg.flip = env_float("THIEF_RT_FLIP", 0) != 0;
    g_cfg.debug = env_float("THIEF_RT_DEBUG", 0) != 0;
-   g_cfg.glow = env_float("THIEF_RT_GLOW", 1.0f);
-   g_cfg.lightSize = env_float("THIEF_RT_LIGHT_SIZE", 0.25f);
+   g_cfg.glow = env_float("THIEF_RT_GLOW", g_cfg.glow);
+   g_cfg.lightSize = env_float("THIEF_RT_LIGHT_SIZE", g_cfg.lightSize);
+   g_cfg.fps = env_float("THIEF_RT_FPS", g_cfg.fps ? 1.0f : 0.0f) != 0;
+   g_ui.hintUntil = -1;
 
    g_metalView = SDL_Metal_CreateView(window);
    if (!g_metalView) {
@@ -501,6 +717,7 @@ void Close()
    for (RtTexture &t : g_textures)
       t.provided = false, t.dirty = true;
    g_canvasTex.provided = g_movieTex.provided = false;
+   g_ui.fontProvided = false;
 }
 
 bool Active() { return g_active; }
@@ -602,11 +819,10 @@ void SetCanvas(const void *pixels, int width, int height, int rowBytes, int dept
    if (!g_active || !pixels || width <= 0 || height <= 0)
       return;
    FrameTexture &t = g_canvasTex;
-   t.width = width;
-   t.height = height;
-   t.rgba.resize(size_t(width) * height * 4);
+   // converted into scratch, uploaded only when it differs from last frame's
+   t.scratch.resize(size_t(width) * height * 4);
    for (int y = 0; y < height; ++y) {
-      uint8_t *dst = t.rgba.data() + size_t(y) * width * 4;
+      uint8_t *dst = t.scratch.data() + size_t(y) * width * 4;
       const uint8_t *row = static_cast<const uint8_t *>(pixels) + size_t(y) * rowBytes;
       for (int x = 0; x < width; ++x, dst += 4) {
          uint32_t raw;
@@ -626,6 +842,12 @@ void SetCanvas(const void *pixels, int width, int height, int rowBytes, int dept
          dst[0] = r; dst[1] = g; dst[2] = b;
          dst[3] = (scene && raw == 0) ? 0 : 255;
       }
+   }
+   if (t.width != width || t.height != height || t.scratch != t.rgba) {
+      t.rgba.swap(t.scratch);
+      t.width = width;
+      t.height = height;
+      t.dirty = true;
    }
    g_canvas.valid = true;
    g_canvas.scene = scene;
@@ -694,6 +916,290 @@ void quad(RgPrimitiveVertex *v, float x0, float y0, float x1, float y1, uint32_t
       v[i].texCoord[1] = p[i][3];
       v[i].color = color;
    }
+}
+
+
+// ---- settings panel, frame counter ------------------------------------------
+
+constexpr const char *kFontName = "dark.font";
+
+void provide_font()
+{
+   if (g_ui.fontProvided)
+      return;
+   std::vector<uint8_t> rgba(size_t(rtfont::kWidth) * rtfont::kHeight * 4);
+   for (int i = 0; i < rtfont::kWidth * rtfont::kHeight; ++i) {
+      const uint8_t nib = (rtfont::kAlpha4[i / 2] >> ((i & 1) * 4)) & 15;
+      rgba[size_t(i) * 4 + 0] = rgba[size_t(i) * 4 + 1] = rgba[size_t(i) * 4 + 2] = 255;
+      rgba[size_t(i) * 4 + 3] = uint8_t(nib * 17);
+   }
+   auto details = RgOriginalTextureDetailsEXT{
+      .sType = RG_STRUCTURE_TYPE_ORIGINAL_TEXTURE_DETAILS_EXT,
+      .pNext = nullptr, .flags = 0, .format = RG_FORMAT_R8G8B8A8_UNORM,
+   };
+   auto info = RgOriginalTextureInfo{
+      .sType = RG_STRUCTURE_TYPE_ORIGINAL_TEXTURE_INFO,
+      .pNext = &details,
+      .pTextureName = kFontName,
+      .pPixels = rgba.data(),
+      .size = {uint32_t(rtfont::kWidth), uint32_t(rtfont::kHeight)},
+      .filter = RG_SAMPLER_FILTER_LINEAR,
+      .addressModeU = RG_SAMPLER_ADDRESS_MODE_CLAMP,
+      .addressModeV = RG_SAMPLER_ADDRESS_MODE_CLAMP,
+   };
+   g_ui.fontProvided = rt.rgProvideOriginalTexture(&info) == RG_RESULT_SUCCESS;
+}
+
+// Text in window pixels; '\x7f' is an arrow. Returns the advance.
+float text(std::vector<RgPrimitiveVertex> &out, float x, float y, float px, const char *s,
+           uint32_t color)
+{
+   const float cw = px * rtfont::kCellW / rtfont::kCellH;
+   const float x0 = x;
+   for (; *s; ++s) {
+      const int c = (unsigned char)*s;
+      if (c > 32 && c <= 127) {
+         const int i = c - 32;
+         const float u0 = float((i % rtfont::kCols) * rtfont::kCellW) / rtfont::kWidth;
+         const float v0 = float((i / rtfont::kCols) * rtfont::kCellH) / rtfont::kHeight;
+         const float u1 = u0 + float(rtfont::kCellW) / rtfont::kWidth;
+         const float v1 = v0 + float(rtfont::kCellH) / rtfont::kHeight;
+         RgPrimitiveVertex q[6];
+         quad(q, x, y, x + cw, y + px, color);
+         const float uv[6][2] = {{u0, v0}, {u1, v0}, {u1, v1}, {u0, v0}, {u1, v1}, {u0, v1}};
+         for (int k = 0; k < 6; ++k) {
+            q[k].texCoord[0] = uv[k][0];
+            q[k].texCoord[1] = uv[k][1];
+         }
+         out.insert(out.end(), q, q + 6);
+      }
+      x += cw;
+   }
+   return x - x0;
+}
+
+float text_width(float px, const char *s)
+{
+   return px * rtfont::kCellW / rtfont::kCellH * float(strlen(s));
+}
+
+// The size the scene is traced at.
+void render_size(int &w, int &h)
+{
+   float f;
+   switch (g_cfg.upscale) {
+   case 1: f = 1.0f / 1.5f; break;
+   case 2: f = 1.0f / 1.7f; break;
+   case 3: f = 0.5f; break;
+   case 4: f = 1.0f / 3.0f; break;
+   case 5: f = std::clamp(g_cfg.scale, 0.34f, 1.0f); break;
+   default: f = std::clamp(g_cfg.scale, 0.25f, 1.0f); break;
+   }
+   w = std::max(1, int(g_drawableW * f));
+   h = std::max(1, int(g_drawableH * f));
+}
+
+const char *kUpscaleNames[] = {"Off",
+                               "MetalFX Quality",
+                               "MetalFX Balanced",
+                               "MetalFX Performance",
+                               "MetalFX Ultra Performance",
+                               "MetalFX Custom"};
+
+enum UiRow {
+   kRowUpscale, kRowScale, kRowVsync, kRowFps, kRowLight, kRowSky, kRowLightSize,
+   kRowGlow, kRowWater, kRowReset, kRowCount
+};
+
+const char *kRowLabels[kRowCount] = {
+   "Upscaler", "Render resolution", "VSync", "FPS counter", "Light brightness",
+   "Sky brightness", "Light size (soft shadows)", "Lamp glow", "Water", "Reset to defaults",
+};
+
+std::string row_value(int row)
+{
+   char buf[96];
+   int w, h;
+   switch (row) {
+   case kRowUpscale: return kUpscaleNames[std::clamp(g_cfg.upscale, 0, 5)];
+   case kRowScale:
+      render_size(w, h);
+      if (g_cfg.upscale >= 1 && g_cfg.upscale <= 4)
+         snprintf(buf, sizeof(buf), "%dx%d (preset)", w, h);
+      else
+         snprintf(buf, sizeof(buf), "%d%%  %dx%d", int(std::lround(g_cfg.scale * 100)), w, h);
+      return buf;
+   case kRowVsync: return g_cfg.vsync ? "On" : "Off";
+   case kRowFps: return g_cfg.fps ? "On" : "Off";
+   case kRowLight: snprintf(buf, sizeof(buf), "%.2fx", g_cfg.light); return buf;
+   case kRowSky: snprintf(buf, sizeof(buf), "%.2fx", g_cfg.sky); return buf;
+   case kRowLightSize: snprintf(buf, sizeof(buf), "%.2f m", g_cfg.lightSize); return buf;
+   case kRowGlow:
+      if (g_cfg.glow <= 0.0f) return "Off";
+      snprintf(buf, sizeof(buf), "%.2f", g_cfg.glow);
+      return buf;
+   case kRowWater: return g_cfg.water == 1 ? "Opaque" : "Translucent";
+   default: return "";
+   }
+}
+
+float step_mul(float v, int dir, float lo, float hi)
+{
+   // multiplicative steps that land on round numbers: 1, 1.25, 1.5, 2, 2.5, 3, 4 ...
+   static const float steps[] = {0.05f, 0.1f, 0.15f, 0.2f, 0.25f, 0.33f, 0.5f, 0.6f, 0.75f,
+                                 0.85f, 1.0f, 1.25f, 1.5f, 1.75f, 2.0f, 2.5f, 3.0f, 4.0f,
+                                 5.0f, 6.0f, 8.0f, 10.0f, 15.0f, 20.0f};
+   const int n = int(sizeof(steps) / sizeof(steps[0]));
+   int i = 0;
+   while (i < n - 1 && steps[i] < v - 1e-3f)
+      ++i;
+   if (dir > 0 && steps[i] <= v + 1e-3f) ++i;
+   if (dir < 0) --i;
+   return std::clamp(steps[std::clamp(i, 0, n - 1)], lo, hi);
+}
+
+void change_row(int row, int dir)
+{
+   switch (row) {
+   case kRowUpscale: g_cfg.upscale = (g_cfg.upscale + dir + 6) % 6; break;
+   case kRowScale: {
+      if (g_cfg.upscale >= 1 && g_cfg.upscale <= 4) {
+         // leave the preset for a custom scale starting where the preset was
+         int w, h;
+         render_size(w, h);
+         g_cfg.scale = float(w) / float(std::max(g_drawableW, 1));
+         g_cfg.upscale = 5;
+      }
+      const float lo = g_cfg.upscale == 5 ? 0.35f : 0.25f;
+      const float s = std::round(g_cfg.scale * 20.0f) / 20.0f + 0.05f * dir;
+      g_cfg.scale = std::clamp(s, lo, 1.0f);
+      break;
+   }
+   case kRowVsync: g_cfg.vsync = !g_cfg.vsync; break;
+   case kRowFps: g_cfg.fps = !g_cfg.fps; break;
+   case kRowLight: g_cfg.light = step_mul(g_cfg.light, dir, 0.05f, 20.0f); break;
+   case kRowSky: g_cfg.sky = g_cfg.sky <= 0.0f && dir > 0 ? 0.05f
+                             : (g_cfg.sky <= 0.05f && dir < 0 ? 0.0f
+                                                              : step_mul(g_cfg.sky, dir, 0.05f, 20.0f));
+      break;
+   case kRowLightSize:
+      g_cfg.lightSize = std::clamp(std::round(g_cfg.lightSize * 20.0f) / 20.0f + 0.05f * dir,
+                                   0.05f, 1.5f);
+      break;
+   case kRowGlow:
+      g_cfg.glow = std::clamp(std::round(g_cfg.glow * 4.0f) / 4.0f + 0.25f * dir, 0.0f, 5.0f);
+      break;
+   case kRowWater: g_cfg.water = g_cfg.water == 1 ? 0 : 1; break;
+   case kRowReset: {
+      const bool debug = g_cfg.debug, flip = g_cfg.flip;
+      g_cfg = kDefaults;
+      g_cfg.debug = debug;
+      g_cfg.flip = flip;
+      break;
+   }
+   default: break;
+   }
+   save_settings();
+}
+
+void count_frame(bool scene)
+{
+   const double t = now_seconds();
+   if (g_ui.lastPresent > 0) {
+      const double ms = (t - g_ui.lastPresent) * 1000.0;
+      g_ui.windowWorst = std::max(g_ui.windowWorst, ms);
+   }
+   g_ui.lastPresent = t;
+   if (g_ui.windowStart <= 0)
+      g_ui.windowStart = t;
+   ++g_ui.windowFrames;
+   if (t - g_ui.windowStart >= 0.5) {
+      g_ui.fps = g_ui.windowFrames / (t - g_ui.windowStart);
+      g_ui.frameMs = 1000.0 / std::max(g_ui.fps, 1e-3);
+      g_ui.worstMs = g_ui.windowWorst;
+      g_ui.windowStart = t;
+      g_ui.windowFrames = 0;
+      g_ui.windowWorst = 0;
+   }
+   if (scene && g_ui.hintUntil < 0)
+      g_ui.hintUntil = t + 8.0;
+}
+
+void draw_ui(bool scene)
+{
+   const bool hint = scene && g_ui.hintUntil > now_seconds();
+   if (!g_cfg.fps && !g_ui.open && !hint)
+      return;
+   provide_font();
+   if (!g_ui.fontProvided)
+      return;
+   const darkrt::Rect full{0, 0, float(g_drawableW), float(g_drawableH)};
+   const float px = std::max(14.0f, std::round(g_drawableH / 42.0f));
+   const float pad = std::round(px * 0.5f);
+   const uint32_t white = pack_color(1, 1, 1, 1);
+   const uint32_t dim = pack_color(0.75f, 0.75f, 0.72f, 1);
+   const uint32_t gold = pack_color(1.0f, 0.82f, 0.45f, 1);
+   std::vector<RgPrimitiveVertex> bg, fg;
+   auto panel = [&](float x0, float y0, float x1, float y1, float a) {
+      RgPrimitiveVertex q[6];
+      quad(q, x0, y0, x1, y1, pack_color(0.02f, 0.02f, 0.03f, a));
+      bg.insert(bg.end(), q, q + 6);
+   };
+
+   if (g_cfg.fps) {
+      int w, h;
+      render_size(w, h);
+      char line[128];
+      snprintf(line, sizeof(line), "%3.0f fps  %5.1f ms (worst %5.1f)  %dx%d\x7f%dx%d",
+               g_ui.fps, g_ui.frameMs, g_ui.worstMs, w, h, g_drawableW, g_drawableH);
+      const float s = std::round(px * 0.8f);
+      panel(0, 0, text_width(s, line) + 2 * pad, s + pad, 0.6f);
+      text(fg, pad, pad * 0.5f, s, line, white);
+   }
+
+   if (hint && !g_ui.open) {
+      const char *msg = "Cmd+,  or  F10: ray tracing settings";
+      const float s = std::round(px * 0.8f);
+      const float tw = text_width(s, msg);
+      const float x = (g_drawableW - tw) * 0.5f, y = g_drawableH - s * 3.0f;
+      panel(x - pad, y - pad * 0.5f, x + tw + pad, y + s + pad * 0.5f, 0.55f);
+      text(fg, x, y, s, msg, dim);
+   }
+
+   if (g_ui.open) {
+      const float rowH = px * 1.5f;
+      const float labelW = text_width(px, "Light size (soft shadows)") + px * 2.0f;
+      const float valueW = text_width(px, "MetalFX Ultra Performance") + px;
+      const float w = labelW + valueW + 4 * pad + px * 2.0f;
+      const float h = rowH * (kRowCount + 3.5f) + 2 * pad;
+      const float x0 = std::round((g_drawableW - w) * 0.5f);
+      const float y0 = std::round((g_drawableH - h) * 0.5f);
+      panel(x0, y0, x0 + w, y0 + h, 0.82f);
+      float y = y0 + pad + rowH * 0.25f;
+      text(fg, x0 + 2 * pad, y, px, "Ray tracing settings", gold);
+      y += rowH * 1.5f;
+      for (int r = 0; r < kRowCount; ++r) {
+         const bool sel = r == g_ui.row;
+         if (sel)
+            panel(x0 + pad, y - rowH * 0.18f, x0 + w - pad, y + px + rowH * 0.18f, 0.9f);
+         const uint32_t c = sel ? white : dim;
+         text(fg, x0 + 2 * pad, y, px, kRowLabels[r], c);
+         std::string v = row_value(r);
+         if (sel && r != kRowReset)
+            v = "< " + v + " >";
+         text(fg, x0 + 2 * pad + labelW, y, px, v.c_str(), sel ? gold : c);
+         y += rowH;
+      }
+      y += rowH * 0.5f;
+      const float s = std::round(px * 0.75f);
+      text(fg, x0 + 2 * pad, y, s, "Up/Down: choose   Left/Right: change   Esc: close", dim);
+   }
+
+   upload_2d(0x2ffffff10ull, bg.data(), uint32_t(bg.size()), nullptr, true, g_drawableW,
+             g_drawableH, full);
+   if (!fg.empty())
+      upload_2d(0x2ffffff11ull, fg.data(), uint32_t(fg.size()), kFontName, true, g_drawableW,
+                g_drawableH, full);
 }
 
 void draw_frame(bool sceneDrawn)
@@ -772,7 +1278,7 @@ void Present(int drawableWidth, int drawableHeight, bool vsync)
 {
    if (!g_active)
       return;
-   g_vsync = vsync;
+   g_vsync = vsync && g_cfg.vsync;
    g_drawableW = std::max(drawableWidth, 1);
    g_drawableH = std::max(drawableHeight, 1);
    start_frame();
@@ -781,6 +1287,7 @@ void Present(int drawableWidth, int drawableHeight, bool vsync)
       return;
    }
    const bool scene = g_cameraUploaded;
+   count_frame(scene);
 
    // lgd3d's 2D draws after the main view
    uint64_t id = 0x200000000ull;
@@ -804,14 +1311,44 @@ void Present(int drawableWidth, int drawableHeight, bool vsync)
       quad(bars + 18, vp.x + vp.w, vp.y, full.w, vp.y + vp.h, black);
       upload_2d(0x2ffffff00ull, bars, 24, nullptr, false, g_drawableW, g_drawableH, full);
 
-      g_canvasTex.upload();
+      if (g_canvasTex.dirty || !g_canvasTex.provided)
+         g_canvasTex.upload();
       RgPrimitiveVertex q[6];
       quad(q, 0, 0, float(g_canvas.width), float(g_canvas.height), pack_color(1, 1, 1, 1));
       upload_2d(0x2ffffff01ull, q, 6, g_canvasTex.provided ? g_canvasTex.name : nullptr,
                 g_canvas.scene, g_canvas.width, g_canvas.height, vp);
    }
+   draw_ui(scene);
    draw_frame(scene);
    g_canvas.valid = false;
+}
+
+bool HandleKey(int scancode, int mods, bool down, bool repeat)
+{
+   if (!g_active)
+      return false;
+   const bool toggle = scancode == SDL_SCANCODE_F10 ||
+                       (scancode == SDL_SCANCODE_COMMA && (mods & KMOD_GUI));
+   if (toggle) {
+      if (down && !repeat) {
+         g_ui.open = !g_ui.open;
+         g_ui.hintUntil = 0;
+      }
+      return true;
+   }
+   if (!g_ui.open || !down)
+      return false;   // key releases always reach the game: no stuck keys
+   switch (scancode) {
+   case SDL_SCANCODE_ESCAPE: if (!repeat) g_ui.open = false; break;
+   case SDL_SCANCODE_UP: g_ui.row = (g_ui.row + kRowCount - 1) % kRowCount; break;
+   case SDL_SCANCODE_DOWN: g_ui.row = (g_ui.row + 1) % kRowCount; break;
+   case SDL_SCANCODE_LEFT: change_row(g_ui.row, -1); break;
+   case SDL_SCANCODE_RIGHT:
+   case SDL_SCANCODE_RETURN:
+   case SDL_SCANCODE_SPACE: change_row(g_ui.row, 1); break;
+   default: break;
+   }
+   return true;   // the game doesn't see keys pressed while the panel is open
 }
 
 bool MovieFrame(const void *rgba, int width, int height, int rowBytes, const Rect &viewport,
@@ -896,6 +1433,8 @@ void RenderRTSceneEnd(void)
    if (!g_active || !g_inScene)
       return;
    upload_world();
+   upload_objects();
+   ++g_frameNumber;
    g_inScene = false;
    g_RenderRTCaptureVertices = 0;
 }
@@ -915,46 +1454,56 @@ void RenderRTDrawWorld(int primitive, const sRenderBackendVertex *v, const float
 {
    if (!g_inScene || primitive != kRenderBackendTriangles || count < 3)
       return;
+   if (g_blend == kRenderBackendBlendMultiply)
+      return;   // a lightmap or shadow pass over something already submitted
    RtTexture *tex = g_bound[0];
    const char *name = texture_name(tex);
-   std::vector<RgPrimitiveVertex> verts(static_cast<size_t>(count));
+   const bool sprite = g_emissiveSpriteNow || g_RenderRTEmissiveSprite;
+   CapturedPrim prim;
+   prim.texture = name ? name : "";
+   prim.verts.resize(static_cast<size_t>(count));
    float minAlpha = 1.0f;
+   bool allWhite = true;
    for (int i = 0; i < count; ++i) {
-      RgPrimitiveVertex &d = verts[size_t(i)];
+      RgPrimitiveVertex &d = prim.verts[size_t(i)];
       d = {};
       RgFloat3D p = to_rt(xyz + i * 3);
       memcpy(d.position, p.data, sizeof(d.position));
       d.texCoord[0] = v[i].u0;
       d.texCoord[1] = v[i].v0;
       minAlpha = std::min(minAlpha, v[i].a);
+      if (v[i].r < 0.98f || v[i].g < 0.98f || v[i].b < 0.98f)
+         allWhite = false;
       // lit polygons carry the game's baked lighting in their colour; the
       // path tracer lights them itself, so only untextured ones keep it
-      d.color = name ? pack_color(1, 1, 1, v[i].a) : pack_color(v[i].r, v[i].g, v[i].b, v[i].a);
+      // (sprites keep theirs: it is the particle's tint over an alpha texture)
+      d.color = (name && !sprite) ? pack_color(1, 1, 1, v[i].a)
+                                  : pack_color(v[i].r, v[i].g, v[i].b, v[i].a);
    }
-   RgMeshPrimitiveFlags flags = 0;
-   float emissive = 0.0f;
-   if (g_blend == kRenderBackendBlendAdd) {
-      flags |= RG_MESH_PRIMITIVE_TRANSLUCENT;
-      emissive = 1.0f;
+   if (sprite) {
+      // a glow or particle sprite: light-emitting, never casting shadows
+      prim.flags |= RG_MESH_PRIMITIVE_TRANSLUCENT | RG_MESH_PRIMITIVE_NO_SHADOW;
+      prim.emissive = g_cfg.glow;
+   } else if (g_blend == kRenderBackendBlendAdd) {
+      prim.flags |= RG_MESH_PRIMITIVE_TRANSLUCENT;
+      prim.emissive = 1.0f;
    } else if (g_blend == kRenderBackendBlendAlpha && minAlpha < 0.99f) {
-      flags |= RG_MESH_PRIMITIVE_TRANSLUCENT;
+      prim.flags |= RG_MESH_PRIMITIVE_TRANSLUCENT;
    } else if (g_alphaTest || (tex && tex->hasAlpha)) {
-      flags |= RG_MESH_PRIMITIVE_ALPHA_TESTED;
+      prim.flags |= RG_MESH_PRIMITIVE_ALPHA_TESTED;
    }
-   if (g_blend == kRenderBackendBlendMultiply)
-      return;   // a lightmap or shadow pass over something already submitted
 
-   // A light fixture's bulb, flame or glass sits at the light it carries:
-   // make what is drawn there glow, so lamps are seen to be lit.
-   if (g_cfg.glow > 0.0f && !g_lightPositions.empty() && name) {
+   // A light fixture's bulb, flame or glass sits at the light it carries and
+   // is drawn self-lit (full white): make it glow, so lamps are seen to be lit.
+   if (g_cfg.glow > 0.0f && allWhite && !g_lightPositions.empty() && name) {
       float c[3] = {0, 0, 0};
-      for (const RgPrimitiveVertex &d : verts)
+      for (const RgPrimitiveVertex &d : prim.verts)
          for (int k = 0; k < 3; ++k)
             c[k] += d.position[k];
       for (float &x : c)
-         x /= float(verts.size());
+         x /= float(prim.verts.size());
       float extent = 0;
-      for (const RgPrimitiveVertex &d : verts) {
+      for (const RgPrimitiveVertex &d : prim.verts) {
          const float dx = d.position[0] - c[0], dy = d.position[1] - c[1], dz = d.position[2] - c[2];
          extent = std::max(extent, dx * dx + dy * dy + dz * dz);
       }
@@ -962,32 +1511,59 @@ void RenderRTDrawWorld(int primitive, const sRenderBackendVertex *v, const float
       if (extent < 0.6f * 0.6f)
          for (const RgFloat3D &l : g_lightPositions) {
             const float dx = l.data[0] - c[0], dy = l.data[1] - c[1], dz = l.data[2] - c[2];
-            if (dx * dx + dy * dy + dz * dz < 0.35f * 0.35f) {
-               emissive = std::max(emissive, g_cfg.glow);
+            if (dx * dx + dy * dy + dz * dz < 0.5f * 0.5f) {
+               prim.emissive = std::max(prim.emissive, g_cfg.glow);
                break;
             }
          }
    }
+
+   if (g_currentObject) {
+      g_currentCapture.push_back(std::move(prim));
+      return;
+   }
    const uint32_t key = tex ? tex->serial : 0;
    const uint32_t n = g_primitiveCounters[key]++;
-   const uint64_t id = 0x300000000ull + (uint64_t(key) << 12) + n;
-   auto prim = RgMeshPrimitiveInfo{
-      .sType = RG_STRUCTURE_TYPE_MESH_PRIMITIVE_INFO,
-      .pNext = nullptr,
-      .flags = flags,
-      .primitiveIndexInMesh = 0,
-      .pVertices = verts.data(),
-      .vertexCount = uint32_t(verts.size()),
-      .pIndices = nullptr,
-      .indexCount = 0,
-      .pTextureName = name,
-      .textureFrame = 0,
-      .color = pack_color(1, 1, 1, 1),
-      .emissive = emissive,
-      .classicLight = 1.0f,
-      .emissiveGi = 0.0f,
-   };
-   upload(id, prim);
+   upload_captured(0x300000000ull + (uint64_t(key) << 12) + n, prim);
+}
+
+void RenderRTObjectBegin(uint32_t obj)
+{
+   g_currentObject = g_inScene ? obj : 0;
+   g_currentCapture.clear();
+}
+
+void RenderRTObjectEnd(void)
+{
+   const uint32_t obj = g_currentObject;
+   g_currentObject = 0;
+   if (!obj || !g_inScene)
+      return;
+   CachedObject &c = g_objects[obj];
+   if (c.frame == g_frameNumber) {
+      // drawn twice this frame (split across cells): keep both parts
+      for (CapturedPrim &p : g_currentCapture)
+         c.prims.push_back(std::move(p));
+      c.hash = hash_prims(c.prims);
+   } else {
+      const uint64_t h = hash_prims(g_currentCapture);
+      c.unchanged = (h == c.hash) ? c.unchanged + 1 : 0;
+      c.hash = h;
+      c.prims = std::move(g_currentCapture);
+      c.frame = g_frameNumber;
+      c.posed = RenderRTGameObjectPose(obj, c.pose) != 0;
+      size_t n = 0;
+      double sum[3] = {0, 0, 0};
+      for (const CapturedPrim &p : c.prims)
+         for (const RgPrimitiveVertex &v : p.verts) {
+            for (int k = 0; k < 3; ++k)
+               sum[k] += v.position[k];
+            ++n;
+         }
+      for (int k = 0; k < 3; ++k)
+         c.center[k] = n ? float(sum[k] / double(n)) : 0.0f;
+   }
+   g_currentCapture.clear();
 }
 
 int RenderRTWorldWanted(uint32_t serial)

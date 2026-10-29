@@ -122,6 +122,10 @@ extern void set_mm_sort(bool);
 //#define CTIMER_ON
 #include <ctimer.h>
 
+#ifdef DARK_RT
+#include <render_rt.h>
+EXTERN void lgd3d_render_flush(void);
+#endif
 #include <dbmem.h>
 
 
@@ -2426,7 +2430,25 @@ BOOL rendobj_core_render_object(ObjID obj, int fragment, int idx, uchar *clut,
       rendobjScaleVec = &rendobjUnitScale;
 
    rendobj_start_translucency(obj);
+#ifdef DARK_RT
+   // Tell the ray tracer which object the following triangles belong to, so
+   // a static object can keep casting shadows while it is out of view.
+   // lgd3d batches, so pending triangles are flushed to the right owner.
+   const BOOL rt_object = g_lgd3d && RenderRTCaptureDraws();
+   if (rt_object)
+   {
+      lgd3d_render_flush();
+      RenderRTObjectBegin(obj);
+   }
+#endif
    rval = rendfunc(idx, obj, fragment, 0, clut);
+#ifdef DARK_RT
+   if (rt_object)
+   {
+      lgd3d_render_flush();
+      RenderRTObjectEnd();
+   }
+#endif
    rendobj_stop_translucency(obj);
 
    ptmf->finish(obj);
@@ -3023,3 +3045,26 @@ void rendobj_exit(void)
 
 }  // extern "C"
 
+
+#ifdef DARK_RT
+#include <objsys.h>
+// For the ray tracer's object cache (render_rt.h): is the object still in
+// the world where it was?  Destroyed, contained (picked up, in a chest) and
+// world-less objects answer no.
+extern "C" int RenderRTGameObjectPose(uint32_t obj, float pose[6])
+{
+   const ObjID id = (ObjID)obj;
+   if (id <= 0 || !ObjectExists(id) || !ObjHasRefs(id))
+      return 0;
+   Position *pos = ObjPosGet(id);
+   if (!pos)
+      return 0;
+   pose[0] = pos->loc.vec.x;
+   pose[1] = pos->loc.vec.y;
+   pose[2] = pos->loc.vec.z;
+   pose[3] = pos->fac.tx;
+   pose[4] = pos->fac.ty;
+   pose[5] = pos->fac.tz;
+   return 1;
+}
+#endif

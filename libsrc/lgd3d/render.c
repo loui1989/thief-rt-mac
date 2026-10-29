@@ -21,6 +21,9 @@
 // r3d's camera-to-world transform (libsrc/r3d/block.c)
 extern float r3d_rt_c2w[12];
 extern int r3d_rt_c2w_valid;
+extern int r3d_rt_project_space;
+// set while lgd3d draws a glowing sprite (lgd3d_hack_light)
+extern int g_RenderRTEmissiveSprite;
 #endif
 extern void *g_ModernTextures[LGD3D_MAX_TEXTURES];
 extern grs_bitmap *g_ModernBitmaps[LGD3D_MAX_TEXTURES];
@@ -1095,6 +1098,26 @@ static void do_quad_light(r3s_point *p, float r, grs_bitmap *bm)
    vl[3].specular = fog_specular;
    setz(&vl[3], p->p.z, p->grp.w);
 
+#ifdef DARK_RT
+   // A camera-facing sprite (a light's glow, a particle): place its corners in
+   // the world from the centre point and the sprite's size on screen.
+   if (g_RenderRTCaptureVertices && r3d_rt_project_space) {
+      int i;
+      const float k = 65536.0f * (float)p->p.z;
+      for (i = 0; i < 4; ++i) {
+         mxs_vector c3;
+         c3.x = p->p.x + (vl[i].sx - x) * k;
+         c3.y = p->p.y + (vl[i].sy - y) * k;
+         c3.z = p->p.z;
+         rt_set_world(&vl[i], &c3);
+      }
+      g_RenderRTEmissiveSprite = 1;
+      PolyFree(4, vl);
+      flush_polys();
+      g_RenderRTEmissiveSprite = 0;
+   }
+   else
+#endif
    PolyFree(4, vl);
 
    gr_set_fill_type(FILL_NORM);

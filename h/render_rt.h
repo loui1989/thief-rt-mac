@@ -57,6 +57,16 @@ int RenderRTSuppressCapture(int suppress);
 void RenderRTDrawWorld(int primitive, const sRenderBackendVertex *vertices,
                        const float *xyz, int count);
 
+// The object the following RenderRTDrawWorld triangles belong to. An object
+// seen unchanged in consecutive frames is kept, and drawn while out of view
+// (as long as RenderRTGameObjectPresent says it is still where it was), so
+// lamps, furniture and doors keep casting shadows whatever the camera sees.
+void RenderRTObjectBegin(uint32_t obj);
+void RenderRTObjectEnd(void);
+// Implemented by the game: nonzero, with its position and facing, if the
+// object still exists in the world (not destroyed, picked up or contained).
+int RenderRTGameObjectPose(uint32_t obj, float pose[6]);
+
 // World representation. Returns nonzero if geometry for this serial must be
 // (re)submitted between RenderRTWorldBegin and RenderRTWorldEnd.
 int RenderRTWorldWanted(uint32_t serial);

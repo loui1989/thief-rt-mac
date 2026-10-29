@@ -16,6 +16,10 @@
 // is rebuilt; r3d_rt_c2w_valid is cleared for linear space.
 float r3d_rt_c2w[12] = {1,0,0,0, 0,1,0,0, 0,0,1,0};
 int r3d_rt_c2w_valid = 0;
+// Nonzero in R3_PROJECT_SPACE, where a screen offset of one pixel is
+// 65536 * z camera units (screen sx = x * w + x_off, in 16.16 fixed point):
+// lets lgd3d's screen-space sprites be placed in the world.
+int r3d_rt_project_space = 0;
 
 void _r3_rt_update_c2w(void)
 {
@@ -43,6 +47,7 @@ void _r3_rt_update_c2w(void)
    r3d_rt_c2w[7]  = (float)-(inv[3]*t->x + inv[4]*t->y + inv[5]*t->z);
    r3d_rt_c2w[11] = (float)-(inv[6]*t->x + inv[7]*t->y + inv[8]*t->z);
    r3d_rt_c2w_valid = 1;
+   r3d_rt_project_space = r3d_glob.cur_space == R3_PROJECT_SPACE;
 }
 
 void r3_start_block()

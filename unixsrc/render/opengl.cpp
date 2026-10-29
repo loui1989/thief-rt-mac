@@ -833,6 +833,11 @@ bool DarkRenderPumpEvents(void)
             g_focused = false; update_relative_mouse();
          }
       } else if (event.type == SDL_KEYDOWN || event.type == SDL_KEYUP) {
+#if defined(DARK_RT)
+         if (g_rt && darkrt::HandleKey(event.key.keysym.scancode, event.key.keysym.mod,
+                                       event.type == SDL_KEYDOWN, event.key.repeat != 0))
+            continue;
+#endif
          uchar scan = key_scan(event.key.keysym.scancode);
          if (scan != KBC_NONE && !event.key.repeat)
             DarkInputKey(scan, event.type == SDL_KEYDOWN);
