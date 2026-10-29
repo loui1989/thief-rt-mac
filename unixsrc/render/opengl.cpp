@@ -3,6 +3,11 @@
 #include <SDL2/SDL.h>
 #ifdef DARK_OPENGL_ES
 #include <GLES3/gl3.h>
+#elif defined(__APPLE__)
+// macOS ships a 4.1 core profile. Every function used here is a core entry
+// point exported directly by OpenGL.framework.
+#define GL_SILENCE_DEPRECATION 1
+#include <OpenGL/gl3.h>
 #else
 #include <GL/gl.h>
 #include <GL/glext.h>
@@ -74,6 +79,27 @@ bool g_samplerSmooth[2] = {true, true};
 GLuint g_sceneProgram, g_sceneBuffer, g_sceneVertexArray;
 GLint g_viewportUniform, g_useTexture1Uniform, g_fogEnabledUniform;
 GLint g_fogColorUniform, g_alphaTestUniform, g_transparentBlackUniform;
+
+// Window coordinates are in points; on HiDPI displays (macOS Retina, scaled
+// Wayland) the GL drawable has more pixels than the window has points.
+void drawable_scale(float &sx, float &sy)
+{
+   sx = sy = 1.0f;
+   if (!g_window || g_clientWidth <= 0 || g_clientHeight <= 0) return;
+   int dw = 0, dh = 0;
+   SDL_GL_GetDrawableSize(g_window, &dw, &dh);
+   if (dw > 0 && dh > 0) {
+      sx = static_cast<float>(dw) / g_clientWidth;
+      sy = static_cast<float>(dh) / g_clientHeight;
+   }
+}
+
+void set_gl_viewport(int x, int y, int w, int h)
+{
+   float sx, sy; drawable_scale(sx, sy);
+   glViewport(static_cast<GLint>(x * sx + 0.5f), static_cast<GLint>(y * sy + 0.5f),
+      static_cast<GLsizei>(w * sx + 0.5f), static_cast<GLsizei>(h * sy + 0.5f));
+}
 
 void set_window_icon()
 {
@@ -522,6 +548,10 @@ void write_u32(FILE *file, uint32_t value)
 
 bool capture_frame(const char *path)
 {
+   int captureWidth = g_clientWidth, captureHeight = g_clientHeight;
+   SDL_GL_GetDrawableSize(g_window, &captureWidth, &captureHeight);
+#define g_clientWidth captureWidth
+#define g_clientHeight captureHeight
    const int rowBytes = (g_clientWidth * 3 + 3) & ~3;
    std::vector<unsigned char> rgba(static_cast<size_t>(g_clientWidth) * g_clientHeight * 4);
    std::vector<unsigned char> row(rowBytes);
@@ -542,6 +572,8 @@ bool capture_frame(const char *path)
    }
    fclose(file);
    return true;
+#undef g_clientWidth
+#undef g_clientHeight
 }
 }
 
@@ -597,6 +629,9 @@ bool DarkRenderOpen(int width, int height, const char *title)
    SDL_GL_SetAttribute(SDL_GL_CONTEXT_MAJOR_VERSION, 3);
    SDL_GL_SetAttribute(SDL_GL_CONTEXT_MINOR_VERSION, 3);
    SDL_GL_SetAttribute(SDL_GL_CONTEXT_PROFILE_MASK, SDL_GL_CONTEXT_PROFILE_CORE);
+#ifdef __APPLE__
+   SDL_GL_SetAttribute(SDL_GL_CONTEXT_FLAGS, SDL_GL_CONTEXT_FORWARD_COMPATIBLE_FLAG);
+#endif
 #endif
    SDL_GL_SetAttribute(SDL_GL_DOUBLEBUFFER, 1);
    SDL_GL_SetAttribute(SDL_GL_DEPTH_SIZE, 24);
@@ -616,7 +651,12 @@ bool DarkRenderOpen(int width, int height, const char *title)
    if (g_invisibleCursor)
       SDL_SetCursor(g_invisibleCursor);
    SDL_ShowCursor(SDL_DISABLE);
+#ifdef __APPLE__
+   fprintf(stderr, "macOS video backend: SDL/%s, %s\n", SDL_GetCurrentVideoDriver(),
+      reinterpret_cast<const char *>(glGetString(GL_RENDERER)));
+#else
    fprintf(stderr, "Linux video backend: SDL/%s\n", SDL_GetCurrentVideoDriver());
+#endif
    g_width = g_clientWidth = width; g_height = g_clientHeight = height;
    g_quit = false; g_resizePending = false;
    g_focused = (SDL_GetWindowFlags(g_window) & SDL_WINDOW_INPUT_FOCUS) != 0;
@@ -873,11 +913,11 @@ static void present_legacy_frame(const void *pixels, int width, int height,
       // Logical mode changes may alter the aspect-fitted viewport. Clear the
       // whole output so the previously presented menu cannot remain visible
       // in newly exposed bars around the rebuilt canvas.
-      glViewport(0, 0, g_clientWidth, g_clientHeight);
+      set_gl_viewport(0, 0, g_clientWidth, g_clientHeight);
       glClearColor(0, 0, 0, 1);
       glClear(GL_COLOR_BUFFER_BIT);
    }
-   glViewport(vx, vy, vw, vh);
+   set_gl_viewport(vx, vy, vw, vh);
    glActiveTexture(GL_TEXTURE0); glBindTexture(GL_TEXTURE_2D, g_overlayTexture);
    glActiveTexture(GL_TEXTURE1); glBindTexture(GL_TEXTURE_2D, 0);
    glActiveTexture(GL_TEXTURE0);
@@ -991,10 +1031,10 @@ bool DarkRenderPresentMovieFrame(const void *rgba, int width, int height,
       viewportY = (g_clientHeight - viewportHeight) / 2;
    }
 
-   glViewport(0, 0, g_clientWidth, g_clientHeight);
+   set_gl_viewport(0, 0, g_clientWidth, g_clientHeight);
    glClearColor(0, 0, 0, 1);
    glClear(GL_COLOR_BUFFER_BIT);
-   glViewport(viewportX, viewportY, viewportWidth, viewportHeight);
+   set_gl_viewport(viewportX, viewportY, viewportWidth, viewportHeight);
    glActiveTexture(GL_TEXTURE0);
    glBindTexture(GL_TEXTURE_2D, g_overlayTexture);
    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
@@ -1065,7 +1105,7 @@ int RenderBackendBeginFrame(void)
 {
    if (!g_context) return 0; SDL_GL_MakeCurrent(g_window, g_context);
    set_swap_interval(1);
-   int x,y,w,h; viewport(x,y,w,h); glViewport(x,y,w,h); glClearColor(0,0,0,1);
+   int x,y,w,h; viewport(x,y,w,h); set_gl_viewport(x,y,w,h); glClearColor(0,0,0,1);
    glDepthMask(GL_TRUE); glClear(GL_COLOR_BUFFER_BIT|GL_DEPTH_BUFFER_BIT);
    apply_depth_state(); apply_blend_state();
    g_scene=true;++g_sceneGeneration;return 1;

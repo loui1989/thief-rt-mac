@@ -31,6 +31,22 @@ bool OpenALLoad(sOpenALApi *api)
         // libraries are unversioned, unlike the usual Linux SONAME.
         g_openal = dlopen("libopenal.so", RTLD_NOW | RTLD_LOCAL);
 #endif
+#if defined(__APPLE__)
+        // Prefer OpenAL Soft (EFX reverb and occlusion): the copy bundled in
+        // the app, then Homebrew's keg-only install. Apple's deprecated
+        // OpenAL.framework works as a last resort, without EFX.
+        static const char *const kMacOpenAL[] = {
+            "@executable_path/../Frameworks/libopenal.1.dylib",
+            "@executable_path/libopenal.1.dylib",
+            "/opt/homebrew/opt/openal-soft/lib/libopenal.1.dylib",
+            "/usr/local/opt/openal-soft/lib/libopenal.1.dylib",
+            "libopenal.1.dylib",
+            "/System/Library/Frameworks/OpenAL.framework/OpenAL",
+        };
+        for (const char *name : kMacOpenAL)
+            if (!g_openal)
+                g_openal = dlopen(name, RTLD_NOW | RTLD_LOCAL);
+#endif
         if (!g_openal)
             g_openal = dlopen("libopenal.so.1", RTLD_NOW | RTLD_LOCAL);
     }

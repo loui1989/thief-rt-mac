@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <chrono>
+#include <climits>
 #include <cstdarg>
 #include <cstdio>
 #include <cstdlib>
@@ -19,8 +20,13 @@
 #include <unordered_map>
 #include <vector>
 #include <unistd.h>
-#if defined(__linux__) && !defined(__ANDROID__)
+#if (defined(__linux__) && !defined(__ANDROID__)) || defined(__APPLE__)
 #include <execinfo.h>
+#endif
+
+// Desktop SDL hosts: Linux, Android (through the SDL Java glue) and macOS.
+#if defined(__linux__) || defined(__APPLE__)
+#define DARK_SDL_HOST 1
 #endif
 
 #if defined(__ANDROID__)
@@ -35,13 +41,54 @@
 #include <sys/sysinfo.h>
 #endif
 
+#if defined(__APPLE__)
+#include <SDL2/SDL.h>
+#include <mach-o/dyld.h>
+#include <mach/mach.h>
+#include <malloc/malloc.h>
+#include <sys/sysctl.h>
+#include <sys/types.h>
+#endif
+
+// Absolute path of the running executable, or FALSE.
+static BOOL PlatformExecutablePath(char *path, size_t capacity)
+{
+   if (!path || capacity == 0)
+      return FALSE;
+#if defined(__APPLE__)
+   uint32_t size = (uint32_t)capacity;
+   if (_NSGetExecutablePath(path, &size) != 0)
+   {
+      path[0] = '\0';
+      return FALSE;
+   }
+   char resolved[PATH_MAX];
+   if (realpath(path, resolved))
+   {
+      if (std::strlen(resolved) >= capacity)
+         return FALSE;
+      std::strcpy(path, resolved);
+   }
+   return TRUE;
+#else
+   const ssize_t length = readlink("/proc/self/exe", path, capacity - 1);
+   if (length <= 0 || (size_t)length >= capacity)
+   {
+      path[0] = '\0';
+      return FALSE;
+   }
+   path[length] = '\0';
+   return TRUE;
+#endif
+}
+
 int PlatformGetDisplayModes(ePlatformDisplayScope scope,
                             sPlatformDisplayMode *modes, int capacity,
                             int *native_width, int *native_height)
 {
    if (native_width) *native_width = 0;
    if (native_height) *native_height = 0;
-#if defined(__linux__)
+#if defined(DARK_SDL_HOST)
    if (!modes || capacity < 0)
       capacity = 0;
 
@@ -238,7 +285,27 @@ BOOL PlatformGetMemoryStatus(sPlatformMemoryStatus *status)
    if (!status)
       return FALSE;
    std::memset(status, 0, sizeof(*status));
-#if defined(__linux__)
+#if defined(__APPLE__)
+   uint64_t total = 0;
+   size_t length = sizeof(total);
+   if (sysctlbyname("hw.memsize", &total, &length, nullptr, 0) != 0 || !total)
+      return FALSE;
+   vm_statistics64_data_t vm = {};
+   mach_msg_type_number_t vmCount = HOST_VM_INFO64_COUNT;
+   uint64_t available = total / 2;
+   vm_size_t pageSize = 0;
+   if (host_page_size(mach_host_self(), &pageSize) == KERN_SUCCESS &&
+       host_statistics64(mach_host_self(), HOST_VM_INFO64,
+                         (host_info64_t)&vm, &vmCount) == KERN_SUCCESS)
+      available = (uint64_t)(vm.free_count + vm.inactive_count +
+                             vm.purgeable_count) * pageSize;
+   status->total_physical_bytes =
+      total > UINT32_MAX ? UINT32_MAX : (uint32)total;
+   status->available_physical_bytes =
+      available > UINT32_MAX ? UINT32_MAX : (uint32)available;
+   status->load_percent = total ? (uint32)(100 - available * 100 / total) : 0;
+   return TRUE;
+#elif defined(__linux__)
    struct sysinfo info;
    if (sysinfo(&info) != 0)
       return FALSE;
@@ -280,6 +347,12 @@ void PlatformShowError(const char *title, const char *message)
                        resolvedTitle, resolvedMessage);
 #endif
    std::fprintf(stderr, "%s: %s\n", resolvedTitle, resolvedMessage);
+#if defined(__APPLE__)
+   // An app launched from Finder has no visible stderr.
+   if (!isatty(STDERR_FILENO))
+      SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_ERROR, resolvedTitle,
+                               resolvedMessage, SDL_GetKeyboardFocus());
+#endif
 }
 
 BOOL PlatformAskYesNo(const char *title, const char *message)
@@ -308,7 +381,9 @@ int PlatformReadKey(void)
 
 size_t PlatformAllocationSize(void *allocation)
 {
-#if defined(__linux__)
+#if defined(__APPLE__)
+   return allocation ? malloc_size(allocation) : 0;
+#elif defined(__linux__)
    return allocation ? malloc_usable_size(allocation) : 0;
 #else
    return 0;
@@ -377,7 +452,7 @@ static unsigned long long PlatformDiagnosticProcessId(void)
 void PlatformDiagnosticsLogStack(const char *severity, const char *subsystem,
                                  int skip_frames)
 {
-#if defined(__linux__) && !defined(__ANDROID__)
+#if (defined(__linux__) && !defined(__ANDROID__)) || defined(__APPLE__)
    void *frames[24] = {};
    const int count = backtrace(frames,(int)(sizeof(frames) / sizeof(frames[0])));
    char message[1024];
@@ -409,7 +484,7 @@ void PlatformDebugBreak(void) { __builtin_trap(); }
 void PlatformExitProcess(int status) { std::exit(status); }
 BOOL PlatformSetClipboardText(const char *text)
 {
-#if defined(__linux__)
+#if defined(DARK_SDL_HOST)
    return SDL_SetClipboardText(text ? text : "") == 0;
 #else
    (void)text;
@@ -419,7 +494,7 @@ BOOL PlatformSetClipboardText(const char *text)
 
 int PlatformGetClipboardText(char *text, int capacity)
 {
-#if defined(__linux__)
+#if defined(DARK_SDL_HOST)
    if (!text || capacity <= 0 || SDL_HasClipboardText() != SDL_TRUE)
       return 0;
    char *clipboard = SDL_GetClipboardText();
@@ -440,7 +515,7 @@ int PlatformGetClipboardText(char *text, int capacity)
 
 void PlatformSetTextInputActive(BOOL active)
 {
-#if defined(__linux__)
+#if defined(DARK_SDL_HOST)
    if (!(SDL_WasInit(SDL_INIT_VIDEO) & SDL_INIT_VIDEO))
       return;
    if (active)
@@ -461,13 +536,8 @@ BOOL PlatformGetExecutableDirectory(char *path, int capacity)
 {
    if (!path || capacity <= 0)
       return FALSE;
-   const ssize_t length = readlink("/proc/self/exe",path,(size_t)capacity - 1);
-   if (length <= 0 || length >= capacity)
-   {
-      path[0] = '\0';
+   if (!PlatformExecutablePath(path, (size_t)capacity))
       return FALSE;
-   }
-   path[length] = '\0';
    char *separator = strrchr(path,'/');
    if (!separator)
    {
@@ -498,11 +568,8 @@ BOOL PlatformRelaunchSelf(const char *const *arguments, int argument_count,
    if (argument_count < 0)
       return FALSE;
    char executable[4096];
-   const ssize_t length = readlink("/proc/self/exe",executable,
-                                   sizeof(executable) - 1);
-   if (length <= 0 || length >= (ssize_t)sizeof(executable))
+   if (!PlatformExecutablePath(executable, sizeof(executable)))
       return FALSE;
-   executable[length] = '\0';
 
    const pid_t child = fork();
    if (child < 0)

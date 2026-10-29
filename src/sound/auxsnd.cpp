@@ -129,6 +129,10 @@ bool LoadSndFile(sSndFileApi *api)
       const char *names[] = {
 #ifdef _WIN32
          "libsndfile-1.dll", "sndfile.dll"
+#elif defined(__APPLE__)
+         "@executable_path/../Frameworks/libsndfile.1.dylib",
+         "/opt/homebrew/lib/libsndfile.1.dylib",
+         "/usr/local/lib/libsndfile.1.dylib", "libsndfile.1.dylib"
 #else
          "libsndfile.so.1", "libsndfile.so"
 #endif

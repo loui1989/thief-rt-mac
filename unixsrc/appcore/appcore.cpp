@@ -19,8 +19,9 @@ public:
    cUnixApplication(IUnknown *outer, const char *name, const char *defaultPath)
       : m_caption(name ? name : "Dark Engine"), m_defaultPath(defaultPath ? defaultPath : ".")
    {
-      char path[4096]; ssize_t count = readlink("/proc/self/exe", path, sizeof(path) - 1);
-      if (count > 0) { path[count] = 0; m_fullName = path; }
+      char path[4096];
+      if (PlatformGetExecutableDirectory(path, sizeof(path)) && path[0])
+         m_fullName = std::string(path) + "/thief-runner";
       else m_fullName = "thief-runner";
       std::string::size_type slash = m_fullName.rfind('/');
       m_path = slash == std::string::npos ? "." : m_fullName.substr(0, slash);

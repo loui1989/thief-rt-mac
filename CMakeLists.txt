@@ -2,7 +2,7 @@ cmake_minimum_required(VERSION 3.20)
 project(DarkEnginePortability LANGUAGES C CXX)
 
 set(DARK_SDL_PLATFORM OFF)
-if(CMAKE_SYSTEM_NAME STREQUAL "Linux" OR ANDROID)
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux" OR ANDROID OR APPLE)
   set(DARK_SDL_PLATFORM ON)
 endif()
 
@@ -73,13 +73,40 @@ if(DARK_SDL_PLATFORM)
   else()
     find_package(OpenGL REQUIRED)
   endif()
-  if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+  if(CMAKE_SYSTEM_NAME STREQUAL "Linux" OR APPLE)
     find_package(PNG REQUIRED)
     find_package(SDL2 REQUIRED)
+    # Sources include <SDL2/SDL.h>. Distribution packages install SDL into a
+    # default include path; Homebrew and source builds do not, so also expose
+    # the parent of SDL's own include directory.
+    get_target_property(dark_sdl2_includes SDL2::SDL2 INTERFACE_INCLUDE_DIRECTORIES)
+    foreach(dark_sdl2_include IN LISTS dark_sdl2_includes)
+      if(dark_sdl2_include MATCHES "/SDL2/?$")
+        get_filename_component(dark_sdl2_parent "${dark_sdl2_include}" DIRECTORY)
+        include_directories(SYSTEM "${dark_sdl2_parent}")
+      endif()
+    endforeach()
     find_package(PkgConfig QUIET)
     if(PkgConfig_FOUND)
       pkg_check_modules(FFMPEG QUIET IMPORTED_TARGET
         libavformat libavcodec libavutil libswscale libswresample)
+    endif()
+    # A static FFmpeg install without pkg-config (the macOS build kit).
+    set(DARK_FFMPEG_ROOT "" CACHE PATH "Static FFmpeg install prefix")
+    if(NOT FFMPEG_FOUND AND DARK_FFMPEG_ROOT AND
+       EXISTS "${DARK_FFMPEG_ROOT}/include/libavformat/avformat.h")
+      add_library(dark_ffmpeg INTERFACE)
+      target_include_directories(dark_ffmpeg INTERFACE "${DARK_FFMPEG_ROOT}/include")
+      foreach(dark_ffmpeg_lib avformat avcodec swscale swresample avutil)
+        target_link_libraries(dark_ffmpeg INTERFACE
+          "${DARK_FFMPEG_ROOT}/lib/lib${dark_ffmpeg_lib}.a")
+      endforeach()
+      if(APPLE)
+        target_link_libraries(dark_ffmpeg INTERFACE z
+          "-framework CoreFoundation" "-framework CoreVideo"
+          "-framework CoreMedia" "-framework VideoToolbox"
+          "-framework AudioToolbox" "-framework Security")
+      endif()
     endif()
   endif()
 endif()
@@ -316,7 +343,7 @@ if(DARK_BUILD_ENGINE)
     )
   endif()
   target_link_libraries(dark_namedres PUBLIC dark_compression)
-  if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+  if(CMAKE_SYSTEM_NAME STREQUAL "Linux" OR APPLE)
     target_link_libraries(dark_namedres PUBLIC PNG::PNG)
   elseif(ANDROID)
     target_include_directories(dark_namedres PRIVATE
@@ -416,6 +443,15 @@ if(DARK_BUILD_ENGINE)
     target_link_libraries(dark_vorbisfile PUBLIC dark_vorbis)
   endif()
 
+  if(APPLE)
+    # ld64 resolves symbols across all static archives without grouping.
+    set(DARK_LINK_GROUP_BEGIN)
+    set(DARK_LINK_GROUP_END)
+  else()
+    set(DARK_LINK_GROUP_BEGIN -Wl,--start-group)
+    set(DARK_LINK_GROUP_END -Wl,--end-group)
+  endif()
+
   if(DARK_SDL_PLATFORM)
     add_library(dark_unix_providers STATIC
       unixsrc/appcore/appcore.cpp
@@ -445,6 +481,9 @@ if(DARK_BUILD_ENGINE)
     if(FFMPEG_FOUND)
       target_compile_definitions(dark_unix_providers PRIVATE DARK_HAVE_FFMPEG=1)
       target_link_libraries(dark_unix_providers PUBLIC PkgConfig::FFMPEG)
+    elseif(TARGET dark_ffmpeg)
+      target_compile_definitions(dark_unix_providers PRIVATE DARK_HAVE_FFMPEG=1)
+      target_link_libraries(dark_unix_providers PUBLIC dark_ffmpeg)
     else()
       message(WARNING "FFmpeg development libraries were not found; movie playback will be disabled")
     endif()
@@ -537,7 +576,7 @@ if(DARK_BUILD_ENGINE)
       endif()
       target_link_libraries(thief2 PRIVATE
         dark_engine_config
-        -Wl,--start-group
+        ${DARK_LINK_GROUP_BEGIN}
         ${dark_engine_targets}
         dark_platform
         dark_compression
@@ -546,7 +585,7 @@ if(DARK_BUILD_ENGINE)
         $<$<TARGET_EXISTS:dark_vorbisfile>:dark_vorbisfile>
         $<$<TARGET_EXISTS:dark_vorbis>:dark_vorbis>
         $<$<TARGET_EXISTS:ogg>:ogg>
-        -Wl,--end-group
+        ${DARK_LINK_GROUP_END}
         m
       )
       if(NOT ANDROID)
@@ -602,7 +641,7 @@ if(DARK_BUILD_ENGINE)
       )
       target_link_libraries(dromed PRIVATE
         dark_engine_config
-        -Wl,--start-group
+        ${DARK_LINK_GROUP_BEGIN}
         ${dark_engine_targets}
         dark_platform
         dark_compression
@@ -611,7 +650,7 @@ if(DARK_BUILD_ENGINE)
         $<$<TARGET_EXISTS:dark_vorbisfile>:dark_vorbisfile>
         $<$<TARGET_EXISTS:dark_vorbis>:dark_vorbis>
         $<$<TARGET_EXISTS:ogg>:ogg>
-        -Wl,--end-group
+        ${DARK_LINK_GROUP_END}
         m
         pthread
       )

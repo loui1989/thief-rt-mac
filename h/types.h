@@ -26,7 +26,7 @@
  * before the engine typedef below.  The sys/types include guard prevents a
  * later system header from reintroducing the conflicting name.
  */
-#if defined(__linux__)
+#if defined(__linux__) || defined(__APPLE__)
 #define ulong __dark_system_ulong
 #include <sys/types.h>
 #undef ulong

@@ -98,6 +98,63 @@ void NormalizeEnteredPath(std::string &path)
         path = path.substr(1, path.size() - 2);
 }
 
+#if defined(__APPLE__)
+// A Finder launch has no terminal: remember the chosen folder between runs
+// and ask with the standard folder picker instead of reading stdin.
+std::string MacRememberedPathFile()
+{
+    const char *home = std::getenv("HOME");
+    if (!home || !home[0])
+        return std::string();
+    return std::string(home) +
+        "/Library/Application Support/Dark Engine Restored/game_path.txt";
+}
+
+bool MacReadRememberedPath(std::string &path)
+{
+    const std::string file = MacRememberedPathFile();
+    FILE *stream = file.empty() ? nullptr : std::fopen(file.c_str(), "r");
+    if (!stream)
+        return false;
+    char buffer[PATH_MAX] = {};
+    const bool read = std::fgets(buffer, sizeof(buffer), stream) != nullptr;
+    std::fclose(stream);
+    path = read ? buffer : "";
+    NormalizeEnteredPath(path);
+    return !path.empty();
+}
+
+void MacRememberPath(const std::string &path)
+{
+    const std::string file = MacRememberedPathFile();
+    if (file.empty())
+        return;
+    const std::string folder = file.substr(0, file.rfind('/'));
+    mkdir(folder.c_str(), 0755);
+    if (FILE *stream = std::fopen(file.c_str(), "w"))
+    {
+        std::fprintf(stream, "%s\n", path.c_str());
+        std::fclose(stream);
+    }
+}
+
+bool MacChooseFolder(std::string &path)
+{
+    FILE *pipe = popen(
+        "/usr/bin/osascript -e 'POSIX path of (choose folder with prompt "
+        "\"Choose your Thief, Thief Gold or Thief II folder (the one with "
+        "cam.cfg)\")' 2>/dev/null", "r");
+    if (!pipe)
+        return false;
+    char buffer[PATH_MAX] = {};
+    const bool read = std::fgets(buffer, sizeof(buffer), pipe) != nullptr;
+    pclose(pipe);
+    path = read ? buffer : "";
+    NormalizeEnteredPath(path);
+    return !path.empty();
+}
+#endif
+
 bool SelectGameDirectory(const char *requested, bool interactive,
                          std::string &directory, const char *&profile)
 {
@@ -126,7 +183,37 @@ bool SelectGameDirectory(const char *requested, bool interactive,
             profile = DetectGameProfile(directory);
         if (profile)
             return true;
+
+#if defined(__APPLE__)
+        std::string remembered;
+        if (MacReadRememberedPath(remembered) &&
+            ResolveDirectory(remembered.c_str(), directory))
+            profile = DetectGameProfile(directory);
+        if (profile)
+            return true;
+#endif
     }
+
+#if defined(__APPLE__)
+    if (interactive && !isatty(STDIN_FILENO))
+    {
+        std::string chosen;
+        while (MacChooseFolder(chosen))
+        {
+            if (ResolveDirectory(chosen.c_str(), directory))
+                profile = DetectGameProfile(directory);
+            if (profile)
+            {
+                MacRememberPath(directory);
+                return true;
+            }
+            PlatformShowError("Dark Engine",
+                "That folder is not a recognizable Thief installation; it "
+                "must contain cam.cfg and the retail mission data.");
+        }
+        return false;
+    }
+#endif
 
     if (!interactive || !isatty(STDIN_FILENO))
     {
