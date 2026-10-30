@@ -2863,6 +2863,36 @@ void flush_lights()
       upload_light(L);
       s_chosen[L.id] = s_frame;
    }
+   // A light that goes out (a doused torch) or is no longer among those
+   // traced is still given, at no brightness, for half a second. Gone from
+   // the list at once, the denoiser could not measure the change -- its
+   // test re-lights last frame's samples with this frame's lights, and a
+   // light that is not there is not a change -- so the torch's glow on the
+   // walls stayed for seconds. Seen dark, the change is found at once.
+   {
+      static std::unordered_map<uint32_t, std::pair<PendingLight, int>> s_fading;
+      static std::vector<PendingLight> s_prev;
+      std::unordered_map<uint32_t, bool> now;
+      for (const PendingLight &L : g_pendingLights)
+         now[L.id] = true;
+      for (const PendingLight &L : s_prev)
+         if (!now.count(L.id) && !s_fading.count(L.id))
+            s_fading[L.id] = {L, 30};
+      for (auto it = s_fading.begin(); it != s_fading.end();) {
+         if (now.count(it->first) || --it->second.second < 0) {
+            it = s_fading.erase(it);
+            continue;
+         }
+         PendingLight dark = it->second.first;
+         const float scale = 0.01f / std::max(dark.peak, 0.01f);
+         for (float &c : dark.rgb)
+            c *= scale;
+         dark.peak = 0.01f;
+         upload_light(dark);
+         ++it;
+      }
+      s_prev = g_pendingLights;
+   }
    g_lastLights = g_pendingLights;
    g_pendingLights.clear();
 }
