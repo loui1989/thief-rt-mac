@@ -1340,8 +1340,8 @@ std::string row_value(int row)
    }
    case kRowDebug: {
       static const char *kViews[] = {"Off", "Shadows only", "Direct light only", "Glossy only",
-                                     "Bounce light only"};
-      return kViews[std::clamp(g_cfg.debugView, 0, 4)];
+                                     "Bounce light only", "Change detection"};
+      return kViews[std::clamp(g_cfg.debugView, 0, 5)];
    }
    case kRowRough:
       snprintf(buf, sizeof(buf), g_cfg.minRoughness >= 0.999f ? "%.2f (matte)" : "at least %.2f",
@@ -1431,7 +1431,7 @@ void change_row(int row, int dir)
       g_cfg.lightSize = std::clamp(std::round(g_cfg.lightSize * 20.0f) / 20.0f + 0.05f * dir,
                                    0.05f, 1.5f);
       break;
-   case kRowDebug: g_cfg.debugView = (g_cfg.debugView + dir + 5) % 5; return;   // not saved
+   case kRowDebug: g_cfg.debugView = (g_cfg.debugView + dir + 6) % 6; return;   // not saved
    case kRowBackFaces: g_dropBackFaces = !g_dropBackFaces; return;   // not saved
    case kRowReuse: g_reuseTest = (g_reuseTest + dir + 4) % 4; return;   // not saved
    case kRowFreeze:
@@ -1699,7 +1699,7 @@ void draw_frame(bool sceneDrawn)
       // the panel's debug view: which part of the lighting is what
       .debugVisibility = g_cfg.debugView == 1 ? 1u : 0u,
       .debugShowFlags = g_cfg.debugView == 2 ? 32u : g_cfg.debugView == 3 ? 64u
-                        : g_cfg.debugView == 4 ? 128u : 0u,
+                        : g_cfg.debugView == 4 ? 128u : g_cfg.debugView == 5 ? 2u : 0u,
       .restirTemporalJitter = g_reuseTest == 2 ? 0.0f : 2.0f,
       .rrSpecularHitDistance = true,
       .directSamples = g_reuseTest == 3 ? 4u : 1u,
