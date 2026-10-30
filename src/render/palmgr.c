@@ -414,8 +414,11 @@ int palmgr_alloc_pal(uchar *pal)
    {
       // align is an 8-bit field, so the legacy palette table cannot be
       // widened independently. Falling back to the game palette is preferable
-      // to indexing one element past pal_list and corrupting the heap.
-      Warning(("palmgr_alloc_pal(): no free palette slot; using slot 0\n"));
+      // to indexing one element past pal_list and corrupting the heap; the
+      // caller keeps the palette beside its bitmap (palmgr_keep_bitmap_palette).
+      static int s_full = 0;
+      if (s_full++ == 0)
+         mprintf("palmgr: all 255 palette slots are in use; further textures keep their own palette\n");
       return 0;
    }
    ConfigSpew("palmgr_spew",("alloc_pal() returning new slot %d\n",i));
@@ -428,6 +431,68 @@ int palmgr_alloc_pal(uchar *pal)
    info->ref_count = 1;
    palmgr_set_pal_slot(0, 256, pal, i);
    return i;
+}
+
+typedef struct own_pal {
+   const void *bitmap;
+   int refs;
+   uchar pal[768];
+} own_pal;
+static own_pal *own_pals = NULL;
+static int own_count = 0, own_cap = 0, own_total = 0;
+
+static int own_find(const void *bitmap)
+{
+   int i;
+   for (i = 0; i < own_count; ++i)
+      if (own_pals[i].bitmap == bitmap)
+         return i;
+   return -1;
+}
+
+void palmgr_keep_bitmap_palette(const void *bitmap, const uchar *pal)
+{
+   int i;
+   if (bitmap == NULL || pal == NULL)
+      return;
+   i = own_find(bitmap);
+   if (i < 0) {
+      if (own_count == own_cap) {
+         int cap = own_cap ? own_cap * 2 : 64;
+         own_pal *grown = (own_pal *)Malloc(cap * sizeof(own_pal));
+         if (grown == NULL)
+            return;
+         if (own_pals) {
+            memcpy(grown, own_pals, own_count * sizeof(own_pal));
+            Free(own_pals);
+         }
+         own_pals = grown;
+         own_cap = cap;
+      }
+      i = own_count++;
+      own_pals[i].bitmap = bitmap;
+      own_pals[i].refs = 0;
+      if ((++own_total % 50) == 1)
+         mprintf("palmgr: %d textures carry their own palette\n", own_total);
+   }
+   memcpy(own_pals[i].pal, pal, 768);
+   own_pals[i].refs++;
+}
+
+void palmgr_forget_bitmap_palette(const void *bitmap)
+{
+   int i = own_find(bitmap);
+   if (i < 0)
+      return;
+   if (--own_pals[i].refs > 0)
+      return;
+   own_pals[i] = own_pals[--own_count];
+}
+
+const uchar *palmgr_bitmap_palette(const void *bitmap)
+{
+   int i = own_find(bitmap);
+   return i < 0 ? NULL : own_pals[i].pal;
 }
 
 // just decrement ref count...

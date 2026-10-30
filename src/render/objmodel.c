@@ -206,6 +206,8 @@ static void _objm_pal_callback(uchar *pal, uchar *bitmap)
 {
    grs_bitmap *bm=(grs_bitmap *)bitmap;
    bm->align=palmgr_alloc_pal(pal);
+   if (bm->align==0 && pal!=NULL)
+      palmgr_keep_bitmap_palette(bm, pal);
 }
 
 // @TBD: For the moment, we are Locking the model resources as soon as we find
@@ -292,6 +294,14 @@ static void common_texture_load(ModelHandle *mh, ISearchPath *pPath,
          grs_bitmap *pbm = (grs_bitmap *) IRes_Lock(pRes);
          uchar b = pbm->align;
          pbm->align = palmgr_alloc_pal(pPall);
+         if (pbm->align == 0 && pbm->type == BMT_FLAT8) {
+            // no slot left: the texture keeps its palette itself
+            palmgr_keep_bitmap_palette(pbm, (const uchar *)pPall);
+            if ((g_tmgr!=NULL)&&(pbm->flags&BMF_LOADED)) {
+               lgd3d_unload_texture(pbm);
+               lgd3d_load_texture(pbm);
+            }
+         }
 #ifdef DBG_ON
          if ((pbm->align==0) && (config_is_defined("wastedpalettes")))
            mprintf("Object %s uses the game palette for %s.\n",objName,name);
@@ -597,6 +607,7 @@ static void FreeTextures(ModelHandle *mh)
          grs_bitmap *bm=(grs_bitmap *) IRes_Lock(h);
          if (bm->align!=0)
             palmgr_release_slot(bm->align);
+         palmgr_forget_bitmap_palette(bm);
          IRes_Unlock(h);     // We need to double-unlock, because we have a lock from
          IRes_Unlock(h);     //    common_textures_load and the lock to get bm right above
          ReleaseAppRes(h);   // try to release, if final release, toast our app data too

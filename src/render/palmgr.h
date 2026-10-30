@@ -47,6 +47,16 @@ EXTERN void palmgr_free_slot(int slot);
 // Free the ipal associated wth this slot, if it exists.
 EXTERN void palmgr_free_ipal(int slot);
 
+// A palettized texture whose own palette found no slot (the 255 are full --
+// a large fan mission ships hundreds of differently paletted model
+// textures) is left on slot 0, the game palette, which turned it into
+// noise.  Its palette is kept beside the bitmap instead, and the texture
+// converter uses it for a slot-0 bitmap that has one.  Counted: forget once
+// for every keep.
+EXTERN void palmgr_keep_bitmap_palette(const void *bitmap, const uchar *pal);
+EXTERN void palmgr_forget_bitmap_palette(const void *bitmap);
+EXTERN const uchar *palmgr_bitmap_palette(const void *bitmap);
+
 #ifdef PLAYTEST
 // get the number of currently allocated palettes
 EXTERN int palmgr_get_current_count(BOOL mono_print);

@@ -181,6 +181,8 @@ static void _ClearPtxt(IRes **pTxt)
          palmgr_release_slot(bitmap->align);
          bitmap->align = 0;
       }
+      if (bitmap)
+         palmgr_forget_bitmap_palette(bitmap);
    }
    (*pTxt)->Unlock();
    SafeRelease((*pTxt));
@@ -225,6 +227,8 @@ static void _GogetPtxt(IRes **pTxt, const char *txtName)
             if (data)
             {
                bitmap->align = (uchar)palmgr_alloc_pal(data);
+               if (bitmap->align == 0)
+                  palmgr_keep_bitmap_palette(bitmap, data);
                palette->Unlock();
             }
             // The palette manager retains its own copy.

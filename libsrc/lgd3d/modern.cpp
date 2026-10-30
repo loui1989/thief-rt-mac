@@ -1,6 +1,7 @@
 #include <render_backend.h>
 #include <dev2d.h>
 #include <lgd3d.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <tdrv.h>
@@ -8,6 +9,13 @@
 #include <tmgr.h>
 
 #define MODERN_MAX_PALETTES 256
+
+extern "C" const uchar *palmgr_bitmap_palette(const void *bitmap);
+
+// Texture manager traffic, reported to the log: a manager out of handles
+// releases and reloads textures every frame.
+static int g_texLoads = 0, g_texReleases = 0, g_texHighest = -1;
+static int g_texReportFrames = 0, g_texThrashReports = 0;
 
 extern "C" {
 texture_manager *g_tmgr = NULL;
@@ -88,6 +96,9 @@ static uchar *ConvertTexture(tdrv_texture_info *info) {
   uchar *out = (uchar *)malloc(w * h * 4);
   if (!out)
     return NULL;
+  // A slot-0 texture may carry its own palette (no palette slot was left).
+  const uchar *ownPalette =
+      (bm->type == BMT_FLAT8 && bm->align == 0) ? palmgr_bitmap_palette(bm) : NULL;
   for (y = 0; y < h; ++y)
     for (x = 0; x < w; ++x) {
       uchar r = 255, g = 255, b = 255, a = 255;
@@ -103,9 +114,10 @@ static uchar *ConvertTexture(tdrv_texture_info *info) {
           int slot = bm->align;
           if (slot < 0 || slot >= MODERN_MAX_PALETTES)
             slot = 0;
-          r = g_palettes[slot][index * 3];
-          g = g_palettes[slot][index * 3 + 1];
-          b = g_palettes[slot][index * 3 + 2];
+          const uchar *pal = ownPalette ? ownPalette : g_palettes[slot];
+          r = pal[index * 3];
+          g = pal[index * 3 + 1];
+          b = pal[index * 3 + 2];
           if ((info->flags & TF_TRANS) && index == 0)
             a = 0;
         }
@@ -155,6 +167,9 @@ static int LoadTexture(tdrv_texture_info *info) {
       RenderBackendCreateTexture(info->w, info->h, pixels, info->w * 4);
   free(pixels);
   g_ModernBitmaps[info->id] = info->bm;
+  ++g_texLoads;
+  if (info->id > g_texHighest)
+    g_texHighest = info->id;
   return g_ModernTextures[info->id] ? TDRV_SUCCESS : TDRV_FAILURE;
 }
 static void ReloadTexture(tdrv_texture_info *info) {
@@ -183,6 +198,8 @@ static void UnloadTexture(int id) {
 }
 static void ReleaseTexture(int id) {
   if (id >= 0 && id < LGD3D_MAX_TEXTURES) {
+    if (g_ModernTextures[id])
+      ++g_texReleases;
     UnsetTextureId(id);
     if (g_ModernTextures[id])
       RenderBackendDestroyTexture(g_ModernTextures[id]);
@@ -192,7 +209,21 @@ static void ReleaseTexture(int id) {
 }
 static void Synchronize(void) {}
 static void DriverStartFrame(int frame) { RenderBackendBeginFrame(); }
-static void DriverEndFrame(void) { RenderBackendEndFrame(); }
+static void DriverEndFrame(void) {
+  RenderBackendEndFrame();
+  // Every ~5 s: a manager releasing textures while it loads them is out of
+  // handles (or memory) and swapping, which costs every frame.
+  if (++g_texReportFrames >= 300) {
+    if (g_texReleases > 0 && g_texThrashReports < 40) {
+      ++g_texThrashReports;
+      fprintf(stderr, "textures: %d loaded, %d swapped out in the last %d frames "
+              "(%d of %d handles used)\n", g_texLoads, g_texReleases,
+              g_texReportFrames, g_texHighest + 1, LGD3D_MAX_TEXTURES);
+    }
+    g_texLoads = g_texReleases = 0;
+    g_texReportFrames = 0;
+  }
+}
 
 static void InitTextureManager(lgd3ds_device_info *info) {
   static texture_driver driver;
