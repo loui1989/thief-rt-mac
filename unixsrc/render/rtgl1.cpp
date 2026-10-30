@@ -95,6 +95,7 @@ struct Settings {
    float ambient = 1.0f;      // the level's ambient light, as a faint glow of every surface
    int candidates = 24;       // lights tried per pixel and per bounce (RTGL1: no rays, ALU only)
    int response = 1;          // how fast lighting changes show: 0 calm (Blood RT), 1 quick, 2 instant
+   bool lightFade = true;     // lights entering or leaving the traced set fade
    bool steadyFaces = true;   // models' faces seen or shadow-only by a fixed rule, not by the view
    bool lightFix = true;      // lights moved out of the walls they sit in
    bool fixturesPass = true;  // a torch or small lamp lets its own light out
@@ -157,6 +158,7 @@ void load_settings()
       else if (k == "smooth_models") g_cfg.smoothModels = value != 0;
       else if (k == "candidates") g_cfg.candidates = std::clamp(int(value), 4, 32);
       else if (k == "response") g_cfg.response = std::clamp(int(value), 0, 2);
+      else if (k == "light_fade") g_cfg.lightFade = value != 0;
       else if (k == "steady_faces") g_cfg.steadyFaces = value != 0;
       else if (k == "light_fix") g_cfg.lightFix = value != 0;
       else if (k == "fixtures_pass") g_cfg.fixturesPass = value != 0;
@@ -178,13 +180,13 @@ void save_settings()
       return;
    fprintf(f, "upscale = %d\nscale = %.2f\nfps = %d\nvsync = %d\nlight = %.3f\nsky = %.3f\n"
               "light_size = %.3f\nglow = %.3f\nwater = %d\nsprite_glow = %.3f\ngi = %d\n"
-              "volumetric = %d\ndynres = %d\nmax_lights = %d\nmin_roughness = %.2f\nlight_cull = %d\nflicker = %d\nambient = %.3f\nsmooth_models = %d\nfixtures_pass = %d\nlight_fix = %d\nresponse = %d\ncandidates = %d\nsteady_faces = %d\n",
+              "volumetric = %d\ndynres = %d\nmax_lights = %d\nmin_roughness = %.2f\nlight_cull = %d\nflicker = %d\nambient = %.3f\nsmooth_models = %d\nfixtures_pass = %d\nlight_fix = %d\nresponse = %d\ncandidates = %d\nsteady_faces = %d\nlight_fade = %d\n",
            g_cfg.upscale, g_cfg.scale, int(g_cfg.fps), int(g_cfg.vsync), g_cfg.light, g_cfg.sky,
            g_cfg.lightSize, g_cfg.glow, g_cfg.water, g_cfg.spriteGlow, g_cfg.gi,
            int(g_cfg.volumetric), g_cfg.dynres, g_cfg.maxLights, g_cfg.minRoughness,
            int(g_cfg.lightCull), g_cfg.flicker, g_cfg.ambient, int(g_cfg.smoothModels),
            int(g_cfg.fixturesPass), int(g_cfg.lightFix), g_cfg.response,
-           g_cfg.candidates, int(g_cfg.steadyFaces));
+           g_cfg.candidates, int(g_cfg.steadyFaces), int(g_cfg.lightFade));
    fclose(f);
 }
 
@@ -351,6 +353,7 @@ uint32_t g_lightsTotal = 0, g_frameLightsShown = 0, g_lightsReaching = 0;
 std::vector<PendingLight> g_lastLights;   // last frame's, for the inspector
 std::vector<PendingLight> g_lastOffered;  // all the game gave last frame, before culling
 std::vector<PendingLight> g_dimPending, g_lastDim;   // too dim to trace (off)
+std::vector<PendingLight> g_fadingOut;   // left the traced set, still fading out
 std::vector<PendingLight> g_frozenLights;  // while g_freeze
 bool g_underwater = false;
 int g_drawableW = 1, g_drawableH = 1;
@@ -1399,14 +1402,14 @@ const char *kUpscaleNames[] = {"Off",
                                "MetalFX Custom"};
 
 enum UiRow {
-   kRowUpscale, kRowScale, kRowDynres, kRowBounces, kRowLights, kRowCandidates, kRowLightCull, kRowResponse, kRowFlicker, kRowVolumetric, kRowVsync,
+   kRowUpscale, kRowScale, kRowDynres, kRowBounces, kRowLights, kRowLightFade, kRowCandidates, kRowLightCull, kRowResponse, kRowFlicker, kRowVolumetric, kRowVsync,
    kRowFps, kRowLight, kRowAmbient, kRowSky, kRowLightSize, kRowRough, kRowSmooth, kRowSteady, kRowFixtures, kRowLightFix, kRowGlow, kRowWater,
    kRowDebug, kRowFreeze, kRowBackFaces, kRowReuse, kRowBlink, kRowInspect, kRowReset, kRowCount
 };
 
 const char *kRowLabels[kRowCount] = {
    "Upscaler", "Render resolution", "Dynamic resolution", "Bounce light", "Lights traced",
-   "Lights tried per pixel", "Lights behind walls", "Light changes", "Light flicker",
+   "Lights coming into range", "Lights tried per pixel", "Lights behind walls", "Light changes", "Light flicker",
    "Volumetric light", "VSync", "FPS counter", "Light brightness", "Ambient light", "Sky brightness",
    "Light size (soft shadows)", "Surface roughness", "Model shading", "Model faces", "Torches and lamps", "Lights in walls", "Lamp glow", "Water",
    "Debug view", "Freeze scene (test)", "Back faces (test)", "Light sampling (test)", "Blink nearest light (test)", "Inspect centre of view", "Reset to defaults",
@@ -1439,6 +1442,7 @@ std::string row_value(int row)
       snprintf(buf, sizeof(buf), "nearest %d", g_cfg.maxLights);
       return buf;
    case kRowLightCull: return g_cfg.lightCull ? "Skipped" : "Traced";
+   case kRowLightFade: return g_cfg.lightFade ? "Fade in" : "Appear at once";
    case kRowCandidates: snprintf(buf, sizeof(buf), "%d", g_cfg.candidates); return buf;
    case kRowResponse: return g_cfg.response == 0 ? "Calm (slow to show)" : g_cfg.response == 2 ? "Instant (noisier)" : "Quick";
    case kRowFlicker: return g_cfg.flicker == 1 ? "As the game" : g_cfg.flicker == 2 ? "Nearly steady" : "Smoothed";
@@ -1543,6 +1547,7 @@ void change_row(int row, int dir)
    case kRowFixtures: g_cfg.fixturesPass = !g_cfg.fixturesPass; break;
    case kRowSteady: g_cfg.steadyFaces = !g_cfg.steadyFaces; break;
    case kRowLightFix: g_cfg.lightFix = !g_cfg.lightFix; g_lightFixes.clear(); break;
+   case kRowLightFade: g_cfg.lightFade = !g_cfg.lightFade; break;
    case kRowCandidates: {
       static const int kSteps[] = {8, 12, 16, 24, 32};
       int i = 0;
@@ -2624,7 +2629,10 @@ void RenderRTObjectEnd(void)
             c.bmax[k] = std::max(c.bmax[k], v.position[k]);
          }
    }
-   if (g_cfg.steadyFaces && c.whole)
+   // only for a model that holds still: sorting a moving one's faces anew
+   // each frame broke the match between its frames (its motion), so the
+   // denoiser smeared characters as they walked
+   if (g_cfg.steadyFaces && c.whole && c.unchanged >= 1)
       steady_faces(c);
    const uint64_t shapeHash = hash_prims(c.prims);
    // the normals are recomputed only when the shape changed
@@ -3064,8 +3072,84 @@ void flush_lights()
             for (int k = 0; k < 3; ++k)
                L.pos[k] += fix.offset[k] / kMetersPerUnit;
       }
-      upload_light(L);
       s_chosen[L.id] = s_frame;
+   }
+   // A light that comes into the traced set (walking up to it) fades in over
+   // a moment, and one that drops out of it fades out, instead of appearing
+   // or vanishing at once: the lights "loading in" ahead of you. One switched
+   // on or put out in the game changes at once, as there.
+   {
+      static std::unordered_map<uint32_t, float> s_fade;
+      static std::unordered_map<uint32_t, PendingLight> s_seen;
+      static std::unordered_map<uint32_t, bool> s_dimBefore;
+      static auto s_t = std::chrono::steady_clock::now();
+      const auto tn = std::chrono::steady_clock::now();
+      const float dt = std::clamp(std::chrono::duration<float>(tn - s_t).count(), 0.0f, 0.1f);
+      s_t = tn;
+      const float step = g_cfg.lightFade ? dt / 0.6f : 1.0f;
+      const bool first = s_seen.empty();
+      std::unordered_map<uint32_t, bool> chosen, offered, dim;
+      for (const PendingLight &L : g_pendingLights)
+         chosen[L.id] = true;
+      for (const PendingLight &L : g_lastOffered)
+         offered[L.id] = true;
+      for (const PendingLight &L : g_lastDim)
+         dim[L.id] = true;
+      auto upload_scaled = [](PendingLight L, float f) {
+         f = std::clamp(f, 0.0f, 1.0f);
+         if (f < 1.0f) {
+            const float peak = std::max(L.peak * f, 0.01f);
+            const float scale = peak / std::max(L.peak, 0.01f);
+            for (float &c : L.rgb)
+               c *= scale;
+            L.peak = peak;
+         }
+         upload_light(L);
+      };
+      for (const PendingLight &L : g_pendingLights) {
+         auto it = s_fade.find(L.id);
+         if (it == s_fade.end())
+            it = s_fade.emplace(L.id, (first || s_dimBefore.count(L.id)) ? 1.0f : 0.0f).first;
+         it->second = std::min(1.0f, it->second + step);
+         upload_scaled(L, it->second);
+         s_seen[L.id] = L;
+      }
+      for (auto it = s_seen.begin(); it != s_seen.end();) {
+         const uint32_t id = it->first;
+         if (chosen.count(id)) {
+            ++it;
+            continue;
+         }
+         float &f = s_fade[id];
+         // out in the game (or gone): not faded, the ghost below takes it
+         if (dim.count(id) || !offered.count(id) || (f -= step) <= 0.0f) {
+            s_fade.erase(id);
+            it = s_seen.erase(it);
+            continue;
+         }
+         // the light as the game has it now, at its fading strength
+         PendingLight L = it->second;
+         for (const PendingLight &O : g_lastOffered)
+            if (O.id == id) {
+               const float off[3] = {L.pos[0] - O.pos[0], L.pos[1] - O.pos[1], L.pos[2] - O.pos[2]};
+               L = O;
+               // keep the moved-out-of-the-wall position
+               for (int k = 0; k < 3; ++k)
+                  L.pos[k] += off[k];
+               break;
+            }
+         upload_scaled(L, f);
+         chosen[id] = true;   // still given: not a light gone for the ghost below
+         ++it;
+      }
+      s_dimBefore = dim;
+      // the ones still fading count as given
+      std::vector<PendingLight> stillFading;
+      for (const auto &e : s_seen)
+         if (!std::any_of(g_pendingLights.begin(), g_pendingLights.end(),
+                          [&e](const PendingLight &L) { return L.id == e.first; }))
+            stillFading.push_back(e.second);
+      g_fadingOut.swap(stillFading);
    }
    // A light that goes out (a doused torch) or is no longer among those
    // traced is still given, at no brightness, for half a second. Gone from
@@ -3078,6 +3162,8 @@ void flush_lights()
       static std::vector<PendingLight> s_prev;
       std::unordered_map<uint32_t, bool> now;
       for (const PendingLight &L : g_pendingLights)
+         now[L.id] = true;
+      for (const PendingLight &L : g_fadingOut)
          now[L.id] = true;
       {
          // the traced set's changes, for matching against lighting that pops
@@ -3119,6 +3205,7 @@ void flush_lights()
          ++it;
       }
       s_prev = g_pendingLights;
+      s_prev.insert(s_prev.end(), g_fadingOut.begin(), g_fadingOut.end());
    }
    g_lastLights = g_pendingLights;
    g_pendingLights.clear();
