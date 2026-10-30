@@ -321,6 +321,8 @@ bool g_dropBackFaces = false;
 // pixels and frames. 0 normal, 1 no spatial reuse, 2 no reuse at all,
 // 3 normal with 8 shadow rays and 4 light samples per pixel.
 int g_reuseTest = 0;
+bool g_blinkTest = false;   // the light nearest the camera goes off and on (test)
+uint32_t g_blinkId = ~0u;
 struct PendingLight {
    uint32_t id;
    float pos[3], rgb[3], dir[3];
@@ -1280,7 +1282,7 @@ const char *kUpscaleNames[] = {"Off",
 enum UiRow {
    kRowUpscale, kRowScale, kRowDynres, kRowBounces, kRowLights, kRowLightCull, kRowFlicker, kRowVolumetric, kRowVsync,
    kRowFps, kRowLight, kRowAmbient, kRowSky, kRowLightSize, kRowRough, kRowSmooth, kRowFixtures, kRowLightFix, kRowGlow, kRowWater,
-   kRowDebug, kRowFreeze, kRowBackFaces, kRowReuse, kRowInspect, kRowReset, kRowCount
+   kRowDebug, kRowFreeze, kRowBackFaces, kRowReuse, kRowBlink, kRowInspect, kRowReset, kRowCount
 };
 
 const char *kRowLabels[kRowCount] = {
@@ -1288,7 +1290,7 @@ const char *kRowLabels[kRowCount] = {
    "Lights behind walls", "Light flicker",
    "Volumetric light", "VSync", "FPS counter", "Light brightness", "Ambient light", "Sky brightness",
    "Light size (soft shadows)", "Surface roughness", "Model shading", "Torches and lamps", "Lights in walls", "Lamp glow", "Water",
-   "Debug view", "Freeze scene (test)", "Back faces (test)", "Light sampling (test)", "Inspect centre of view", "Reset to defaults",
+   "Debug view", "Freeze scene (test)", "Back faces (test)", "Light sampling (test)", "Blink nearest light (test)", "Inspect centre of view", "Reset to defaults",
 };
 
 // rows that do something when chosen rather than having a value
@@ -1334,14 +1336,15 @@ std::string row_value(int row)
    case kRowFixtures: return g_cfg.fixturesPass ? "Let their light out" : "Block their own light";
    case kRowFreeze: return g_freeze ? "On (frozen)" : "Off";
    case kRowBackFaces: return g_dropBackFaces ? "Dropped" : "Shadows only";
+   case kRowBlink: return g_blinkTest ? "On" : "Off";
    case kRowReuse: {
       static const char *kReuse[] = {"Normal", "No spatial reuse", "No reuse", "8 shadow rays"};
       return kReuse[std::clamp(g_reuseTest, 0, 3)];
    }
    case kRowDebug: {
       static const char *kViews[] = {"Off", "Shadows only", "Direct light only", "Glossy only",
-                                     "Bounce light only", "Change detection"};
-      return kViews[std::clamp(g_cfg.debugView, 0, 5)];
+                                     "Bounce light only", "Change detection", "Change test stages"};
+      return kViews[std::clamp(g_cfg.debugView, 0, 6)];
    }
    case kRowRough:
       snprintf(buf, sizeof(buf), g_cfg.minRoughness >= 0.999f ? "%.2f (matte)" : "at least %.2f",
@@ -1431,9 +1434,10 @@ void change_row(int row, int dir)
       g_cfg.lightSize = std::clamp(std::round(g_cfg.lightSize * 20.0f) / 20.0f + 0.05f * dir,
                                    0.05f, 1.5f);
       break;
-   case kRowDebug: g_cfg.debugView = (g_cfg.debugView + dir + 6) % 6; return;   // not saved
+   case kRowDebug: g_cfg.debugView = (g_cfg.debugView + dir + 7) % 7; return;   // not saved
    case kRowBackFaces: g_dropBackFaces = !g_dropBackFaces; return;   // not saved
    case kRowReuse: g_reuseTest = (g_reuseTest + dir + 4) % 4; return;   // not saved
+   case kRowBlink: g_blinkTest = !g_blinkTest; g_blinkId = ~0u; return;   // not saved
    case kRowFreeze:
       g_freeze = !g_freeze;
       if (g_freeze)
@@ -1699,7 +1703,8 @@ void draw_frame(bool sceneDrawn)
       // the panel's debug view: which part of the lighting is what
       .debugVisibility = g_cfg.debugView == 1 ? 1u : 0u,
       .debugShowFlags = g_cfg.debugView == 2 ? 32u : g_cfg.debugView == 3 ? 64u
-                        : g_cfg.debugView == 4 ? 128u : g_cfg.debugView == 5 ? 2u : 0u,
+                        : g_cfg.debugView == 4 ? 128u : g_cfg.debugView == 5 ? 2u
+                        : g_cfg.debugView == 6 ? (2u | (1u << 20)) : 0u,
       .restirTemporalJitter = g_reuseTest == 2 ? 0.0f : 2.0f,
       .rrSpecularHitDistance = true,
       .directSamples = g_reuseTest == 3 ? 4u : 1u,
@@ -2849,6 +2854,26 @@ void flush_lights()
                        g_pendingLights.end(),
                        [](const PendingLight &a, const PendingLight &b) { return a.score > b.score; });
       g_pendingLights.resize(keep);
+   }
+   // the test switch: the light nearest the camera off for 20 frames, on for 20
+   if (g_blinkTest && !g_pendingLights.empty()) {
+      if (g_blinkId == ~0u) {
+         float best = 1e30f;
+         for (const PendingLight &L : g_pendingLights) {
+            const RgFloat3D p = to_rt(L.pos);
+            const float dx = p.data[0] - cam.data[0], dy = p.data[1] - cam.data[1],
+                        dz = p.data[2] - cam.data[2];
+            if (dx * dx + dy * dy + dz * dz < best) {
+               best = dx * dx + dy * dy + dz * dz;
+               g_blinkId = L.id;
+            }
+         }
+         fprintf(stderr, "RT: blinking light %u\n", g_blinkId);
+      }
+      if ((s_frame / 20) % 2 == 1)
+         g_pendingLights.erase(std::remove_if(g_pendingLights.begin(), g_pendingLights.end(),
+                                              [](const PendingLight &L) { return L.id == g_blinkId; }),
+                               g_pendingLights.end());
    }
    int fixesLeft = 6;   // the new ones this frame (a few ms at most)
    for (PendingLight &L : g_pendingLights) {
