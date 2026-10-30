@@ -624,6 +624,7 @@ float blame_object_lighting(ObjID o)
 #ifdef DARK_RT
 #include <render_rt.h>
 extern int portal_rt_light_relevant(int light);
+extern float portal_rt_path_distance(int cell, const mxs_vector *pos);
 // Hand the object-light table to the ray tracer: every static and animated
 // light (their current brightness, as the game set it this frame) and this
 // frame's dynamic lights.  Brightness goes back to Dark's 0..255 scale.
@@ -652,9 +653,27 @@ void objlight_rt_submit(void)
       // (an unlit one too: the ray tracer leaves it out, its inspector lists it)
       pos[0] = l->loc.x; pos[1] = l->loc.y; pos[2] = l->loc.z;
       dir[0] = l->dir.x; dir[1] = l->dir.y; dir[2] = l->dir.z;
-      RenderRTLight(i >= num_light ? 0x10000u + (uint32_t)(i - num_light) : (uint32_t)i,
-                    pos, rgb, l->radius, dir, l->inner, l->outer,
-                    i >= num_light || portal_rt_light_relevant(i));
+      {
+         // the light's cell, found again only when it moves
+         static int cell_of[MAX_STATIC];
+         static mxs_vector cell_at[MAX_STATIC];
+         static unsigned char known[MAX_STATIC];
+         float walk;
+         if (!known[i] || cell_at[i].x != l->loc.x || cell_at[i].y != l->loc.y ||
+             cell_at[i].z != l->loc.z) {
+            Location loc;
+            MakeLocationFromVector(&loc, &l->loc);
+            cell_of[i] = CellFromLoc(&loc);
+            cell_at[i] = l->loc;
+            known[i] = 1;
+         }
+         // (a light in no cell, inside a wall: -2, the ray tracer measures it straight)
+         walk = cell_of[i] < 0 ? -2.0f : portal_rt_path_distance(cell_of[i], &l->loc);
+         RenderRTLight(i >= num_light ? 0x10000u + (uint32_t)(i - num_light) : (uint32_t)i,
+                       pos, rgb, l->radius, dir, l->inner, l->outer,
+                       i >= num_light || portal_rt_light_relevant(i),
+                       walk == -2.0f ? -2.0f : walk < 0.0f ? -1.0f : walk * 0.3048f);
+      }
    }
 }
 #endif

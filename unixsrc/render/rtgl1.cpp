@@ -89,6 +89,7 @@ struct Settings {
                               // 1 one bounce, 2 two bounces, 3 one bounce at half rate
    bool volumetric = false;   // haze lit by every light
    int dynres = 0;            // dynamic resolution's target fps, 0 off
+   int reach = 40;            // lights fade out with their walking distance (metres); 0: nearest maxLights
    int maxLights = 64;        // lights given to the path tracer, nearest first; 0 all
    int flicker = 0;           // flickering lights: 0 smoothed, 1 as the game, 2 nearly steady
    bool smoothModels = false; // models shaded smooth (their normals blended across edges)
@@ -153,6 +154,7 @@ void load_settings()
       else if (k == "gi") g_cfg.gi = std::clamp(int(value), 0, 3);
       else if (k == "volumetric") g_cfg.volumetric = value != 0;
       else if (k == "dynres") g_cfg.dynres = std::clamp(int(value), 0, 240);
+      else if (k == "reach") g_cfg.reach = std::clamp(int(value), 0, 90);
       else if (k == "max_lights") g_cfg.maxLights = std::clamp(int(value), 0, 4096);
       else if (k == "flicker") g_cfg.flicker = std::clamp(int(value), 0, 2);
       else if (k == "smooth_models") g_cfg.smoothModels = value != 0;
@@ -180,13 +182,13 @@ void save_settings()
       return;
    fprintf(f, "upscale = %d\nscale = %.2f\nfps = %d\nvsync = %d\nlight = %.3f\nsky = %.3f\n"
               "light_size = %.3f\nglow = %.3f\nwater = %d\nsprite_glow = %.3f\ngi = %d\n"
-              "volumetric = %d\ndynres = %d\nmax_lights = %d\nmin_roughness = %.2f\nlight_cull = %d\nflicker = %d\nambient = %.3f\nsmooth_models = %d\nfixtures_pass = %d\nlight_fix = %d\nresponse = %d\ncandidates = %d\nsteady_faces = %d\nlight_fade = %d\n",
+              "volumetric = %d\ndynres = %d\nmax_lights = %d\nmin_roughness = %.2f\nlight_cull = %d\nflicker = %d\nambient = %.3f\nsmooth_models = %d\nfixtures_pass = %d\nlight_fix = %d\nresponse = %d\ncandidates = %d\nsteady_faces = %d\nlight_fade = %d\nreach = %d\n",
            g_cfg.upscale, g_cfg.scale, int(g_cfg.fps), int(g_cfg.vsync), g_cfg.light, g_cfg.sky,
            g_cfg.lightSize, g_cfg.glow, g_cfg.water, g_cfg.spriteGlow, g_cfg.gi,
            int(g_cfg.volumetric), g_cfg.dynres, g_cfg.maxLights, g_cfg.minRoughness,
            int(g_cfg.lightCull), g_cfg.flicker, g_cfg.ambient, int(g_cfg.smoothModels),
            int(g_cfg.fixturesPass), int(g_cfg.lightFix), g_cfg.response,
-           g_cfg.candidates, int(g_cfg.steadyFaces), int(g_cfg.lightFade));
+           g_cfg.candidates, int(g_cfg.steadyFaces), int(g_cfg.lightFade), g_cfg.reach);
    fclose(f);
 }
 
@@ -340,6 +342,7 @@ struct PendingLight {
    float pos[3], rgb[3], dir[3];
    float radius, inner, outer, peak, score = 0;
    bool reaches = true;   // shines on a cell near the camera or in view
+   float walk = -2.0f;    // metres from the camera through the openings; -1 out of reach, -2 not known
 };
 std::vector<PendingLight> g_pendingLights;
 // lights moved out of walls (see fix_light_position)
@@ -1402,13 +1405,13 @@ const char *kUpscaleNames[] = {"Off",
                                "MetalFX Custom"};
 
 enum UiRow {
-   kRowUpscale, kRowScale, kRowDynres, kRowBounces, kRowLights, kRowLightFade, kRowCandidates, kRowLightCull, kRowResponse, kRowFlicker, kRowVolumetric, kRowVsync,
+   kRowUpscale, kRowScale, kRowDynres, kRowBounces, kRowReach, kRowLights, kRowLightFade, kRowCandidates, kRowLightCull, kRowResponse, kRowFlicker, kRowVolumetric, kRowVsync,
    kRowFps, kRowLight, kRowAmbient, kRowSky, kRowLightSize, kRowRough, kRowSmooth, kRowSteady, kRowFixtures, kRowLightFix, kRowGlow, kRowWater,
    kRowDebug, kRowFreeze, kRowBackFaces, kRowReuse, kRowBlink, kRowInspect, kRowReset, kRowCount
 };
 
 const char *kRowLabels[kRowCount] = {
-   "Upscaler", "Render resolution", "Dynamic resolution", "Bounce light", "Lights traced",
+   "Upscaler", "Render resolution", "Dynamic resolution", "Bounce light", "Light reach", "Lights traced",
    "Lights coming into range", "Lights tried per pixel", "Lights behind walls", "Light changes", "Light flicker",
    "Volumetric light", "VSync", "FPS counter", "Light brightness", "Ambient light", "Sky brightness",
    "Light size (soft shadows)", "Surface roughness", "Model shading", "Model faces", "Torches and lamps", "Lights in walls", "Lamp glow", "Water",
@@ -1437,6 +1440,10 @@ std::string row_value(int row)
       return buf;
    case kRowBounces:
       return g_cfg.gi == 0 ? "2, half rate" : g_cfg.gi == 1 ? "1" : g_cfg.gi == 2 ? "2" : "1, half rate";
+   case kRowReach:
+      if (g_cfg.reach <= 0) return "Off (nearest lights)";
+      snprintf(buf, sizeof(buf), "%d m walk, fading", g_cfg.reach);
+      return buf;
    case kRowLights:
       if (g_cfg.maxLights <= 0) return "All";
       snprintf(buf, sizeof(buf), "nearest %d", g_cfg.maxLights);
@@ -1533,6 +1540,14 @@ void change_row(int row, int dir)
       break;
    }
    case kRowBounces: g_cfg.gi = (g_cfg.gi + dir + 4) % 4; break;
+   case kRowReach: {
+      static const int kSteps[] = {0, 20, 30, 40, 60, 90};
+      int i = 0;
+      while (i < 5 && kSteps[i] < g_cfg.reach)
+         ++i;
+      g_cfg.reach = kSteps[(i + dir + 6) % 6];
+      break;
+   }
    case kRowLights: {
       static const int kSteps[] = {16, 32, 48, 64, 96, 128, 256, 0};
       const int n = int(sizeof(kSteps) / sizeof(kSteps[0]));
@@ -2740,7 +2755,7 @@ void RenderRTAmbient(float r, float g, float b)
 }
 
 void RenderRTLight(uint32_t id, const float pos[3], const float rgb[3], float radius,
-                   const float dir[3], float inner, float outer, int reaches)
+                   const float dir[3], float inner, float outer, int reaches, float walk)
 {
    if (!g_inScene)
       return;
@@ -2779,6 +2794,7 @@ void RenderRTLight(uint32_t id, const float pos[3], const float rgb[3], float ra
    l.outer = outer;
    l.peak = peak;
    l.reaches = reaches != 0;
+   l.walk = walk;
    g_pendingLights.push_back(l);
 }
 
@@ -2997,11 +3013,40 @@ void flush_lights()
    g_lastOffered = g_pendingLights;
    g_lastDim.swap(g_dimPending);
    g_dimPending.clear();
+   // Raze RT's light reach: each light fades with how far it is to walk to
+   // from the camera, through the openings -- smoothly, in place, so a light
+   // never pops in or out where you stand, and none behind walls a long way
+   // round is traced at all.
+   if (g_cfg.reach > 0) {
+      const RgFloat3D c = to_rt(g_camera.pos);
+      const float reach = float(g_cfg.reach);
+      std::vector<PendingLight> kept;
+      for (PendingLight L : g_pendingLights) {
+         float d = L.walk;
+         if (d == -2.0f) {
+            const RgFloat3D p = to_rt(L.pos);
+            d = std::sqrt((p.data[0] - c.data[0]) * (p.data[0] - c.data[0]) +
+                          (p.data[1] - c.data[1]) * (p.data[1] - c.data[1]) +
+                          (p.data[2] - c.data[2]) * (p.data[2] - c.data[2]));
+         }
+         if (d < 0.0f)
+            continue;
+         float t = std::clamp((reach - d) / (reach * 0.33f), 0.0f, 1.0f);
+         t = t * t * (3.0f - 2.0f * t);
+         if (t <= 0.002f)
+            continue;
+         for (float &x : L.rgb)
+            x *= t;
+         L.peak *= t;
+         kept.push_back(L);
+      }
+      g_pendingLights.swap(kept);
+   }
    // A light that shines on none of the cells around the camera or in view
    // is behind walls (the level's own lighting says so): every candidate
    // RTGL1 spent on it would be shadowed, the splotches in dark places.
    // Never one within 15 m: those are kept whatever the level's lists say.
-   if (g_cfg.lightCull) {
+   if (g_cfg.lightCull && g_cfg.reach <= 0) {
       const RgFloat3D c = to_rt(g_camera.pos);
       g_pendingLights.erase(
          std::remove_if(g_pendingLights.begin(), g_pendingLights.end(),
@@ -3017,7 +3062,8 @@ void flush_lights()
    }
    g_lightsReaching = uint32_t(g_pendingLights.size());
    const RgFloat3D cam = to_rt(g_camera.pos);
-   const size_t keep = g_cfg.maxLights > 0 ? size_t(g_cfg.maxLights) : g_pendingLights.size();
+   const size_t keep = g_cfg.reach > 0 ? size_t(512)
+                       : g_cfg.maxLights > 0 ? size_t(g_cfg.maxLights) : g_pendingLights.size();
    static std::unordered_map<uint32_t, uint32_t> s_chosen;   // id -> frame last chosen
    static uint32_t s_frame = 0;
    ++s_frame;
@@ -3129,6 +3175,8 @@ void flush_lights()
          }
          // the light as the game has it now, at its fading strength
          PendingLight L = it->second;
+         // (with the reach, it faded out in place: as last given)
+         if (g_cfg.reach <= 0)
          for (const PendingLight &O : g_lastOffered)
             if (O.id == id) {
                const float off[3] = {L.pos[0] - O.pos[0], L.pos[1] - O.pos[1], L.pos[2] - O.pos[2]};

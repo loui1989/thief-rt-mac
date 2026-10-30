@@ -103,7 +103,9 @@ void RenderRTAmbient(float r, float g, float b);
 // reaches: the level's lighting has it shining on a cell near or in view.
 void RenderRTLight(uint32_t id, const float pos[3], const float rgb[3],
                    float radius, const float dir[3], float inner, float outer,
-                   int reaches);
+                   int reaches, float walk);
+// walk: metres from the camera walking through the openings, -1 beyond reach,
+// -2 not known (the light is in no cell)
 
 #ifdef __cplusplus
 }

@@ -1901,6 +1901,125 @@ static void portal_rt_find_lights(int start)
    }
 }
 
+// The distance from the camera to each cell walking through the openings
+// between cells (Raze RT's light reach, in Dark units), for fading lights out
+// smoothly with their distance -- a light more than a few rooms' walk away
+// fades out, instead of a fixed number of lights being taken nearest first,
+// whose list changed as you walked: lights that came and went right ahead.
+static float *portal_rt_cell_dist;      // < 0: not reached
+static mxs_vector *portal_rt_cell_entry;
+static int portal_rt_dist_size;
+static float portal_rt_dist_limit;
+
+static void portal_rt_compute_reach(int start, float limit)
+{
+   static int *heap;       // cells, by distance (a binary heap)
+   static int heap_cap;
+   int n = 0, i;
+   portal_rt_dist_limit = limit;
+   if (wr_num_cells <= 0)
+      return;
+   if (portal_rt_dist_size < wr_num_cells) {
+      free(portal_rt_cell_dist);
+      free(portal_rt_cell_entry);
+      portal_rt_cell_dist = (float *)malloc(sizeof(float) * wr_num_cells);
+      portal_rt_cell_entry = (mxs_vector *)malloc(sizeof(mxs_vector) * wr_num_cells);
+      portal_rt_dist_size = (portal_rt_cell_dist && portal_rt_cell_entry) ? wr_num_cells : 0;
+   }
+   if (!portal_rt_dist_size)
+      return;
+   for (i = 0; i < wr_num_cells; ++i)
+      portal_rt_cell_dist[i] = -1.0f;
+   if (start < 0 || start >= wr_num_cells || !WR_CELL(start))
+      return;
+   if (heap_cap < wr_num_cells * 4) {
+      free(heap);
+      heap_cap = wr_num_cells * 4;
+      heap = (int *)malloc(sizeof(int) * heap_cap);
+      if (!heap) {
+         heap_cap = 0;
+         return;
+      }
+   }
+#define RT_HD(k) portal_rt_cell_dist[heap[k]]
+   portal_rt_cell_dist[start] = 0.0f;
+   portal_rt_cell_entry[start] = portal_camera_loc;
+   heap[n++] = start;
+   while (n > 0) {
+      const int c = heap[0];
+      PortalCell *cell = WR_CELL(c);
+      PortalPolygonCore *poly;
+      int np, v, k;
+      // pop
+      heap[0] = heap[--n];
+      for (k = 0;;) {
+         int a = 2 * k + 1, b = a + 1, m = k, t;
+         if (a < n && RT_HD(a) < RT_HD(m)) m = a;
+         if (b < n && RT_HD(b) < RT_HD(m)) m = b;
+         if (m == k) break;
+         t = heap[k]; heap[k] = heap[m]; heap[m] = t;
+         k = m;
+      }
+      if (!cell)
+         continue;
+      poly = cell->portal_poly_list;
+      np = cell->num_portal_polys;
+      v = cell->portal_vertex_list;
+      while (np-- > 0) {
+         const int d = poly->destination;
+         mxs_vector mid;
+         float nd, dx, dy, dz;
+         int j;
+         mid.x = mid.y = mid.z = 0.0f;
+         for (j = 0; j < poly->num_vertices; ++j) {
+            const mxs_vector *pt = &cell->vpool[cell->vertex_list[v + j]];
+            mid.x += pt->x; mid.y += pt->y; mid.z += pt->z;
+         }
+         if (poly->num_vertices > 0) {
+            mid.x /= poly->num_vertices; mid.y /= poly->num_vertices; mid.z /= poly->num_vertices;
+         }
+         v += poly->num_vertices;
+         ++poly;
+         if (d < 0 || d >= wr_num_cells || !WR_CELL(d))
+            continue;
+         dx = mid.x - portal_rt_cell_entry[c].x;
+         dy = mid.y - portal_rt_cell_entry[c].y;
+         dz = mid.z - portal_rt_cell_entry[c].z;
+         nd = portal_rt_cell_dist[c] + (float)sqrt(dx * dx + dy * dy + dz * dz);
+         if (nd > limit)
+            continue;
+         if (portal_rt_cell_dist[d] >= 0.0f && nd >= portal_rt_cell_dist[d])
+            continue;
+         portal_rt_cell_dist[d] = nd;
+         portal_rt_cell_entry[d] = mid;
+         if (n < heap_cap) {
+            // push (a cell may be in the heap twice; the later copy is stale but harmless)
+            k = n++;
+            heap[k] = d;
+            while (k > 0 && RT_HD((k - 1) / 2) > RT_HD(k)) {
+               const int pk = (k - 1) / 2, t = heap[k];
+               heap[k] = heap[pk]; heap[pk] = t;
+               k = pk;
+            }
+         }
+      }
+   }
+#undef RT_HD
+}
+
+// a point's walking distance from the camera (Dark units), < 0 if beyond reach
+float portal_rt_path_distance(int cell, const mxs_vector *pos)
+{
+   float dx, dy, dz;
+   if (!portal_rt_dist_size || cell < 0 || cell >= portal_rt_dist_size ||
+       portal_rt_cell_dist[cell] < 0.0f)
+      return -1.0f;
+   dx = pos->x - portal_rt_cell_entry[cell].x;
+   dy = pos->y - portal_rt_cell_entry[cell].y;
+   dz = pos->z - portal_rt_cell_entry[cell].z;
+   return portal_rt_cell_dist[cell] + (float)sqrt(dx * dx + dy * dy + dz * dz);
+}
+
 int portal_rt_light_relevant(int light)
 {
    if (light < 0 || light >= PORTAL_RT_LIGHT_BITS)
@@ -1925,6 +2044,7 @@ static void portal_rt_begin(float zoom, int cell)
                         WR_CELL(cell)->medium == 2);
    portal_rt_submit_world();
    portal_rt_find_lights(cell);
+   portal_rt_compute_reach(cell, 90.0f / 0.3048f);
    objlight_rt_submit();
 }
 #endif
