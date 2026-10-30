@@ -1815,6 +1815,13 @@ static void portal_rt_mark_cell_lights(int c)
    int k, n;
    if (c < 0 || c >= wr_num_cells || !WR_CELL(c))
       return;
+   // animated lights (torches that can be doused, switched lamps) are kept
+   // in a list of their own, not in light_indices
+   if (WR_CELL(c)->anim_light_index_list)
+      for (k = 0; k < WR_CELL(c)->num_anim_lights; ++k) {
+         const ushort l = WR_CELL(c)->anim_light_index_list[k];
+         portal_rt_light_bits[l >> 3] |= (unsigned char)(1 << (l & 7));
+      }
    lt = WR_CELL(c)->light_indices;
    if (!lt)
       return;
