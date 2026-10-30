@@ -90,6 +90,7 @@ struct Settings {
    int dynres = 0;            // dynamic resolution's target fps, 0 off
    int maxLights = 64;        // lights given to the path tracer, nearest first; 0 all
    int flicker = 0;           // flickering lights: 0 smoothed, 1 as the game, 2 nearly steady
+   float ambient = 1.0f;      // the level's ambient light, as a faint glow of every surface
    bool lightCull = true;     // skip lights the level's lighting has on no cell near or in view
    float minRoughness = 0.7f; // no surface glossier than this (1: no glossy highlights)
    int debugView = 0;         // 0 off, 1 shadow visibility, 2 direct diffuse, 3 specular, 4 bounce
@@ -146,6 +147,7 @@ void load_settings()
       else if (k == "dynres") g_cfg.dynres = std::clamp(int(value), 0, 240);
       else if (k == "max_lights") g_cfg.maxLights = std::clamp(int(value), 0, 4096);
       else if (k == "flicker") g_cfg.flicker = std::clamp(int(value), 0, 2);
+      else if (k == "ambient") g_cfg.ambient = std::clamp(value, 0.0f, 20.0f);
       else if (k == "light_cull") g_cfg.lightCull = value != 0;
       else if (k == "min_roughness") g_cfg.minRoughness = std::clamp(value, 0.0f, 1.0f);
    }
@@ -163,11 +165,11 @@ void save_settings()
       return;
    fprintf(f, "upscale = %d\nscale = %.2f\nfps = %d\nvsync = %d\nlight = %.3f\nsky = %.3f\n"
               "light_size = %.3f\nglow = %.3f\nwater = %d\nsprite_glow = %.3f\ngi = %d\n"
-              "volumetric = %d\ndynres = %d\nmax_lights = %d\nmin_roughness = %.2f\nlight_cull = %d\nflicker = %d\n",
+              "volumetric = %d\ndynres = %d\nmax_lights = %d\nmin_roughness = %.2f\nlight_cull = %d\nflicker = %d\nambient = %.3f\n",
            g_cfg.upscale, g_cfg.scale, int(g_cfg.fps), int(g_cfg.vsync), g_cfg.light, g_cfg.sky,
            g_cfg.lightSize, g_cfg.glow, g_cfg.water, g_cfg.spriteGlow, g_cfg.gi,
            int(g_cfg.volumetric), g_cfg.dynres, g_cfg.maxLights, g_cfg.minRoughness,
-           int(g_cfg.lightCull), g_cfg.flicker);
+           int(g_cfg.lightCull), g_cfg.flicker, g_cfg.ambient);
    fclose(f);
 }
 
@@ -329,6 +331,13 @@ int g_drawableW = 1, g_drawableH = 1;
 uint32_t g_framePrims = 0, g_frameDropped = 0, g_frameLights = 0;
 // this frame's light positions (meters), for making light fixtures glow
 std::vector<RgFloat3D> g_lightPositions;
+// the level's ambient light (0..1), and the glow it gives surfaces
+float g_levelAmbient = 0.0f;
+float ambient_emissive()
+{
+   // calibrated by eye against the OpenGL renderer's dark corners
+   return g_levelAmbient * 0.6f * g_cfg.ambient;
+}
 
 struct Camera {
    float pos[3], fwd[3], left[3], up[3];
@@ -558,11 +567,22 @@ struct CachedObject {
 constexpr float kKeepDistance = 60.0f;
 
 std::unordered_map<uint32_t, CachedObject> g_objects;
+uint32_t g_frameNumber = 1;
+struct DroppedObject {
+   uint32_t obj, frame;
+   const char *why;
+};
+std::deque<DroppedObject> g_droppedObjects;   // the last few, for the inspector
+void note_dropped(uint32_t obj, const char *why)
+{
+   g_droppedObjects.push_back({obj, g_frameNumber, why});
+   while (g_droppedObjects.size() > 12)
+      g_droppedObjects.pop_front();
+}
 uint32_t g_currentObject = 0;
 bool g_currentWhole = false;
 bool g_currentNoShadow = false;
 std::vector<CapturedPrim> g_currentCapture;
-uint32_t g_frameNumber = 1;
 bool g_emissiveSpriteNow = false;
 
 uint64_t hash_prims(const std::vector<CapturedPrim> &prims)
@@ -660,7 +680,9 @@ void upload_captured(uint64_t id, const CapturedPrim &p)
       .pTextureName = p.texture.empty() ? nullptr : p.texture.c_str(),
       .textureFrame = 0,
       .color = p.color,
-      .emissive = p.emissive,
+      .emissive = (p.flags & (RG_MESH_PRIMITIVE_TRANSLUCENT | RG_MESH_PRIMITIVE_SHADOW_ONLY)) || p.sprite
+                     ? p.emissive
+                     : std::max(p.emissive, ambient_emissive()),
       .classicLight = 1.0f,
       .emissiveGi = 0.0f,
    };
@@ -698,6 +720,7 @@ void upload_objects()
                            std::fabs(pose[2] - c.pose[2]) < 0.01f &&
                            pose[3] == c.pose[3] && pose[4] == c.pose[4] && pose[5] == c.pose[5];
          if (!keep) {
+            note_dropped(obj, c.posed ? "moved since it was last drawn" : "no position known");
             it = g_objects.erase(it);
             continue;
          }
@@ -767,7 +790,9 @@ void upload_world()
          .pTextureName = texture_name(tex),
          .textureFrame = 0,
          .color = pack_color(1, 1, 1, alpha),
-         .emissive = (g.flags & kRenderRTWorldFullbright) ? 0.25f : 0.0f,
+         .emissive = (g.flags & kRenderRTWorldFullbright) ? 0.25f
+                     : (flags & (RG_MESH_PRIMITIVE_TRANSLUCENT | RG_MESH_PRIMITIVE_SKY)) ? 0.0f
+                                                                                      : ambient_emissive(),
          .classicLight = 1.0f,
          .emissiveGi = 0.0f,
       };
@@ -1212,14 +1237,14 @@ const char *kUpscaleNames[] = {"Off",
 
 enum UiRow {
    kRowUpscale, kRowScale, kRowDynres, kRowBounces, kRowLights, kRowLightCull, kRowFlicker, kRowVolumetric, kRowVsync,
-   kRowFps, kRowLight, kRowSky, kRowLightSize, kRowRough, kRowGlow, kRowWater,
+   kRowFps, kRowLight, kRowAmbient, kRowSky, kRowLightSize, kRowRough, kRowGlow, kRowWater,
    kRowDebug, kRowFreeze, kRowBackFaces, kRowReuse, kRowInspect, kRowReset, kRowCount
 };
 
 const char *kRowLabels[kRowCount] = {
    "Upscaler", "Render resolution", "Dynamic resolution", "Bounce light", "Lights traced",
    "Lights behind walls", "Light flicker",
-   "Volumetric light", "VSync", "FPS counter", "Light brightness", "Sky brightness",
+   "Volumetric light", "VSync", "FPS counter", "Light brightness", "Ambient light", "Sky brightness",
    "Light size (soft shadows)", "Surface roughness", "Lamp glow", "Water",
    "Debug view", "Freeze scene (test)", "Back faces (test)", "Light sampling (test)", "Inspect centre of view", "Reset to defaults",
 };
@@ -1256,6 +1281,10 @@ std::string row_value(int row)
    case kRowVsync: return g_cfg.vsync ? "On" : "Off";
    case kRowFps: return g_cfg.fps ? "On" : "Off";
    case kRowLight: snprintf(buf, sizeof(buf), "%.2fx", g_cfg.light); return buf;
+   case kRowAmbient:
+      if (g_cfg.ambient <= 0.0f) return "Off";
+      snprintf(buf, sizeof(buf), "%.2fx the level's", g_cfg.ambient);
+      return buf;
    case kRowSky: snprintf(buf, sizeof(buf), "%.2fx", g_cfg.sky); return buf;
    case kRowLightSize: snprintf(buf, sizeof(buf), "%.2f m", g_cfg.lightSize); return buf;
    case kRowFreeze: return g_freeze ? "On (frozen)" : "Off";
@@ -1342,6 +1371,10 @@ void change_row(int row, int dir)
    case kRowVsync: g_cfg.vsync = !g_cfg.vsync; break;
    case kRowFps: g_cfg.fps = !g_cfg.fps; break;
    case kRowLight: g_cfg.light = step_mul(g_cfg.light, dir, 0.05f, 20.0f); break;
+   case kRowAmbient: g_cfg.ambient = g_cfg.ambient <= 0.0f && dir > 0 ? 0.25f
+                                    : (g_cfg.ambient <= 0.25f && dir < 0 ? 0.0f
+                                                                         : step_mul(g_cfg.ambient, dir, 0.25f, 20.0f));
+      break;
    case kRowSky: g_cfg.sky = g_cfg.sky <= 0.0f && dir > 0 ? 0.05f
                              : (g_cfg.sky <= 0.05f && dir < 0 ? 0.0f
                                                               : step_mul(g_cfg.sky, dir, 0.05f, 20.0f));
@@ -1920,6 +1953,29 @@ void inspect_view()
       }
       snprintf(what, sizeof(what), "Inspect: world texture %d logged", w.textureId);
    }
+   auto list_models = [&](const float *at, float radius, const char *title) {
+      out("%s:\n", title);
+      for (const auto &e : g_objects) {
+         const CachedObject &c = e.second;
+         const float dx = c.center[0] - at[0], dy = c.center[1] - at[1], dz = c.center[2] - at[2];
+         if (dx * dx + dy * dy + dz * dz > radius * radius)
+            continue;
+         size_t tris = 0, shadowTris = 0;
+         unsigned allFlags = 0;
+         for (const CapturedPrim &p : c.prims) {
+            allFlags |= unsigned(p.flags);
+            tris += p.verts.size() / 3;
+            if (p.flags & RG_MESH_PRIMITIVE_SHADOW_ONLY)
+               shadowTris += p.verts.size() / 3;
+         }
+         char name[128];
+         RenderRTGameObjectName(e.first, name, sizeof(name));
+         out("  object %u \"%s\": %zu triangles (%zu shadow-only) in %zu primitives, whole %d, "
+             "drawn frame %u (now %u), posed %d, flags 0x%x\n",
+             e.first, name, tris, shadowTris, c.prims.size(), int(c.whole), c.frame, g_frameNumber,
+             int(c.posed), allFlags);
+      }
+   };
    if (best < 1e29f) {
       // what lights and shadows the point: the lights given to the path
       // tracer last frame near it, and the models near it
@@ -1960,26 +2016,19 @@ void inspect_view()
             out("  OFF: light %u at (%.2f %.2f %.2f), %.2f m away: brightness %.2f %.2f %.2f\n",
                 L.id, p.data[0], p.data[1], p.data[2], dist, L.rgb[0], L.rgb[1], L.rgb[2]);
       }
-      out("models within 4 m of the hit point:\n");
-      for (const auto &e : g_objects) {
-         const CachedObject &c = e.second;
-         const float dx = c.center[0] - hit[0], dy = c.center[1] - hit[1], dz = c.center[2] - hit[2];
-         if (dx * dx + dy * dy + dz * dz > 16.0f)
-            continue;
-         size_t tris = 0, shadowTris = 0;
-         unsigned allFlags = 0;
-         for (const CapturedPrim &p : c.prims) {
-            allFlags |= unsigned(p.flags);
-            tris += p.verts.size() / 3;
-            if (p.flags & RG_MESH_PRIMITIVE_SHADOW_ONLY)
-               shadowTris += p.verts.size() / 3;
-         }
+      list_models(hit, 4.0f, "models within 4 m of the hit point");
+   }
+   {
+      const RgFloat3D cam = to_rt(g_camera.pos);
+      list_models(cam.data, 8.0f, "models within 8 m of the camera");
+   }
+   if (!g_droppedObjects.empty()) {
+      out("models recently dropped (not drawn by the game and moved or gone):\n");
+      for (const DroppedObject &d : g_droppedObjects) {
          char name[128];
-         RenderRTGameObjectName(e.first, name, sizeof(name));
-         out("  object %u \"%s\": %zu triangles (%zu shadow-only) in %zu primitives, whole %d, "
-             "drawn frame %u (now %u), posed %d, flags 0x%x\n",
-             e.first, name, tris, shadowTris, c.prims.size(), int(c.whole), c.frame, g_frameNumber,
-             int(c.posed), allFlags);
+         RenderRTGameObjectName(d.obj, name, sizeof(name));
+         out("  object %u \"%s\" at frame %u (now %u): %s\n", d.obj, name, d.frame, g_frameNumber,
+             d.why);
       }
    }
    if (log)
@@ -2414,6 +2463,15 @@ void RenderRTWorldEnd(void)
 void RenderRTWorldTexture(int textureId, void *texture)
 {
    g_worldTextures[textureId] = static_cast<RtTexture *>(texture);
+}
+
+void RenderRTAmbient(float r, float g, float b)
+{
+   // one number: RTGL1's glow takes the surface's own colour
+   const float a = std::clamp(0.2126f * r + 0.7152f * g + 0.0722f * b, 0.0f, 1.0f);
+   if (std::fabs(a - g_levelAmbient) > 1e-4f)
+      fprintf(stderr, "RT: level ambient light %.3f %.3f %.3f\n", r, g, b);
+   g_levelAmbient = a;
 }
 
 void RenderRTLight(uint32_t id, const float pos[3], const float rgb[3], float radius,

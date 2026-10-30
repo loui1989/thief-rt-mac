@@ -630,6 +630,14 @@ extern int portal_rt_light_relevant(int light);
 void objlight_rt_submit(void)
 {
    int i, first = mission_uses_sunlight() ? FIRST_LIGHT : 0;
+   {
+      // the level's ambient light, which the game adds to every lightmap and
+      // model: a room whose lights are all out is dim, not black
+      const sMissionRenderParams *parms = GetMissionRenderParams();
+      if (parms)
+         RenderRTAmbient(parms->ambient_light.x, parms->ambient_light.y,
+                         parms->ambient_light.z);
+   }
    for (i = first; i < num_light + num_dyn && i < MAX_STATIC; ++i)
    {
       const mls_multi_light *l = &light_data[i];
