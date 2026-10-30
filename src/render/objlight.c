@@ -641,8 +641,7 @@ void objlight_rt_submit(void)
 #else
       rgb[0] = rgb[1] = rgb[2] = l->bright * light_scale;
 #endif
-      if (rgb[0] <= 0.0f && rgb[1] <= 0.0f && rgb[2] <= 0.0f)
-         continue;
+      // (an unlit one too: the ray tracer leaves it out, its inspector lists it)
       pos[0] = l->loc.x; pos[1] = l->loc.y; pos[2] = l->loc.z;
       dir[0] = l->dir.x; dir[1] = l->dir.y; dir[2] = l->dir.z;
       RenderRTLight(i >= num_light ? 0x10000u + (uint32_t)(i - num_light) : (uint32_t)i,

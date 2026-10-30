@@ -321,6 +321,8 @@ struct PendingLight {
 std::vector<PendingLight> g_pendingLights;
 uint32_t g_lightsTotal = 0, g_frameLightsShown = 0, g_lightsReaching = 0;
 std::vector<PendingLight> g_lastLights;   // last frame's, for the inspector
+std::vector<PendingLight> g_lastOffered;  // all the game gave last frame, before culling
+std::vector<PendingLight> g_dimPending, g_lastDim;   // too dim to trace (off)
 std::vector<PendingLight> g_frozenLights;  // while g_freeze
 bool g_underwater = false;
 int g_drawableW = 1, g_drawableH = 1;
@@ -1935,6 +1937,29 @@ void inspect_view()
              L.id, p.data[0], p.data[1], p.data[2], dist, L.rgb[0], L.rgb[1], L.rgb[2], L.radius,
              L.inner >= 0 ? "spot" : "point", L.inner, L.outer, L.dir[0], L.dir[1], L.dir[2]);
       }
+      // and the ones near it that were NOT traced, with why
+      for (const PendingLight &L : g_lastOffered) {
+         const RgFloat3D p = to_rt(L.pos);
+         const float dx = p.data[0] - hit[0], dy = p.data[1] - hit[1], dz = p.data[2] - hit[2];
+         const float dist = std::sqrt(dx * dx + dy * dy + dz * dz);
+         if (dist > 12.0f)
+            continue;
+         bool traced = false;
+         for (const PendingLight &T : g_lastLights)
+            traced = traced || T.id == L.id;
+         if (!traced)
+            out("  NOT traced: light %u at (%.2f %.2f %.2f), %.2f m away: rgb %.0f %.0f %.0f, %s\n",
+                L.id, p.data[0], p.data[1], p.data[2], dist, L.rgb[0], L.rgb[1], L.rgb[2],
+                L.reaches ? "not among the nearest" : "behind walls (level's lists)");
+      }
+      for (const PendingLight &L : g_lastDim) {
+         const RgFloat3D p = to_rt(L.pos);
+         const float dx = p.data[0] - hit[0], dy = p.data[1] - hit[1], dz = p.data[2] - hit[2];
+         const float dist = std::sqrt(dx * dx + dy * dy + dz * dz);
+         if (dist <= 12.0f)
+            out("  OFF: light %u at (%.2f %.2f %.2f), %.2f m away: brightness %.2f %.2f %.2f\n",
+                L.id, p.data[0], p.data[1], p.data[2], dist, L.rgb[0], L.rgb[1], L.rgb[2]);
+      }
       out("models within 4 m of the hit point:\n");
       for (const auto &e : g_objects) {
          const CachedObject &c = e.second;
@@ -2397,8 +2422,15 @@ void RenderRTLight(uint32_t id, const float pos[3], const float rgb[3], float ra
    if (!g_inScene)
       return;
    const float peak = std::max({rgb[0], rgb[1], rgb[2]});
-   if (peak <= 0.5f)
+   if (peak <= 0.5f) {
+      PendingLight d;
+      d.id = id;
+      memcpy(d.pos, pos, sizeof(d.pos));
+      memcpy(d.rgb, rgb, sizeof(d.rgb));
+      d.peak = peak;
+      g_dimPending.push_back(d);
       return;
+   }
    g_lightPositions.push_back(to_rt(pos));
    PendingLight l;
    l.id = id;
@@ -2528,17 +2560,32 @@ void flush_lights()
       for (const PendingLight &L : g_frozenLights)
          upload_light(L);
       g_pendingLights.clear();
+      g_dimPending.clear();
       return;
    }
    g_lightsTotal = uint32_t(g_pendingLights.size());
    smooth_flicker();
+   g_lastOffered = g_pendingLights;
+   g_lastDim.swap(g_dimPending);
+   g_dimPending.clear();
    // A light that shines on none of the cells around the camera or in view
    // is behind walls (the level's own lighting says so): every candidate
    // RTGL1 spent on it would be shadowed, the splotches in dark places.
-   if (g_cfg.lightCull)
-      g_pendingLights.erase(std::remove_if(g_pendingLights.begin(), g_pendingLights.end(),
-                                           [](const PendingLight &L) { return !L.reaches; }),
-                            g_pendingLights.end());
+   // Never one within 15 m: those are kept whatever the level's lists say.
+   if (g_cfg.lightCull) {
+      const RgFloat3D c = to_rt(g_camera.pos);
+      g_pendingLights.erase(
+         std::remove_if(g_pendingLights.begin(), g_pendingLights.end(),
+                        [&c](const PendingLight &L) {
+                           if (L.reaches)
+                              return false;
+                           const RgFloat3D p = to_rt(L.pos);
+                           const float dx = p.data[0] - c.data[0], dy = p.data[1] - c.data[1],
+                                       dz = p.data[2] - c.data[2];
+                           return dx * dx + dy * dy + dz * dz > 15.0f * 15.0f;
+                        }),
+         g_pendingLights.end());
+   }
    g_lightsReaching = uint32_t(g_pendingLights.size());
    const RgFloat3D cam = to_rt(g_camera.pos);
    const size_t keep = g_cfg.maxLights > 0 ? size_t(g_cfg.maxLights) : g_pendingLights.size();
