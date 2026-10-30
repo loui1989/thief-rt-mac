@@ -212,6 +212,7 @@ struct Ui {
    double waitSum = 0, drawSum = 0, waitMs = 0, drawMs = 0, captureSum = 0, captureMs = 0;
    std::string status;        // a line shown in the panel for a while
    double statusUntil = 0;
+   int scroll = 0;            // first row shown, when the rows do not all fit
 } g_ui;
 
 // ---- textures ----------------------------------------------------------
@@ -1747,7 +1748,8 @@ void count_frame(bool scene)
 void draw_ui(bool scene)
 {
    const bool hint = scene && g_ui.hintUntil > now_seconds();
-   if (!g_cfg.fps && !g_ui.open && !hint)
+   const bool note = !g_ui.status.empty() && now_seconds() < g_ui.statusUntil;
+   if (!g_cfg.fps && !g_ui.open && !hint && !note)
       return;
    provide_font();
    if (!g_ui.fontProvided)
@@ -1799,19 +1801,48 @@ void draw_ui(bool scene)
       text(fg, x, y, s, msg, dim);
    }
 
+   // The inspector's note (what it looked at) shows even with the panel shut.
+   const bool statusShown = !g_ui.status.empty() && now_seconds() < g_ui.statusUntil;
+   if (statusShown && !g_ui.open) {
+      const float s = std::round(px * 0.8f);
+      const float tw = text_width(s, g_ui.status.c_str());
+      const float x = std::round((g_drawableW - tw) * 0.5f), y = std::round(g_drawableH * 0.62f);
+      panel(x - pad, y - pad * 0.5f, x + tw + pad, y + s + pad * 0.5f, 0.7f);
+      text(fg, x, y, s, g_ui.status.c_str(), gold);
+   }
+
    if (g_ui.open) {
       const float rowH = px * 1.5f;
       const float labelW = text_width(px, "Light size (soft shadows)") + px * 2.0f;
       const float valueW = text_width(px, "< MetalFX (not on this Mac) >") + px;
       const float w = labelW + valueW + 4 * pad + px * 2.0f;
-      const float h = rowH * (kRowCount + 4.5f) + 2 * pad;
+      // As many rows as fit the window; the list scrolls with the selection.
+      const float chrome = rowH * 6.5f + 2 * pad;   // title, more-lines, help, note
+      const int fit = std::max(4, int((g_drawableH * 0.94f - chrome) / rowH));
+      const int shown = std::min<int>(kRowCount, fit);
+      if (g_ui.row < g_ui.scroll)
+         g_ui.scroll = g_ui.row;
+      if (g_ui.row >= g_ui.scroll + shown)
+         g_ui.scroll = g_ui.row - shown + 1;
+      g_ui.scroll = std::clamp(g_ui.scroll, 0, kRowCount - shown);
+      const float h = rowH * (shown + 6.5f) + 2 * pad;
       const float x0 = std::round((g_drawableW - w) * 0.5f);
       const float y0 = std::round((g_drawableH - h) * 0.5f);
       panel(x0, y0, x0 + w, y0 + h, 0.82f);
       float y = y0 + pad + rowH * 0.25f;
       text(fg, x0 + 2 * pad, y, px, "Ray tracing settings", gold);
-      y += rowH * 1.5f;
-      for (int r = 0; r < kRowCount; ++r) {
+      if (shown < kRowCount) {
+         char where[32];
+         snprintf(where, sizeof(where), "%d / %d", g_ui.row + 1, int(kRowCount));
+         const float ss = std::round(px * 0.75f);
+         text(fg, x0 + w - 2 * pad - text_width(ss, where), y + (px - ss), ss, where, dim);
+      }
+      y += rowH * 1.25f;
+      const float ms = std::round(px * 0.7f);
+      if (g_ui.scroll > 0)
+         text(fg, x0 + 2 * pad, y, ms, "... more above (Up / Page Up)", dim);
+      y += rowH;
+      for (int r = g_ui.scroll; r < g_ui.scroll + shown; ++r) {
          const bool sel = r == g_ui.row;
          if (sel)
             panel(x0 + pad, y - rowH * 0.18f, x0 + w - pad, y + px + rowH * 0.18f, 0.9f);
@@ -1823,10 +1854,12 @@ void draw_ui(bool scene)
          text(fg, x0 + 2 * pad + labelW, y, px, v.c_str(), sel ? gold : c);
          y += rowH;
       }
-      y += rowH * 0.5f;
+      if (g_ui.scroll + shown < kRowCount)
+         text(fg, x0 + 2 * pad, y, ms, "... more below (Down / Page Down)", dim);
+      y += rowH * 1.25f;
       const float s = std::round(px * 0.75f);
-      text(fg, x0 + 2 * pad, y, s, "Up/Down: choose   Left/Right: change   Esc: close", dim);
-      if (!g_ui.status.empty() && now_seconds() < g_ui.statusUntil)
+      text(fg, x0 + 2 * pad, y, s, "Up/Down: choose  Left/Right: change  Esc: close  Cmd+I: inspect", dim);
+      if (statusShown)
          text(fg, x0 + 2 * pad, y + rowH, s, g_ui.status.c_str(), gold);
    }
 
@@ -2425,7 +2458,7 @@ void inspect_view()
    if (log)
       fclose(log);
    g_ui.status = std::string(what) + " to logs/rt-inspect.txt";
-   g_ui.statusUntil = now_seconds() + 6.0;
+   g_ui.statusUntil = now_seconds() + 8.0;
 }
 
 } // namespace
@@ -2445,12 +2478,23 @@ bool HandleKey(int scancode, int mods, bool down, bool repeat)
       }
       return true;
    }
+   // Cmd+I: inspect what is at the centre of the view without the panel
+   // (which covers the centre) being open.
+   if (scancode == SDL_SCANCODE_I && (mods & KMOD_GUI)) {
+      if (down && !repeat)
+         inspect_view();
+      return true;
+   }
    if (!g_ui.open || !down)
       return false;   // key releases always reach the game: no stuck keys
    switch (scancode) {
    case SDL_SCANCODE_ESCAPE: if (!repeat) g_ui.open = false; break;
    case SDL_SCANCODE_UP: g_ui.row = (g_ui.row + kRowCount - 1) % kRowCount; break;
    case SDL_SCANCODE_DOWN: g_ui.row = (g_ui.row + 1) % kRowCount; break;
+   case SDL_SCANCODE_PAGEUP: g_ui.row = std::max(g_ui.row - 10, 0); break;
+   case SDL_SCANCODE_PAGEDOWN: g_ui.row = std::min(g_ui.row + 10, int(kRowCount) - 1); break;
+   case SDL_SCANCODE_HOME: g_ui.row = 0; break;
+   case SDL_SCANCODE_END: g_ui.row = int(kRowCount) - 1; break;
    case SDL_SCANCODE_LEFT: change_row(g_ui.row, -1); break;
    case SDL_SCANCODE_RIGHT:
    case SDL_SCANCODE_RETURN:
