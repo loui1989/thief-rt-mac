@@ -1634,6 +1634,13 @@ void draw_frame(bool sceneDrawn)
       .restirIndirAntilag = 1,
       .rrPreExposure = true,
       .rrPreExposureDebug = false,
+      // A light that goes out counts as a change for the denoiser, and the
+      // bounce light keeps at most ~1 s of history (RTGL1's own is 256 frames,
+      // and it held on to bright bounce on purpose): a doused torch's glow on
+      // the walls goes with it instead of lingering for seconds.
+      .svgfFpGrad = true,
+      .svgfIndirMaxHist = 64.0f,
+      .svgfIndirAntilag = true,
    };
    // No surface glossier than 0.7 (Blood RT's rt_min_roughness): a glossy
    // surface's reflection is one noisy sample per pixel, the crawling.
@@ -2488,8 +2495,10 @@ void smooth_flicker()
       const float before = std::max({st[0], st[1], st[2]});
       if (std::fabs(L.peak - before) > 0.05f * std::max(before, 1.0f))
          ++s_changing;
+      // put out (a torch doused): no easing, it goes dark at once
+      const float b = L.peak < 0.15f * before ? 1.0f : a;
       for (int k = 0; k < 3; ++k) {
-         st[k] += (L.rgb[k] - st[k]) * a;
+         st[k] += (L.rgb[k] - st[k]) * b;
          L.rgb[k] = st[k];
       }
       st[3] = float(s_frame);

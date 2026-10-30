@@ -1807,6 +1807,8 @@ static unsigned int *portal_rt_cell_stamp;
 static int portal_rt_cell_stamp_size;
 static unsigned int portal_rt_stamp;
 
+static int portal_rt_stat_cells, portal_rt_stat_entries, portal_rt_stat_max;
+
 static void portal_rt_mark_cell_lights(int c)
 {
    ushort *lt;
@@ -1817,6 +1819,10 @@ static void portal_rt_mark_cell_lights(int c)
    if (!lt)
       return;
    n = lt[0];
+   ++portal_rt_stat_cells;
+   portal_rt_stat_entries += n;
+   if (n > portal_rt_stat_max)
+      portal_rt_stat_max = n;
    for (k = 1; k <= n; ++k)
       portal_rt_light_bits[lt[k] >> 3] |= (unsigned char)(1 << (lt[k] & 7));
 }
@@ -1826,8 +1832,10 @@ static void portal_rt_find_lights(int start)
    static int *queue;
    static int queue_size;
    const float radius = 30.0f / 0.3048f;   // metres, in Dark units
-   int head = 0, tail = 0, i;
+   int head = 0, tail = 0, i, visible = 0;
+   static int frames;
    memset(portal_rt_light_bits, 0, sizeof(portal_rt_light_bits));
+   portal_rt_stat_cells = portal_rt_stat_entries = portal_rt_stat_max = 0;
    if (wr_num_cells <= 0)
       return;
    if (portal_rt_cell_stamp_size < wr_num_cells) {
@@ -1846,6 +1854,7 @@ static void portal_rt_find_lights(int start)
    }
    for (i = 0; i < r_sorted_count && i < MAX_ACTIVE_REGIONS; ++i)
       portal_rt_mark_cell_lights(active_regions[i]);
+   visible = portal_rt_stat_cells;
    if (start < 0 || start >= wr_num_cells || !WR_CELL(start))
       return;
    queue[tail++] = start;
@@ -1872,6 +1881,16 @@ static void portal_rt_find_lights(int start)
          if (tail < queue_size)
             queue[tail++] = d;
       }
+   }
+   if (++frames % 300 == 1) {
+      int marked = 0;
+      for (i = 0; i < PORTAL_RT_LIGHT_BITS; ++i)
+         marked += (portal_rt_light_bits[i >> 3] >> (i & 7)) & 1;
+      fprintf(stderr, "RT: light reach: camera cell %d of %d, %d drawn cells, %d cells within 30 m, "
+                      "%d lights marked; cells list %.1f lights on average, at most %d\n",
+              start, wr_num_cells, visible, tail, marked,
+              portal_rt_stat_cells ? (double)portal_rt_stat_entries / portal_rt_stat_cells : 0.0,
+              portal_rt_stat_max);
    }
 }
 
