@@ -90,6 +90,7 @@ struct Settings {
    int dynres = 0;            // dynamic resolution's target fps, 0 off
    int maxLights = 64;        // lights given to the path tracer, nearest first; 0 all
    int flicker = 0;           // flickering lights: 0 smoothed, 1 as the game, 2 nearly steady
+   bool smoothModels = false; // models shaded smooth (their normals blended across edges)
    float ambient = 1.0f;      // the level's ambient light, as a faint glow of every surface
    bool lightCull = true;     // skip lights the level's lighting has on no cell near or in view
    float minRoughness = 0.7f; // no surface glossier than this (1: no glossy highlights)
@@ -147,6 +148,7 @@ void load_settings()
       else if (k == "dynres") g_cfg.dynres = std::clamp(int(value), 0, 240);
       else if (k == "max_lights") g_cfg.maxLights = std::clamp(int(value), 0, 4096);
       else if (k == "flicker") g_cfg.flicker = std::clamp(int(value), 0, 2);
+      else if (k == "smooth_models") g_cfg.smoothModels = value != 0;
       else if (k == "ambient") g_cfg.ambient = std::clamp(value, 0.0f, 20.0f);
       else if (k == "light_cull") g_cfg.lightCull = value != 0;
       else if (k == "min_roughness") g_cfg.minRoughness = std::clamp(value, 0.0f, 1.0f);
@@ -165,11 +167,11 @@ void save_settings()
       return;
    fprintf(f, "upscale = %d\nscale = %.2f\nfps = %d\nvsync = %d\nlight = %.3f\nsky = %.3f\n"
               "light_size = %.3f\nglow = %.3f\nwater = %d\nsprite_glow = %.3f\ngi = %d\n"
-              "volumetric = %d\ndynres = %d\nmax_lights = %d\nmin_roughness = %.2f\nlight_cull = %d\nflicker = %d\nambient = %.3f\n",
+              "volumetric = %d\ndynres = %d\nmax_lights = %d\nmin_roughness = %.2f\nlight_cull = %d\nflicker = %d\nambient = %.3f\nsmooth_models = %d\n",
            g_cfg.upscale, g_cfg.scale, int(g_cfg.fps), int(g_cfg.vsync), g_cfg.light, g_cfg.sky,
            g_cfg.lightSize, g_cfg.glow, g_cfg.water, g_cfg.spriteGlow, g_cfg.gi,
            int(g_cfg.volumetric), g_cfg.dynres, g_cfg.maxLights, g_cfg.minRoughness,
-           int(g_cfg.lightCull), g_cfg.flicker, g_cfg.ambient);
+           int(g_cfg.lightCull), g_cfg.flicker, g_cfg.ambient, int(g_cfg.smoothModels));
    fclose(f);
 }
 
@@ -668,10 +670,16 @@ void compute_normals(CapturedPrim *prims, size_t count)
 
 void upload_captured(uint64_t id, const CapturedPrim &p)
 {
+   // Flat: each face shaded by its own direction. RTGL1 bends a blended
+   // normal toward the viewer where it disagrees with the face (to keep
+   // reflections out of the surface), so smooth shading changes with the
+   // angle a model is seen from -- light that came and went as you moved.
+   const RgMeshPrimitiveFlags shading =
+      g_cfg.smoothModels ? 0u : RgMeshPrimitiveFlags(RG_MESH_PRIMITIVE_FORCE_EXACT_NORMALS);
    auto prim = RgMeshPrimitiveInfo{
       .sType = RG_STRUCTURE_TYPE_MESH_PRIMITIVE_INFO,
       .pNext = nullptr,
-      .flags = p.flags,
+      .flags = p.flags | shading,
       .primitiveIndexInMesh = 0,
       .pVertices = p.verts.data(),
       .vertexCount = uint32_t(p.verts.size()),
@@ -1237,7 +1245,7 @@ const char *kUpscaleNames[] = {"Off",
 
 enum UiRow {
    kRowUpscale, kRowScale, kRowDynres, kRowBounces, kRowLights, kRowLightCull, kRowFlicker, kRowVolumetric, kRowVsync,
-   kRowFps, kRowLight, kRowAmbient, kRowSky, kRowLightSize, kRowRough, kRowGlow, kRowWater,
+   kRowFps, kRowLight, kRowAmbient, kRowSky, kRowLightSize, kRowRough, kRowSmooth, kRowGlow, kRowWater,
    kRowDebug, kRowFreeze, kRowBackFaces, kRowReuse, kRowInspect, kRowReset, kRowCount
 };
 
@@ -1245,7 +1253,7 @@ const char *kRowLabels[kRowCount] = {
    "Upscaler", "Render resolution", "Dynamic resolution", "Bounce light", "Lights traced",
    "Lights behind walls", "Light flicker",
    "Volumetric light", "VSync", "FPS counter", "Light brightness", "Ambient light", "Sky brightness",
-   "Light size (soft shadows)", "Surface roughness", "Lamp glow", "Water",
+   "Light size (soft shadows)", "Surface roughness", "Model shading", "Lamp glow", "Water",
    "Debug view", "Freeze scene (test)", "Back faces (test)", "Light sampling (test)", "Inspect centre of view", "Reset to defaults",
 };
 
@@ -1287,6 +1295,7 @@ std::string row_value(int row)
       return buf;
    case kRowSky: snprintf(buf, sizeof(buf), "%.2fx", g_cfg.sky); return buf;
    case kRowLightSize: snprintf(buf, sizeof(buf), "%.2f m", g_cfg.lightSize); return buf;
+   case kRowSmooth: return g_cfg.smoothModels ? "Smooth" : "Flat (steady)";
    case kRowFreeze: return g_freeze ? "On (frozen)" : "Off";
    case kRowBackFaces: return g_dropBackFaces ? "Dropped" : "Shadows only";
    case kRowReuse: {
@@ -1366,6 +1375,7 @@ void change_row(int row, int dir)
       break;
    }
    case kRowLightCull: g_cfg.lightCull = !g_cfg.lightCull; break;
+   case kRowSmooth: g_cfg.smoothModels = !g_cfg.smoothModels; break;
    case kRowFlicker: g_cfg.flicker = (g_cfg.flicker + dir + 3) % 3; break;
    case kRowVolumetric: g_cfg.volumetric = !g_cfg.volumetric; break;
    case kRowVsync: g_cfg.vsync = !g_cfg.vsync; break;
