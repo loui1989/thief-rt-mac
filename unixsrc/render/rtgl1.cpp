@@ -809,6 +809,36 @@ void steady_faces(CachedObject &c)
    c.prims = std::move(prims);
 }
 
+// the same as hash_prims, but the same for the same triangles in any order
+uint64_t hash_prims_unordered(const std::vector<CapturedPrim> &prims)
+{
+   uint64_t sum = 0, x = 0;
+   for (const CapturedPrim &p : prims) {
+      if (p.sprite)
+         continue;
+      uint64_t th = 1469598103934665603ull;
+      for (unsigned char ch : p.texture)
+         th = (th ^ ch) * 1099511628211ull;
+      for (size_t t = 0; t + 2 < p.verts.size(); t += 3) {
+         uint64_t h = th;
+         uint64_t corner[3];
+         for (int k = 0; k < 3; ++k) {
+            uint64_t ch = 0;
+            for (int j = 0; j < 3; ++j)
+               ch = ch * 1000003ull + uint64_t(int64_t(std::lround(p.verts[t + k].position[j] * 256.0f)));
+            corner[k] = ch;
+         }
+         std::sort(corner, corner + 3);
+         for (uint64_t ch : corner)
+            h = (h ^ ch) * 1099511628211ull;
+         h ^= h >> 29;
+         sum += h;
+         x ^= h * 0x9E3779B97F4A7C15ull;
+      }
+   }
+   return sum ^ (x << 1);
+}
+
 void upload_captured(uint64_t id, const CapturedPrim &p, bool passLight = false)
 {
    // a torch's own model sits around its light: as a shadow caster it put
@@ -2606,15 +2636,17 @@ void RenderRTObjectEnd(void)
       if (g_currentWhole && !c.whole) {
          c.prims = std::move(g_currentCapture);
          c.whole = true;
-         c.hash = hash_prims(c.prims);
+         c.hash = hash_prims_unordered(c.prims);
       } else if (!c.whole) {
          for (CapturedPrim &p : g_currentCapture)
             c.prims.push_back(std::move(p));
-         c.hash = hash_prims(c.prims);
+         c.hash = hash_prims_unordered(c.prims);
       }
    } else {
       c.whole = g_currentWhole;
-      const uint64_t h = hash_prims(g_currentCapture);
+      // (in any order: the game draws a model's faces in an order that
+      // changes as they turn toward or away from the camera)
+      const uint64_t h = hash_prims_unordered(g_currentCapture);
       c.unchanged = (h == c.hash) ? c.unchanged + 1 : 0;
       c.hash = h;
       c.prims = std::move(g_currentCapture);
