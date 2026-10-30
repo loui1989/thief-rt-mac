@@ -359,7 +359,6 @@ std::vector<PendingLight> g_lastLights;   // last frame's, for the inspector
 std::vector<PendingLight> g_lastOffered;  // all the game gave last frame, before culling
 std::vector<PendingLight> g_dimPending, g_lastDim;   // too dim to trace (off)
 int g_lightEventFrames = 0;   // a light just put out or lit: the denoiser lets go for a few frames
-int g_exposureDummy = 0;
 std::vector<PendingLight> g_fadingOut;   // left the traced set, still fading out
 std::vector<PendingLight> g_frozenLights;  // while g_freeze
 bool g_underwater = false;
