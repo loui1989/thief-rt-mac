@@ -97,6 +97,7 @@ struct Settings {
    int candidates = 12;       // lights tried per pixel and per bounce (RTGL1: no rays, ALU only)
    int evMin = 3;             // eye adaptation's darkest exposure (EV; Blood RT 5, RTGL1 0)
    int response = 0;          // how fast lighting changes show: 0 calm (Blood RT), 1 quick, 2 instant
+   bool bloom = true;         // the glow around bright light (~0.8 ms at 4K output)
    bool lightFade = true;     // lights entering or leaving the traced set fade
    bool steadyFaces = true;   // models' faces seen or shadow-only by a fixed rule, not by the view
    bool lightFix = true;      // lights moved out of the walls they sit in
@@ -162,6 +163,7 @@ void load_settings()
       else if (k == "light_candidates") g_cfg.candidates = std::clamp(int(value), 4, 32);
       else if (k == "ev_min") g_cfg.evMin = std::clamp(int(value), 0, 7);
       else if (k == "light_response") g_cfg.response = std::clamp(int(value), 0, 2);
+      else if (k == "bloom") g_cfg.bloom = value != 0;
       else if (k == "light_fade") g_cfg.lightFade = value != 0;
       else if (k == "steady_faces") g_cfg.steadyFaces = value != 0;
       else if (k == "light_fix") g_cfg.lightFix = value != 0;
@@ -184,13 +186,13 @@ void save_settings()
       return;
    fprintf(f, "upscale = %d\nscale = %.2f\nfps = %d\nvsync = %d\nlight = %.3f\nsky = %.3f\n"
               "light_size = %.3f\nglow = %.3f\nwater = %d\nsprite_glow = %.3f\ngi = %d\n"
-              "volumetric = %d\ndynres = %d\nmax_lights = %d\nmin_roughness = %.2f\nlight_cull = %d\nflicker = %d\nambient = %.3f\nsmooth_models = %d\nfixtures_pass = %d\nlight_fix = %d\nlight_response = %d\nev_min = %d\nlight_candidates = %d\nsteady_faces = %d\nlight_fade = %d\nreach = %d\n",
+              "volumetric = %d\ndynres = %d\nmax_lights = %d\nmin_roughness = %.2f\nlight_cull = %d\nflicker = %d\nambient = %.3f\nsmooth_models = %d\nfixtures_pass = %d\nlight_fix = %d\nlight_response = %d\nev_min = %d\nlight_candidates = %d\nsteady_faces = %d\nlight_fade = %d\nbloom = %d\nreach = %d\n",
            g_cfg.upscale, g_cfg.scale, int(g_cfg.fps), int(g_cfg.vsync), g_cfg.light, g_cfg.sky,
            g_cfg.lightSize, g_cfg.glow, g_cfg.water, g_cfg.spriteGlow, g_cfg.gi,
            int(g_cfg.volumetric), g_cfg.dynres, g_cfg.maxLights, g_cfg.minRoughness,
            int(g_cfg.lightCull), g_cfg.flicker, g_cfg.ambient, int(g_cfg.smoothModels),
            int(g_cfg.fixturesPass), int(g_cfg.lightFix), g_cfg.response, g_cfg.evMin,
-           g_cfg.candidates, int(g_cfg.steadyFaces), int(g_cfg.lightFade), g_cfg.reach);
+           g_cfg.candidates, int(g_cfg.steadyFaces), int(g_cfg.lightFade), int(g_cfg.bloom), g_cfg.reach);
    fclose(f);
 }
 
@@ -599,6 +601,7 @@ struct CachedObject {
    float bmin[3] = {}, bmax[3] = {};   // meters
    bool passLight = false;   // a small fixture around a light: it does not block it
    bool settled = false;     // prims made steady and given normals for hash
+   bool keptOut = false;     // given out of view last frame
    // each texture's look as a face turned toward the camera (flags, glow,
    // colour), for its faces captured turned away: kept across frames
    std::unordered_map<std::string, CapturedPrim> looks;
@@ -931,10 +934,19 @@ void upload_objects()
          const RgFloat3D cam = to_rt(g_camera.pos);
          const float dx = c.center[0] - cam.data[0], dy = c.center[1] - cam.data[1],
                      dz = c.center[2] - cam.data[2];
-         if (dx * dx + dy * dy + dz * dz > kKeepDistance * kKeepDistance) {
+         // How far out of view a model is still given, for its shadow: by its
+         // size (a lamp post's reaches far, a bottle's does not), with some
+         // slack once given so models do not come and go at the edge -- each
+         // one coming or going made the path tracer rebuild a piece of the
+         // scene, and a long walk round the city gave it more and more.
+         const float ext = std::max({c.bmax[0] - c.bmin[0], c.bmax[1] - c.bmin[1], c.bmax[2] - c.bmin[2], 0.0f});
+         const float keepAt = std::clamp(12.0f + 12.0f * ext, 12.0f, 40.0f) + (c.keptOut ? 8.0f : 0.0f);
+         if (dx * dx + dy * dy + dz * dz > std::min(keepAt, kKeepDistance) * std::min(keepAt, kKeepDistance)) {
+            c.keptOut = false;
             ++it;   // remembered, but too far away to shadow anything seen
             continue;
          }
+         c.keptOut = true;
          const bool keep = c.posed && RenderRTGameObjectPose(obj, pose) &&
                            std::fabs(pose[0] - c.pose[0]) < 0.01f &&
                            std::fabs(pose[1] - c.pose[1]) < 0.01f &&
@@ -1473,7 +1485,7 @@ const char *kUpscaleNames[] = {"Off",
                                "MetalFX Custom"};
 
 enum UiRow {
-   kRowUpscale, kRowScale, kRowDynres, kRowBounces, kRowReach, kRowLights, kRowLightFade, kRowCandidates, kRowLightCull, kRowResponse, kRowFlicker, kRowVolumetric, kRowVsync,
+   kRowUpscale, kRowScale, kRowDynres, kRowBounces, kRowReach, kRowLights, kRowLightFade, kRowCandidates, kRowLightCull, kRowResponse, kRowFlicker, kRowVolumetric, kRowBloom, kRowVsync,
    kRowFps, kRowLight, kRowExposure, kRowAmbient, kRowSky, kRowLightSize, kRowRough, kRowSmooth, kRowSteady, kRowFixtures, kRowLightFix, kRowGlow, kRowWater,
    kRowDebug, kRowFreeze, kRowBackFaces, kRowReuse, kRowBlink, kRowInspect, kRowReset, kRowCount
 };
@@ -1481,7 +1493,7 @@ enum UiRow {
 const char *kRowLabels[kRowCount] = {
    "Upscaler", "Render resolution", "Dynamic resolution", "Bounce light", "Light reach", "Lights traced",
    "Lights coming into range", "Lights tried per pixel", "Lights behind walls", "Light changes", "Light flicker",
-   "Volumetric light", "VSync", "FPS counter", "Light brightness", "Darkest exposure", "Ambient light", "Sky brightness",
+   "Volumetric light", "Bloom", "VSync", "FPS counter", "Light brightness", "Darkest exposure", "Ambient light", "Sky brightness",
    "Light size (soft shadows)", "Surface roughness", "Model shading", "Model faces", "Torches and lamps", "Lights in walls", "Lamp glow", "Water",
    "Debug view", "Freeze scene (test)", "Back faces (test)", "Light sampling (test)", "Blink nearest light (test)", "Inspect centre of view", "Reset to defaults",
 };
@@ -1522,6 +1534,7 @@ std::string row_value(int row)
    case kRowResponse: return g_cfg.response == 0 ? "As Blood RT" : g_cfg.response == 2 ? "Instant (noisier)" : "Quick";
    case kRowFlicker: return g_cfg.flicker == 1 ? "As the game" : g_cfg.flicker == 2 ? "Nearly steady" : "Smoothed";
    case kRowVolumetric: return g_cfg.volumetric ? "On" : "Off";
+   case kRowBloom: return g_cfg.bloom ? "On" : "Off";
    case kRowVsync: return g_cfg.vsync ? "On" : "Off";
    case kRowFps: return g_cfg.fps ? "On" : "Off";
    case kRowLight: snprintf(buf, sizeof(buf), "%.2fx", g_cfg.light); return buf;
@@ -1645,6 +1658,7 @@ void change_row(int row, int dir)
    case kRowResponse: g_cfg.response = (g_cfg.response + dir + 3) % 3; break;
    case kRowFlicker: g_cfg.flicker = (g_cfg.flicker + dir + 3) % 3; break;
    case kRowVolumetric: g_cfg.volumetric = !g_cfg.volumetric; break;
+   case kRowBloom: g_cfg.bloom = !g_cfg.bloom; break;
    case kRowVsync: g_cfg.vsync = !g_cfg.vsync; break;
    case kRowFps: g_cfg.fps = !g_cfg.fps; break;
    case kRowLight: g_cfg.light = step_mul(g_cfg.light, dir, 0.05f, 20.0f); break;
@@ -1988,9 +2002,17 @@ void draw_frame(bool sceneDrawn)
    };
    // Blood RT's eye adaptation: a dark place is not brightened up to 32 times
    // (RTGL1's own range starts at EV 0), its noise with it
+   auto bloom = RgDrawFrameBloomParams{
+      .sType = RG_STRUCTURE_TYPE_DRAW_FRAME_BLOOM_PARAMS,
+      .pNext = &textures,
+      .inputEV = 6.0f,
+      .inputThreshold = 16.0f,
+      .bloomIntensity = g_cfg.bloom ? 1.0f : -1.0f,   // (negative: the pass is skipped)
+      .lensDirtIntensity = 1.0f,
+   };
    auto tonemap = RgDrawFrameTonemappingParams{
       .sType = RG_STRUCTURE_TYPE_DRAW_FRAME_TONEMAPPING_PARAMS,
-      .pNext = &textures,
+      .pNext = &bloom,
       .disableEyeAdaptation = false,
       .ev100Min = float(g_cfg.evMin),
       .ev100Max = std::max(float(g_cfg.evMin) + 0.1f, 7.7f),
