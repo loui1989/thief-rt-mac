@@ -92,6 +92,7 @@ struct Settings {
    int flicker = 0;           // flickering lights: 0 smoothed, 1 as the game, 2 nearly steady
    bool smoothModels = false; // models shaded smooth (their normals blended across edges)
    float ambient = 1.0f;      // the level's ambient light, as a faint glow of every surface
+   bool fixturesPass = true;  // a torch or small lamp lets its own light out
    bool lightCull = true;     // skip lights the level's lighting has on no cell near or in view
    float minRoughness = 0.7f; // no surface glossier than this (1: no glossy highlights)
    int debugView = 0;         // 0 off, 1 shadow visibility, 2 direct diffuse, 3 specular, 4 bounce
@@ -149,6 +150,7 @@ void load_settings()
       else if (k == "max_lights") g_cfg.maxLights = std::clamp(int(value), 0, 4096);
       else if (k == "flicker") g_cfg.flicker = std::clamp(int(value), 0, 2);
       else if (k == "smooth_models") g_cfg.smoothModels = value != 0;
+      else if (k == "fixtures_pass") g_cfg.fixturesPass = value != 0;
       else if (k == "ambient") g_cfg.ambient = std::clamp(value, 0.0f, 20.0f);
       else if (k == "light_cull") g_cfg.lightCull = value != 0;
       else if (k == "min_roughness") g_cfg.minRoughness = std::clamp(value, 0.0f, 1.0f);
@@ -167,11 +169,12 @@ void save_settings()
       return;
    fprintf(f, "upscale = %d\nscale = %.2f\nfps = %d\nvsync = %d\nlight = %.3f\nsky = %.3f\n"
               "light_size = %.3f\nglow = %.3f\nwater = %d\nsprite_glow = %.3f\ngi = %d\n"
-              "volumetric = %d\ndynres = %d\nmax_lights = %d\nmin_roughness = %.2f\nlight_cull = %d\nflicker = %d\nambient = %.3f\nsmooth_models = %d\n",
+              "volumetric = %d\ndynres = %d\nmax_lights = %d\nmin_roughness = %.2f\nlight_cull = %d\nflicker = %d\nambient = %.3f\nsmooth_models = %d\nfixtures_pass = %d\n",
            g_cfg.upscale, g_cfg.scale, int(g_cfg.fps), int(g_cfg.vsync), g_cfg.light, g_cfg.sky,
            g_cfg.lightSize, g_cfg.glow, g_cfg.water, g_cfg.spriteGlow, g_cfg.gi,
            int(g_cfg.volumetric), g_cfg.dynres, g_cfg.maxLights, g_cfg.minRoughness,
-           int(g_cfg.lightCull), g_cfg.flicker, g_cfg.ambient, int(g_cfg.smoothModels));
+           int(g_cfg.lightCull), g_cfg.flicker, g_cfg.ambient, int(g_cfg.smoothModels),
+           int(g_cfg.fixturesPass));
    fclose(f);
 }
 
@@ -563,6 +566,8 @@ struct CachedObject {
    bool whole = false;     // captured unclipped by the view
    std::vector<RgNormalPacked32> normals;   // of prims' vertices, computed for normalsHash
    uint64_t normalsHash = 0;
+   float bmin[3] = {}, bmax[3] = {};   // meters
+   bool passLight = false;   // a small fixture around a light: it does not block it
 };
 
 // cached objects farther than this from the camera are not drawn out of view
@@ -668,8 +673,12 @@ void compute_normals(CapturedPrim *prims, size_t count)
    }
 }
 
-void upload_captured(uint64_t id, const CapturedPrim &p)
+void upload_captured(uint64_t id, const CapturedPrim &p, bool passLight = false)
 {
+   // a torch's own model sits around its light: as a shadow caster it put
+   // the light out (lit or doused, the room looked the same)
+   if (passLight && (p.flags & RG_MESH_PRIMITIVE_SHADOW_ONLY))
+      return;
    // Flat: each face shaded by its own direction. RTGL1 bends a blended
    // normal toward the viewer where it disagrees with the face (to keep
    // reflections out of the surface), so smooth shading changes with the
@@ -679,7 +688,8 @@ void upload_captured(uint64_t id, const CapturedPrim &p)
    auto prim = RgMeshPrimitiveInfo{
       .sType = RG_STRUCTURE_TYPE_MESH_PRIMITIVE_INFO,
       .pNext = nullptr,
-      .flags = p.flags | shading,
+      .flags = p.flags | shading |
+               (passLight ? RgMeshPrimitiveFlags(RG_MESH_PRIMITIVE_NO_SHADOW) : 0u),
       .primitiveIndexInMesh = 0,
       .pVertices = p.verts.data(),
       .vertexCount = uint32_t(p.verts.size()),
@@ -706,7 +716,8 @@ void upload_objects()
       // the test switch: the models exactly as they were when it was set
       for (const auto &e : g_objects)
          for (size_t i = 0; i < e.second.prims.size(); ++i)
-            upload_captured(0x500000000ull + (uint64_t(e.first) << 12) + i, e.second.prims[i]);
+            upload_captured(0x500000000ull + (uint64_t(e.first) << 12) + i, e.second.prims[i],
+                            e.second.passLight);
       return;
    }
    for (auto it = g_objects.begin(); it != g_objects.end();) {
@@ -735,8 +746,22 @@ void upload_objects()
          draw = true;
          ++g_cachedDrawn;
       }
+      c.passLight = false;
+      if (g_cfg.fixturesPass) {
+         const float ext = std::max({c.bmax[0] - c.bmin[0], c.bmax[1] - c.bmin[1], c.bmax[2] - c.bmin[2]});
+         if (ext < 1.0f)
+            for (const RgFloat3D &l : g_lightPositions) {
+               bool in = true;
+               for (int k = 0; k < 3 && in; ++k)
+                  in = l.data[k] > c.bmin[k] - 0.15f && l.data[k] < c.bmax[k] + 0.15f;
+               if (in) {
+                  c.passLight = true;
+                  break;
+               }
+            }
+      }
       for (size_t i = 0; i < c.prims.size(); ++i)
-         upload_captured(0x500000000ull + (uint64_t(obj) << 12) + i, c.prims[i]);
+         upload_captured(0x500000000ull + (uint64_t(obj) << 12) + i, c.prims[i], c.passLight);
       ++it;
    }
 }
@@ -1245,7 +1270,7 @@ const char *kUpscaleNames[] = {"Off",
 
 enum UiRow {
    kRowUpscale, kRowScale, kRowDynres, kRowBounces, kRowLights, kRowLightCull, kRowFlicker, kRowVolumetric, kRowVsync,
-   kRowFps, kRowLight, kRowAmbient, kRowSky, kRowLightSize, kRowRough, kRowSmooth, kRowGlow, kRowWater,
+   kRowFps, kRowLight, kRowAmbient, kRowSky, kRowLightSize, kRowRough, kRowSmooth, kRowFixtures, kRowGlow, kRowWater,
    kRowDebug, kRowFreeze, kRowBackFaces, kRowReuse, kRowInspect, kRowReset, kRowCount
 };
 
@@ -1253,7 +1278,7 @@ const char *kRowLabels[kRowCount] = {
    "Upscaler", "Render resolution", "Dynamic resolution", "Bounce light", "Lights traced",
    "Lights behind walls", "Light flicker",
    "Volumetric light", "VSync", "FPS counter", "Light brightness", "Ambient light", "Sky brightness",
-   "Light size (soft shadows)", "Surface roughness", "Model shading", "Lamp glow", "Water",
+   "Light size (soft shadows)", "Surface roughness", "Model shading", "Torches and lamps", "Lamp glow", "Water",
    "Debug view", "Freeze scene (test)", "Back faces (test)", "Light sampling (test)", "Inspect centre of view", "Reset to defaults",
 };
 
@@ -1296,6 +1321,7 @@ std::string row_value(int row)
    case kRowSky: snprintf(buf, sizeof(buf), "%.2fx", g_cfg.sky); return buf;
    case kRowLightSize: snprintf(buf, sizeof(buf), "%.2f m", g_cfg.lightSize); return buf;
    case kRowSmooth: return g_cfg.smoothModels ? "Smooth" : "Flat (steady)";
+   case kRowFixtures: return g_cfg.fixturesPass ? "Let their light out" : "Block their own light";
    case kRowFreeze: return g_freeze ? "On (frozen)" : "Off";
    case kRowBackFaces: return g_dropBackFaces ? "Dropped" : "Shadows only";
    case kRowReuse: {
@@ -1376,6 +1402,7 @@ void change_row(int row, int dir)
    }
    case kRowLightCull: g_cfg.lightCull = !g_cfg.lightCull; break;
    case kRowSmooth: g_cfg.smoothModels = !g_cfg.smoothModels; break;
+   case kRowFixtures: g_cfg.fixturesPass = !g_cfg.fixturesPass; break;
    case kRowFlicker: g_cfg.flicker = (g_cfg.flicker + dir + 3) % 3; break;
    case kRowVolumetric: g_cfg.volumetric = !g_cfg.volumetric; break;
    case kRowVsync: g_cfg.vsync = !g_cfg.vsync; break;
@@ -1981,9 +2008,9 @@ void inspect_view()
          char name[128];
          RenderRTGameObjectName(e.first, name, sizeof(name));
          out("  object %u \"%s\": %zu triangles (%zu shadow-only) in %zu primitives, whole %d, "
-             "drawn frame %u (now %u), posed %d, flags 0x%x\n",
+             "drawn frame %u (now %u), posed %d, flags 0x%x%s\n",
              e.first, name, tris, shadowTris, c.prims.size(), int(c.whole), c.frame, g_frameNumber,
-             int(c.posed), allFlags);
+             int(c.posed), allFlags, c.passLight ? ", lets its light out" : "");
       }
    };
    if (best < 1e29f) {
@@ -2379,6 +2406,19 @@ void RenderRTObjectEnd(void)
          }
       for (int k = 0; k < 3; ++k)
          c.center[k] = n ? float(sum[k] / double(n)) : 0.0f;
+   }
+   for (int k = 0; k < 3; ++k) {
+      c.bmin[k] = 1e30f;
+      c.bmax[k] = -1e30f;
+   }
+   for (const CapturedPrim &p : c.prims) {
+      if (p.sprite || (p.flags & RG_MESH_PRIMITIVE_TRANSLUCENT))
+         continue;   // particles and glows: not the model's body
+      for (const RgPrimitiveVertex &v : p.verts)
+         for (int k = 0; k < 3; ++k) {
+            c.bmin[k] = std::min(c.bmin[k], v.position[k]);
+            c.bmax[k] = std::max(c.bmax[k], v.position[k]);
+         }
    }
    // the normals are recomputed only when the shape changed
    size_t total = 0;
