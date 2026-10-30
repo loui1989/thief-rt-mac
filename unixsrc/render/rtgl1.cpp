@@ -94,8 +94,9 @@ struct Settings {
    int flicker = 0;           // flickering lights: 0 smoothed, 1 as the game, 2 nearly steady
    bool smoothModels = false; // models shaded smooth (their normals blended across edges)
    float ambient = 1.0f;      // the level's ambient light, as a faint glow of every surface
-   int candidates = 24;       // lights tried per pixel and per bounce (RTGL1: no rays, ALU only)
-   int response = 1;          // how fast lighting changes show: 0 calm (Blood RT), 1 quick, 2 instant
+   int candidates = 12;       // lights tried per pixel and per bounce (RTGL1: no rays, ALU only)
+   int evMin = 3;             // eye adaptation's darkest exposure (EV; Blood RT 5, RTGL1 0)
+   int response = 0;          // how fast lighting changes show: 0 calm (Blood RT), 1 quick, 2 instant
    bool lightFade = true;     // lights entering or leaving the traced set fade
    bool steadyFaces = true;   // models' faces seen or shadow-only by a fixed rule, not by the view
    bool lightFix = true;      // lights moved out of the walls they sit in
@@ -158,8 +159,9 @@ void load_settings()
       else if (k == "max_lights") g_cfg.maxLights = std::clamp(int(value), 0, 4096);
       else if (k == "flicker") g_cfg.flicker = std::clamp(int(value), 0, 2);
       else if (k == "smooth_models") g_cfg.smoothModels = value != 0;
-      else if (k == "candidates") g_cfg.candidates = std::clamp(int(value), 4, 32);
-      else if (k == "response") g_cfg.response = std::clamp(int(value), 0, 2);
+      else if (k == "light_candidates") g_cfg.candidates = std::clamp(int(value), 4, 32);
+      else if (k == "ev_min") g_cfg.evMin = std::clamp(int(value), 0, 7);
+      else if (k == "light_response") g_cfg.response = std::clamp(int(value), 0, 2);
       else if (k == "light_fade") g_cfg.lightFade = value != 0;
       else if (k == "steady_faces") g_cfg.steadyFaces = value != 0;
       else if (k == "light_fix") g_cfg.lightFix = value != 0;
@@ -182,12 +184,12 @@ void save_settings()
       return;
    fprintf(f, "upscale = %d\nscale = %.2f\nfps = %d\nvsync = %d\nlight = %.3f\nsky = %.3f\n"
               "light_size = %.3f\nglow = %.3f\nwater = %d\nsprite_glow = %.3f\ngi = %d\n"
-              "volumetric = %d\ndynres = %d\nmax_lights = %d\nmin_roughness = %.2f\nlight_cull = %d\nflicker = %d\nambient = %.3f\nsmooth_models = %d\nfixtures_pass = %d\nlight_fix = %d\nresponse = %d\ncandidates = %d\nsteady_faces = %d\nlight_fade = %d\nreach = %d\n",
+              "volumetric = %d\ndynres = %d\nmax_lights = %d\nmin_roughness = %.2f\nlight_cull = %d\nflicker = %d\nambient = %.3f\nsmooth_models = %d\nfixtures_pass = %d\nlight_fix = %d\nlight_response = %d\nev_min = %d\nlight_candidates = %d\nsteady_faces = %d\nlight_fade = %d\nreach = %d\n",
            g_cfg.upscale, g_cfg.scale, int(g_cfg.fps), int(g_cfg.vsync), g_cfg.light, g_cfg.sky,
            g_cfg.lightSize, g_cfg.glow, g_cfg.water, g_cfg.spriteGlow, g_cfg.gi,
            int(g_cfg.volumetric), g_cfg.dynres, g_cfg.maxLights, g_cfg.minRoughness,
            int(g_cfg.lightCull), g_cfg.flicker, g_cfg.ambient, int(g_cfg.smoothModels),
-           int(g_cfg.fixturesPass), int(g_cfg.lightFix), g_cfg.response,
+           int(g_cfg.fixturesPass), int(g_cfg.lightFix), g_cfg.response, g_cfg.evMin,
            g_cfg.candidates, int(g_cfg.steadyFaces), int(g_cfg.lightFade), g_cfg.reach);
    fclose(f);
 }
@@ -356,6 +358,8 @@ uint32_t g_lightsTotal = 0, g_frameLightsShown = 0, g_lightsReaching = 0;
 std::vector<PendingLight> g_lastLights;   // last frame's, for the inspector
 std::vector<PendingLight> g_lastOffered;  // all the game gave last frame, before culling
 std::vector<PendingLight> g_dimPending, g_lastDim;   // too dim to trace (off)
+int g_lightEventFrames = 0;   // a light just put out or lit: the denoiser lets go for a few frames
+int g_exposureDummy = 0;
 std::vector<PendingLight> g_fadingOut;   // left the traced set, still fading out
 std::vector<PendingLight> g_frozenLights;  // while g_freeze
 bool g_underwater = false;
@@ -851,10 +855,19 @@ void upload_captured(uint64_t id, const CapturedPrim &p, bool passLight = false)
    // angle a model is seen from -- light that came and went as you moved.
    const RgMeshPrimitiveFlags shading =
       g_cfg.smoothModels ? 0u : RgMeshPrimitiveFlags(RG_MESH_PRIMITIVE_FORCE_EXACT_NORMALS);
+   // A glowing part (a lamp's bulb, a torch's flame cup) as Blood RT's: it
+   // looks lit, but gives the bounce light only a little of it -- the light
+   // it stands for is traced already, and a small bright emitter that only
+   // random bounce rays find is a splotch on every wall around it.
+   const bool opaque = !(p.flags & (RG_MESH_PRIMITIVE_TRANSLUCENT | RG_MESH_PRIMITIVE_SHADOW_ONLY)) && !p.sprite;
+   const float ambient = opaque ? ambient_emissive() : 0.0f;
+   const bool glows = p.emissive > 0.0f && opaque;
+   const RgMeshPrimitiveFlags glowFlags =
+      glows ? RgMeshPrimitiveFlags(RG_MESH_PRIMITIVE_EMISSIVE_OVERRIDE | RG_MESH_PRIMITIVE_EMISSIVE_SCREEN_SCALED) : 0u;
    auto prim = RgMeshPrimitiveInfo{
       .sType = RG_STRUCTURE_TYPE_MESH_PRIMITIVE_INFO,
       .pNext = nullptr,
-      .flags = p.flags | shading |
+      .flags = p.flags | shading | glowFlags |
                (passLight ? RgMeshPrimitiveFlags(RG_MESH_PRIMITIVE_NO_SHADOW) : 0u),
       .primitiveIndexInMesh = 0,
       .pVertices = p.verts.data(),
@@ -864,26 +877,49 @@ void upload_captured(uint64_t id, const CapturedPrim &p, bool passLight = false)
       .pTextureName = p.texture.empty() ? nullptr : p.texture.c_str(),
       .textureFrame = 0,
       .color = p.color,
-      .emissive = (p.flags & (RG_MESH_PRIMITIVE_TRANSLUCENT | RG_MESH_PRIMITIVE_SHADOW_ONLY)) || p.sprite
-                     ? p.emissive
-                     : std::max(p.emissive, ambient_emissive()),
+      .emissive = std::max(p.emissive, ambient),
       .classicLight = 1.0f,
-      .emissiveGi = 0.0f,
+      .emissiveGi = glows ? std::max(p.emissive * 0.06f, ambient) : 0.0f,
    };
    upload(id, prim);
 }
 
 uint32_t g_cachedDrawn = 0;
 
+// A model's primitive named by its texture and kind, the n-th such in the
+// model, not by its place in the list: the list's order changed as faces
+// turned toward or away, and RTGL1 matched the wrong primitives between
+// frames (a walking character smeared).
+std::vector<uint64_t> object_prim_ids(uint32_t obj, const std::vector<CapturedPrim> &prims)
+{
+   std::vector<uint64_t> ids(prims.size());
+   std::unordered_map<uint32_t, uint32_t> seen;   // key -> how many so far
+   std::vector<bool> used(4096, false);
+   for (size_t i = 0; i < prims.size(); ++i) {
+      uint32_t h = 2166136261u;
+      for (unsigned char ch : prims[i].texture)
+         h = (h ^ ch) * 16777619u;
+      h = (h ^ uint32_t(prims[i].flags)) * 16777619u;
+      const uint32_t nth = seen[h]++;
+      uint32_t slot = (h + nth * 2654435761u) & 0xfffu;
+      for (int tries = 0; used[slot] && tries < 4096; ++tries)
+         slot = (slot + 1) & 0xfffu;
+      used[slot] = true;
+      ids[i] = 0x500000000ull + (uint64_t(obj) << 12) + slot;
+   }
+   return ids;
+}
+
 void upload_objects()
 {
    g_cachedDrawn = 0;
    if (g_freeze) {
       // the test switch: the models exactly as they were when it was set
-      for (const auto &e : g_objects)
+      for (const auto &e : g_objects) {
+         const std::vector<uint64_t> ids = object_prim_ids(e.first, e.second.prims);
          for (size_t i = 0; i < e.second.prims.size(); ++i)
-            upload_captured(0x500000000ull + (uint64_t(e.first) << 12) + i, e.second.prims[i],
-                            e.second.passLight);
+            upload_captured(ids[i], e.second.prims[i], e.second.passLight);
+      }
       return;
    }
    for (auto it = g_objects.begin(); it != g_objects.end();) {
@@ -926,8 +962,9 @@ void upload_objects()
                }
             }
       }
+      const std::vector<uint64_t> ids = object_prim_ids(obj, c.prims);
       for (size_t i = 0; i < c.prims.size(); ++i)
-         upload_captured(0x500000000ull + (uint64_t(obj) << 12) + i, c.prims[i], c.passLight);
+         upload_captured(ids[i], c.prims[i], c.passLight);
       ++it;
    }
 }
@@ -958,7 +995,8 @@ void upload_world()
          continue;
       auto found = g_worldTextures.find(g.textureId);
       RtTexture *tex = found == g_worldTextures.end() ? nullptr : found->second;
-      RgMeshPrimitiveFlags flags = 0;
+      // (as Blood RT: the walls do not move, and each face is shaded flat)
+      RgMeshPrimitiveFlags flags = RG_MESH_PRIMITIVE_NO_MOTION_VECTORS | RG_MESH_PRIMITIVE_FORCE_EXACT_NORMALS;
       // Alpha-tested geometry runs a shader at every hit any ray finds on it:
       // only where the game cuts holes (a colour-keyed texture that has
       // see-through texels: grates, railings, foliage).
@@ -1436,14 +1474,14 @@ const char *kUpscaleNames[] = {"Off",
 
 enum UiRow {
    kRowUpscale, kRowScale, kRowDynres, kRowBounces, kRowReach, kRowLights, kRowLightFade, kRowCandidates, kRowLightCull, kRowResponse, kRowFlicker, kRowVolumetric, kRowVsync,
-   kRowFps, kRowLight, kRowAmbient, kRowSky, kRowLightSize, kRowRough, kRowSmooth, kRowSteady, kRowFixtures, kRowLightFix, kRowGlow, kRowWater,
+   kRowFps, kRowLight, kRowExposure, kRowAmbient, kRowSky, kRowLightSize, kRowRough, kRowSmooth, kRowSteady, kRowFixtures, kRowLightFix, kRowGlow, kRowWater,
    kRowDebug, kRowFreeze, kRowBackFaces, kRowReuse, kRowBlink, kRowInspect, kRowReset, kRowCount
 };
 
 const char *kRowLabels[kRowCount] = {
    "Upscaler", "Render resolution", "Dynamic resolution", "Bounce light", "Light reach", "Lights traced",
    "Lights coming into range", "Lights tried per pixel", "Lights behind walls", "Light changes", "Light flicker",
-   "Volumetric light", "VSync", "FPS counter", "Light brightness", "Ambient light", "Sky brightness",
+   "Volumetric light", "VSync", "FPS counter", "Light brightness", "Darkest exposure", "Ambient light", "Sky brightness",
    "Light size (soft shadows)", "Surface roughness", "Model shading", "Model faces", "Torches and lamps", "Lights in walls", "Lamp glow", "Water",
    "Debug view", "Freeze scene (test)", "Back faces (test)", "Light sampling (test)", "Blink nearest light (test)", "Inspect centre of view", "Reset to defaults",
 };
@@ -1481,12 +1519,15 @@ std::string row_value(int row)
    case kRowLightCull: return g_cfg.lightCull ? "Skipped" : "Traced";
    case kRowLightFade: return g_cfg.lightFade ? "Fade in" : "Appear at once";
    case kRowCandidates: snprintf(buf, sizeof(buf), "%d", g_cfg.candidates); return buf;
-   case kRowResponse: return g_cfg.response == 0 ? "Calm (slow to show)" : g_cfg.response == 2 ? "Instant (noisier)" : "Quick";
+   case kRowResponse: return g_cfg.response == 0 ? "As Blood RT" : g_cfg.response == 2 ? "Instant (noisier)" : "Quick";
    case kRowFlicker: return g_cfg.flicker == 1 ? "As the game" : g_cfg.flicker == 2 ? "Nearly steady" : "Smoothed";
    case kRowVolumetric: return g_cfg.volumetric ? "On" : "Off";
    case kRowVsync: return g_cfg.vsync ? "On" : "Off";
    case kRowFps: return g_cfg.fps ? "On" : "Off";
    case kRowLight: snprintf(buf, sizeof(buf), "%.2fx", g_cfg.light); return buf;
+   case kRowExposure:
+      snprintf(buf, sizeof(buf), "EV %d%s", g_cfg.evMin, g_cfg.evMin == 5 ? " (Blood RT)" : g_cfg.evMin == 0 ? " (brightest)" : "");
+      return buf;
    case kRowAmbient:
       if (g_cfg.ambient <= 0.0f) return "Off";
       snprintf(buf, sizeof(buf), "%.2fx the level's", g_cfg.ambient);
@@ -1607,6 +1648,7 @@ void change_row(int row, int dir)
    case kRowVsync: g_cfg.vsync = !g_cfg.vsync; break;
    case kRowFps: g_cfg.fps = !g_cfg.fps; break;
    case kRowLight: g_cfg.light = step_mul(g_cfg.light, dir, 0.05f, 20.0f); break;
+   case kRowExposure: g_cfg.evMin = std::clamp(g_cfg.evMin + dir, 0, 7); break;
    case kRowAmbient: g_cfg.ambient = g_cfg.ambient <= 0.0f && dir > 0 ? 0.25f
                                     : (g_cfg.ambient <= 0.25f && dir < 0 ? 0.0f
                                                                          : step_mul(g_cfg.ambient, dir, 0.25f, 20.0f));
@@ -1770,7 +1812,9 @@ void draw_ui(bool scene)
 
 void draw_frame(bool sceneDrawn)
 {
-   double current = now_seconds();
+   // (time since start: RTGL1 keeps it as a 32-bit float)
+   static const double s_start = now_seconds();
+   double current = now_seconds() - s_start;
    // Thief's skies are night skies. RTGL1's default sky colour is a bright
    // grey that lit every outdoor surface like daylight. Linking this struct
    // replaces all of RTGL1's sky defaults, so every field is set.
@@ -1868,9 +1912,11 @@ void draw_frame(bool sceneDrawn)
       .depthGateFeather = 1.0f,
       .depthGateTaps = 5,
    };
+   const bool lightEvent = g_lightEventFrames > 0;
+   if (g_lightEventFrames > 0)
+      --g_lightEventFrames;
    int renderW = 0, renderH = 0;
    render_size(renderW, renderH);
-   const float spatialRadius = std::clamp(30.0f * float(renderW) / 1152.0f, 30.0f, 80.0f);
    auto illum = RgDrawFrameIlluminationParams{
       .sType = RG_STRUCTURE_TYPE_DRAW_FRAME_ILLUMINATION_PARAMS,
       .pNext = &volumetric,
@@ -1883,9 +1929,11 @@ void draw_frame(bool sceneDrawn)
       // the place is dark and there is nothing to compare); at Blood RT's
       // values that frame removed only part of the old light, and the rest
       // faded at 1% a frame -- a doused torch took seconds to go dark.
-      .directDiffuseSensitivityToChange = g_cfg.response == 0 ? 0.5f : 1.0f,
-      .indirectDiffuseSensitivityToChange = g_cfg.response == 0 ? 0.2f : g_cfg.response == 1 ? 0.6f : 1.0f,
-      .specularSensitivityToChange = g_cfg.response == 0 ? 0.5f : g_cfg.response == 1 ? 0.8f : 1.0f,
+      // (Blood RT's values; for the few frames after a light is put out or
+      // lit in the game, everything at once, so the torch goes dark at once)
+      .directDiffuseSensitivityToChange = (g_cfg.response == 0 && !lightEvent) ? 0.5f : 1.0f,
+      .indirectDiffuseSensitivityToChange = lightEvent || g_cfg.response == 2 ? 1.0f : g_cfg.response == 1 ? 0.6f : 0.2f,
+      .specularSensitivityToChange = lightEvent || g_cfg.response == 2 ? 1.0f : g_cfg.response == 1 ? 0.8f : 0.3f,
       .polygonalLightSpotlightFactor = 2.0f,
       .lightUniqueIdIgnoreFirstPersonViewerShadows = nullptr,
       .enableRrTemporalPrefilter = false,
@@ -1908,7 +1956,7 @@ void draw_frame(bool sceneDrawn)
       .restirSpatialSamples = (g_reuseTest == 1 || g_reuseTest == 2) ? 0u : 8u,
       // in pixels: 30 at ~1150 wide (Blood RT's), wider at higher resolutions so
       // neighbours are taken from as far across the surface as there
-      .restirSpatialRadius = spatialRadius,
+      .restirSpatialRadius = 30.0f,   // (as Blood RT)
       .restirTemporalMCap = g_reuseTest == 2 ? 1u : 20u,
       .rrGuideMin = 0.01f,
       .rrGuideMode = 1,
@@ -1919,9 +1967,10 @@ void draw_frame(bool sceneDrawn)
       // bounce light keeps at most ~1 s of history (RTGL1's own is 256 frames,
       // and it held on to bright bounce on purpose): a doused torch's glow on
       // the walls goes with it instead of lingering for seconds.
-      .svgfFpGrad = true,
-      .svgfIndirMaxHist = 64.0f,
-      .svgfIndirAntilag = true,
+      // RTGL1's own (as Blood RT) but for the frames after a light event
+      .svgfFpGrad = lightEvent,
+      .svgfIndirMaxHist = lightEvent ? 16.0f : 0.0f,
+      .svgfIndirAntilag = lightEvent,
    };
    // No surface glossier than 0.7 (Blood RT's rt_min_roughness): a glossy
    // surface's reflection is one noisy sample per pixel, the crawling.
@@ -1931,14 +1980,30 @@ void draw_frame(bool sceneDrawn)
       .dynamicSamplerFilter = RG_SAMPLER_FILTER_LINEAR,
       .mipLodBiasOffset = 0.0f,
       .normalMapStrength = 1.0f,
-      .emissionMapBoost = 100.0f,
+      .emissionMapBoost = 50.0f,   // (as Blood RT)
       .emissionMaxScreenColor = 1.5f,
       .minRoughness = g_cfg.minRoughness,
       .heightMapDepth = 0.02f,
    };
+   // Blood RT's eye adaptation: a dark place is not brightened up to 32 times
+   // (RTGL1's own range starts at EV 0), its noise with it
+   auto tonemap = RgDrawFrameTonemappingParams{
+      .sType = RG_STRUCTURE_TYPE_DRAW_FRAME_TONEMAPPING_PARAMS,
+      .pNext = &textures,
+      .disableEyeAdaptation = false,
+      .ev100Min = float(g_cfg.evMin),
+      .ev100Max = std::max(float(g_cfg.evMin) + 0.1f, 7.7f),
+      .luminanceWhitePoint = 3.0f,
+      .saturation = {{0, 0, 0}},
+      .crosstalk = {{1.0f, 1.0f, 1.0f / 16.0f}},
+      .contrast = 0.1f,
+      .hdrBrightness = 1.0f,
+      .hdrContrast = 0.1f,
+      .hdrSaturation = {{0.25f, 0.25f, 0.25f}},
+   };
    auto sky = RgDrawFrameSkyParams{
       .sType = RG_STRUCTURE_TYPE_DRAW_FRAME_SKY_PARAMS,
-      .pNext = &textures,
+      .pNext = &tonemap,
       .skyType = RG_SKY_TYPE_COLOR,
       .skyColorDefault = {{0.035f, 0.045f, 0.075f}},
       .skyColorMultiplier = g_cfg.sky,
@@ -2561,9 +2626,19 @@ void RenderRTDrawWorld(int primitive, const sRenderBackendVertex *v, const float
       if (g_freeze)
          return;
       compute_normals(&p, 1);
-      const uint32_t key = tex ? tex->serial : 0;
-      const uint32_t n = g_primitiveCounters[key]++;
-      upload_captured(0x300000000ull + (uint64_t(key) << 12) + n, p);
+      // named by what it is (texture, where it starts, its size), not by its
+      // place in this frame's drawing order: the same thing keeps its name
+      // from frame to frame, and so its motion and history
+      uint64_t h = 1469598103934665603ull;
+      for (unsigned char ch : p.texture)
+         h = (h ^ ch) * 1099511628211ull;
+      for (int k = 0; k < 3 && !p.verts.empty(); ++k)
+         h = (h ^ uint64_t(int64_t(std::lround(p.verts[0].position[k] * 64.0f)))) * 1099511628211ull;
+      h = (h ^ p.verts.size()) * 1099511628211ull;
+      uint32_t slot = uint32_t(h ^ (h >> 32)) & 0x0fffffffu;
+      while (!g_primitiveCounters.emplace(slot, 1).second)
+         slot = (slot + 1) & 0x0fffffffu;
+      upload_captured(0x300000000ull + uint64_t(slot), p);
    };
    const bool solidUntextured = !name && !(prim.flags & RG_MESH_PRIMITIVE_TRANSLUCENT);
    if (!solidUntextured) {
@@ -3186,8 +3261,11 @@ void flush_lights()
       };
       for (const PendingLight &L : g_pendingLights) {
          auto it = s_fade.find(L.id);
-         if (it == s_fade.end())
+         if (it == s_fade.end()) {
+            if (!first && s_dimBefore.count(L.id))
+               g_lightEventFrames = 10;   // lit in the game
             it = s_fade.emplace(L.id, (first || s_dimBefore.count(L.id)) ? 1.0f : 0.0f).first;
+         }
          it->second = std::min(1.0f, it->second + step);
          upload_scaled(L, it->second);
          s_seen[L.id] = L;
@@ -3200,7 +3278,9 @@ void flush_lights()
          }
          float &f = s_fade[id];
          // out in the game (or gone): not faded, the ghost below takes it
-         if (dim.count(id) || !offered.count(id) || (f -= step) <= 0.0f) {
+         if (dim.count(id))
+            g_lightEventFrames = 10;   // put out in the game
+         if (dim.count(id) || !offered.count(id) || g_cfg.reach > 0 || (f -= step) <= 0.0f) {
             s_fade.erase(id);
             it = s_seen.erase(it);
             continue;
@@ -3269,7 +3349,10 @@ void flush_lights()
          }
       }
       for (const PendingLight &L : s_prev)
-         if (!now.count(L.id) && !s_fading.count(L.id))
+         if (!now.count(L.id) && !s_fading.count(L.id) &&
+             // (one faded out by its distance is not a change: not given dark)
+             (g_cfg.reach <= 0 || std::any_of(g_lastDim.begin(), g_lastDim.end(),
+                                              [&L](const PendingLight &D) { return D.id == L.id; })))
             s_fading[L.id] = {L, 30};
       for (auto it = s_fading.begin(); it != s_fading.end();) {
          if (now.count(it->first) || --it->second.second < 0) {

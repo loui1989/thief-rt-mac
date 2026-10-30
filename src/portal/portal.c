@@ -1804,6 +1804,8 @@ static void portal_rt_submit_world(void)
 #define PORTAL_RT_LIGHT_BITS 65536
 static unsigned char portal_rt_light_bits[PORTAL_RT_LIGHT_BITS / 8];
 static unsigned int *portal_rt_cell_stamp;
+static unsigned int *portal_rt_drawn;   // = portal_rt_stamp: drawn last frame
+static int portal_rt_drawn_size;
 static int portal_rt_cell_stamp_size;
 static unsigned int portal_rt_stamp;
 
@@ -1855,12 +1857,22 @@ static void portal_rt_find_lights(int start)
       if (!portal_rt_cell_stamp || !queue)
          return;
    }
+   if (portal_rt_drawn_size < wr_num_cells) {
+      free(portal_rt_drawn);
+      portal_rt_drawn = (unsigned int *)calloc(wr_num_cells, sizeof(unsigned int));
+      portal_rt_drawn_size = portal_rt_drawn ? wr_num_cells : 0;
+   }
    if (++portal_rt_stamp == 0) {
+      if (portal_rt_drawn)
+         memset(portal_rt_drawn, 0, sizeof(unsigned int) * portal_rt_drawn_size);
       memset(portal_rt_cell_stamp, 0, sizeof(unsigned int) * portal_rt_cell_stamp_size);
       portal_rt_stamp = 1;
    }
-   for (i = 0; i < r_sorted_count && i < MAX_ACTIVE_REGIONS; ++i)
+   for (i = 0; i < r_sorted_count && i < MAX_ACTIVE_REGIONS; ++i) {
       portal_rt_mark_cell_lights(active_regions[i]);
+      if (active_regions[i] >= 0 && active_regions[i] < portal_rt_drawn_size)
+         portal_rt_drawn[active_regions[i]] = portal_rt_stamp;
+   }
    visible = portal_rt_stat_cells;
    if (start < 0 || start >= wr_num_cells || !WR_CELL(start))
       return;
@@ -2007,17 +2019,30 @@ static void portal_rt_compute_reach(int start, float limit)
 #undef RT_HD
 }
 
-// a point's walking distance from the camera (Dark units), < 0 if beyond reach
+// a point's walking distance from the camera (Dark units), < 0 if beyond reach.
+// As Blood RT's: one in a cell drawn on screen counts as far as it is in a
+// straight line over 2.5 (a lamp down a long street, seen, is in reach).
 float portal_rt_path_distance(int cell, const mxs_vector *pos)
 {
-   float dx, dy, dz;
-   if (!portal_rt_dist_size || cell < 0 || cell >= portal_rt_dist_size ||
-       portal_rt_cell_dist[cell] < 0.0f)
+   float dx, dy, dz, walk = -1.0f;
+   if (!portal_rt_dist_size || cell < 0 || cell >= portal_rt_dist_size)
       return -1.0f;
-   dx = pos->x - portal_rt_cell_entry[cell].x;
-   dy = pos->y - portal_rt_cell_entry[cell].y;
-   dz = pos->z - portal_rt_cell_entry[cell].z;
-   return portal_rt_cell_dist[cell] + (float)sqrt(dx * dx + dy * dy + dz * dz);
+   if (portal_rt_cell_dist[cell] >= 0.0f) {
+      dx = pos->x - portal_rt_cell_entry[cell].x;
+      dy = pos->y - portal_rt_cell_entry[cell].y;
+      dz = pos->z - portal_rt_cell_entry[cell].z;
+      walk = portal_rt_cell_dist[cell] + (float)sqrt(dx * dx + dy * dy + dz * dz);
+   }
+   if (cell < portal_rt_drawn_size && portal_rt_drawn[cell] == portal_rt_stamp) {
+      float seen;
+      dx = pos->x - portal_camera_loc.x;
+      dy = pos->y - portal_camera_loc.y;
+      dz = pos->z - portal_camera_loc.z;
+      seen = (float)sqrt(dx * dx + dy * dy + dz * dz) / 2.5f;
+      if (walk < 0.0f || seen < walk)
+         walk = seen;
+   }
+   return walk;
 }
 
 int portal_rt_light_relevant(int light)
