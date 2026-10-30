@@ -97,6 +97,15 @@ void RenderRTWorldTexture(int textureId, void *texture);
 // Lights, every frame between SceneBegin and SceneEnd. rgb is Dark's light
 // brightness (0..~255 per channel), radius 0 means unlimited. For a spot
 // light dir is set and inner/outer are cosines; inner < 0 for point lights.
+// The player's light for the light gem and the guards, by the path tracer's
+// lights and shadows: RenderRTDetectionWanted says whether to use it (the
+// setting, and the ray tracer running); RenderRTPointLighting gives it at a
+// point (Dark units) in the game's own scale (as compute_object_lighting),
+// returning 0 if it cannot. RenderRTNoteLighting shows both on the counter.
+int RenderRTDetectionWanted(void);
+int RenderRTPointLighting(const float pos[3], float *value);
+void RenderRTNoteLighting(float original, float traced);
+
 // The level's ambient light (0..1 per channel), once a scene.
 void RenderRTAmbient(float r, float g, float b);
 

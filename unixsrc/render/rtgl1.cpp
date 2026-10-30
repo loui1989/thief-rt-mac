@@ -97,6 +97,7 @@ struct Settings {
    int candidates = 12;       // lights tried per pixel and per bounce (RTGL1: no rays, ALU only)
    int evMin = 3;             // eye adaptation's darkest exposure (EV; Blood RT 5, RTGL1 0)
    int response = 0;          // how fast lighting changes show: 0 calm (Blood RT), 1 quick, 2 instant
+   bool rtDetection = true;   // the light gem and the guards go by the ray-traced light
    bool bloom = true;         // the glow around bright light (~0.8 ms at 4K output)
    bool lightFade = true;     // lights entering or leaving the traced set fade
    bool steadyFaces = true;   // models' faces seen or shadow-only by a fixed rule, not by the view
@@ -163,6 +164,7 @@ void load_settings()
       else if (k == "light_candidates") g_cfg.candidates = std::clamp(int(value), 4, 32);
       else if (k == "ev_min") g_cfg.evMin = std::clamp(int(value), 0, 7);
       else if (k == "light_response") g_cfg.response = std::clamp(int(value), 0, 2);
+      else if (k == "rt_detection") g_cfg.rtDetection = value != 0;
       else if (k == "bloom") g_cfg.bloom = value != 0;
       else if (k == "light_fade") g_cfg.lightFade = value != 0;
       else if (k == "steady_faces") g_cfg.steadyFaces = value != 0;
@@ -186,13 +188,13 @@ void save_settings()
       return;
    fprintf(f, "upscale = %d\nscale = %.2f\nfps = %d\nvsync = %d\nlight = %.3f\nsky = %.3f\n"
               "light_size = %.3f\nglow = %.3f\nwater = %d\nsprite_glow = %.3f\ngi = %d\n"
-              "volumetric = %d\ndynres = %d\nmax_lights = %d\nmin_roughness = %.2f\nlight_cull = %d\nflicker = %d\nambient = %.3f\nsmooth_models = %d\nfixtures_pass = %d\nlight_fix = %d\nlight_response = %d\nev_min = %d\nlight_candidates = %d\nsteady_faces = %d\nlight_fade = %d\nbloom = %d\nreach = %d\n",
+              "volumetric = %d\ndynres = %d\nmax_lights = %d\nmin_roughness = %.2f\nlight_cull = %d\nflicker = %d\nambient = %.3f\nsmooth_models = %d\nfixtures_pass = %d\nlight_fix = %d\nlight_response = %d\nev_min = %d\nlight_candidates = %d\nsteady_faces = %d\nlight_fade = %d\nbloom = %d\nrt_detection = %d\nreach = %d\n",
            g_cfg.upscale, g_cfg.scale, int(g_cfg.fps), int(g_cfg.vsync), g_cfg.light, g_cfg.sky,
            g_cfg.lightSize, g_cfg.glow, g_cfg.water, g_cfg.spriteGlow, g_cfg.gi,
            int(g_cfg.volumetric), g_cfg.dynres, g_cfg.maxLights, g_cfg.minRoughness,
            int(g_cfg.lightCull), g_cfg.flicker, g_cfg.ambient, int(g_cfg.smoothModels),
            int(g_cfg.fixturesPass), int(g_cfg.lightFix), g_cfg.response, g_cfg.evMin,
-           g_cfg.candidates, int(g_cfg.steadyFaces), int(g_cfg.lightFade), int(g_cfg.bloom), g_cfg.reach);
+           g_cfg.candidates, int(g_cfg.steadyFaces), int(g_cfg.lightFade), int(g_cfg.bloom), int(g_cfg.rtDetection), g_cfg.reach);
    fclose(f);
 }
 
@@ -370,6 +372,8 @@ uint32_t g_framePrims = 0, g_frameDropped = 0, g_frameLights = 0;
 std::vector<RgFloat3D> g_lightPositions;
 // the level's ambient light (0..1), and the glow it gives surfaces
 float g_levelAmbient = 0.0f;
+// the player's light, by the game and by the path tracer (for the frame counter)
+float g_noteOriginal = -1, g_noteTraced = -1;
 float ambient_emissive()
 {
    // calibrated by eye against the OpenGL renderer's dark corners
@@ -602,6 +606,7 @@ struct CachedObject {
    bool passLight = false;   // a small fixture around a light: it does not block it
    bool settled = false;     // prims made steady and given normals for hash
    bool keptOut = false;     // given out of view last frame
+   uint32_t givenFrame = 0;  // last given to the path tracer
    // each texture's look as a face turned toward the camera (flags, glow,
    // colour), for its faces captured turned away: kept across frames
    std::unordered_map<std::string, CapturedPrim> looks;
@@ -960,6 +965,7 @@ void upload_objects()
          draw = true;
          ++g_cachedDrawn;
       }
+      c.givenFrame = g_frameNumber;
       c.passLight = false;
       if (g_cfg.fixturesPass) {
          const float ext = std::max({c.bmax[0] - c.bmin[0], c.bmax[1] - c.bmin[1], c.bmax[2] - c.bmin[2]});
@@ -1486,14 +1492,14 @@ const char *kUpscaleNames[] = {"Off",
 
 enum UiRow {
    kRowUpscale, kRowScale, kRowDynres, kRowBounces, kRowReach, kRowLights, kRowLightFade, kRowCandidates, kRowLightCull, kRowResponse, kRowFlicker, kRowVolumetric, kRowBloom, kRowVsync,
-   kRowFps, kRowLight, kRowExposure, kRowAmbient, kRowSky, kRowLightSize, kRowRough, kRowSmooth, kRowSteady, kRowFixtures, kRowLightFix, kRowGlow, kRowWater,
+   kRowFps, kRowDetection, kRowLight, kRowExposure, kRowAmbient, kRowSky, kRowLightSize, kRowRough, kRowSmooth, kRowSteady, kRowFixtures, kRowLightFix, kRowGlow, kRowWater,
    kRowDebug, kRowFreeze, kRowBackFaces, kRowReuse, kRowBlink, kRowInspect, kRowReset, kRowCount
 };
 
 const char *kRowLabels[kRowCount] = {
    "Upscaler", "Render resolution", "Dynamic resolution", "Bounce light", "Light reach", "Lights traced",
    "Lights coming into range", "Lights tried per pixel", "Lights behind walls", "Light changes", "Light flicker",
-   "Volumetric light", "Bloom", "VSync", "FPS counter", "Light brightness", "Darkest exposure", "Ambient light", "Sky brightness",
+   "Volumetric light", "Bloom", "VSync", "FPS counter", "Light gem and guards", "Light brightness", "Darkest exposure", "Ambient light", "Sky brightness",
    "Light size (soft shadows)", "Surface roughness", "Model shading", "Model faces", "Torches and lamps", "Lights in walls", "Lamp glow", "Water",
    "Debug view", "Freeze scene (test)", "Back faces (test)", "Light sampling (test)", "Blink nearest light (test)", "Inspect centre of view", "Reset to defaults",
 };
@@ -1538,6 +1544,7 @@ std::string row_value(int row)
    case kRowVsync: return g_cfg.vsync ? "On" : "Off";
    case kRowFps: return g_cfg.fps ? "On" : "Off";
    case kRowLight: snprintf(buf, sizeof(buf), "%.2fx", g_cfg.light); return buf;
+   case kRowDetection: return g_cfg.rtDetection ? "See the ray-traced light" : "Original lighting";
    case kRowExposure:
       snprintf(buf, sizeof(buf), "EV %d%s", g_cfg.evMin, g_cfg.evMin == 5 ? " (Blood RT)" : g_cfg.evMin == 0 ? " (brightest)" : "");
       return buf;
@@ -1662,6 +1669,7 @@ void change_row(int row, int dir)
    case kRowVsync: g_cfg.vsync = !g_cfg.vsync; break;
    case kRowFps: g_cfg.fps = !g_cfg.fps; break;
    case kRowLight: g_cfg.light = step_mul(g_cfg.light, dir, 0.05f, 20.0f); break;
+   case kRowDetection: g_cfg.rtDetection = !g_cfg.rtDetection; break;
    case kRowExposure: g_cfg.evMin = std::clamp(g_cfg.evMin + dir, 0, 7); break;
    case kRowAmbient: g_cfg.ambient = g_cfg.ambient <= 0.0f && dir > 0 ? 0.25f
                                     : (g_cfg.ambient <= 0.25f && dir < 0 ? 0.0f
@@ -1760,7 +1768,7 @@ void draw_ui(bool scene)
    if (g_cfg.fps) {
       int w, h;
       render_size(w, h);
-      char line[128], line2[128];
+      char line[128], line2[192];
       if (g_cfg.dynres > 0)
          snprintf(line, sizeof(line), "%3.0f fps  %5.1f ms (worst %5.1f)  dynamic \x7f%dx%d",
                   g_ui.fps, g_ui.frameMs, g_ui.worstMs, g_drawableW, g_drawableH);
@@ -1769,8 +1777,12 @@ void draw_ui(bool scene)
                   g_ui.fps, g_ui.frameMs, g_ui.worstMs, w, h, g_drawableW, g_drawableH);
       // waiting in rgStartFrame is the GPU still busy with earlier frames
       const double game = std::max(0.0, g_ui.frameMs - g_ui.waitMs - g_ui.drawMs);
-      snprintf(line2, sizeof(line2), "game %4.1f ms (capture %4.1f)  rt submit %4.1f ms  gpu wait %4.1f ms  lights %u/%u/%u",
-               game, g_ui.captureMs, g_ui.drawMs, g_ui.waitMs, g_frameLightsShown, g_lightsReaching, g_lightsTotal);
+      char seen[48] = "";
+      if (g_noteTraced >= 0)
+         snprintf(seen, sizeof(seen), "  lit %d (game %d)", int(std::lround(g_noteTraced * 100)),
+                  int(std::lround(g_noteOriginal * 100)));
+      snprintf(line2, sizeof(line2), "game %4.1f ms (capture %4.1f)  rt submit %4.1f ms  gpu wait %4.1f ms  lights %u/%u/%u%s",
+               game, g_ui.captureMs, g_ui.drawMs, g_ui.waitMs, g_frameLightsShown, g_lightsReaching, g_lightsTotal, seen);
       const float s = std::round(px * 0.8f);
       const float tw = std::max(text_width(s, line), text_width(s, line2));
       panel(0, 0, tw + 2 * pad, 2 * s + pad * 1.5f, 0.6f);
@@ -2477,11 +2489,261 @@ bool MovieFrame(const void *rgba, int width, int height, int rowBytes, const Rec
 } // namespace darkrt
 
 // ============================================================================
+// How lit the player is, by the path tracer's lights: for the light gem and
+// the guards' eyes (the game's own estimate is its baked lighting, which the
+// ray-traced picture does not match). The lights as given to the path tracer
+// this frame, their brightness falling off as RTGL1's do, each one shadowed
+// or not by rays from the player's body to it against the level's walls (a
+// tree of boxes over their triangles) and the models given this frame. No
+// bounce light. Scaled so a light 3 m away counts as in the game.
+
+namespace {
+
+struct Bvh {
+   struct Node {
+      float mn[3], mx[3];
+      int left = -1, right = -1, start = 0, count = 0;
+   };
+   std::vector<Node> nodes;
+   std::vector<float> tris;   // 9 floats each
+   std::vector<int> order;
+   uint32_t serial = ~0u;
+
+   void build(std::vector<float> &&t)
+   {
+      tris = std::move(t);
+      const int n = int(tris.size() / 9);
+      order.resize(size_t(n));
+      for (int i = 0; i < n; ++i)
+         order[size_t(i)] = i;
+      nodes.clear();
+      nodes.reserve(size_t(n) * 2 / 4 + 8);
+      if (n)
+         split(0, n);
+   }
+   int split(int start, int count)
+   {
+      const int id = int(nodes.size());
+      nodes.emplace_back();
+      Node nd;
+      for (int k = 0; k < 3; ++k) {
+         nd.mn[k] = 1e30f;
+         nd.mx[k] = -1e30f;
+      }
+      float cmn[3] = {1e30f, 1e30f, 1e30f}, cmx[3] = {-1e30f, -1e30f, -1e30f};
+      for (int i = start; i < start + count; ++i) {
+         const float *t = &tris[size_t(order[size_t(i)]) * 9];
+         for (int k = 0; k < 3; ++k) {
+            const float c = (t[k] + t[3 + k] + t[6 + k]) / 3.0f;
+            cmn[k] = std::min(cmn[k], c);
+            cmx[k] = std::max(cmx[k], c);
+            for (int v = 0; v < 3; ++v) {
+               nd.mn[k] = std::min(nd.mn[k], t[v * 3 + k]);
+               nd.mx[k] = std::max(nd.mx[k], t[v * 3 + k]);
+            }
+         }
+      }
+      if (count <= 6) {
+         nd.start = start;
+         nd.count = count;
+         nodes[size_t(id)] = nd;
+         return id;
+      }
+      int axis = 0;
+      for (int k = 1; k < 3; ++k)
+         if (cmx[k] - cmn[k] > cmx[axis] - cmn[axis])
+            axis = k;
+      const int mid = start + count / 2;
+      std::nth_element(order.begin() + start, order.begin() + mid, order.begin() + start + count,
+                       [this, axis](int a, int b) {
+                          const float *x = &tris[size_t(a) * 9], *y = &tris[size_t(b) * 9];
+                          return x[axis] + x[3 + axis] + x[6 + axis] < y[axis] + y[3 + axis] + y[6 + axis];
+                       });
+      nodes[size_t(id)] = nd;
+      const int l = split(start, mid - start);
+      const int r = split(mid, start + count - mid);
+      nodes[size_t(id)].left = l;
+      nodes[size_t(id)].right = r;
+      return id;
+   }
+   // anything between o and o + d * len?
+   bool blocked(const float o[3], const float d[3], float len) const
+   {
+      if (nodes.empty())
+         return false;
+      float inv[3];
+      for (int k = 0; k < 3; ++k)
+         inv[k] = std::fabs(d[k]) > 1e-9f ? 1.0f / d[k] : 1e30f;
+      int stack[96], sp = 0;
+      stack[sp++] = 0;
+      while (sp) {
+         const Node &nd = nodes[size_t(stack[--sp])];
+         float t0 = 0.0f, t1 = len;
+         bool miss = false;
+         for (int k = 0; k < 3 && !miss; ++k) {
+            float a = (nd.mn[k] - o[k]) * inv[k], b = (nd.mx[k] - o[k]) * inv[k];
+            if (a > b)
+               std::swap(a, b);
+            t0 = std::max(t0, a);
+            t1 = std::min(t1, b);
+            miss = t0 > t1;
+         }
+         if (miss)
+            continue;
+         if (nd.left < 0) {
+            for (int i = nd.start; i < nd.start + nd.count; ++i) {
+               const float *t = &tris[size_t(order[size_t(i)]) * 9];
+               float hit;
+               if (ray_triangle(o, d, t, t + 3, t + 6, hit) && hit < len)
+                  return true;
+            }
+         } else if (sp + 2 <= 96) {
+            stack[sp++] = nd.left;
+            stack[sp++] = nd.right;
+         }
+      }
+      return false;
+   }
+};
+
+Bvh g_worldBvh;
+
+void ensure_world_bvh()
+{
+   if (g_worldBvh.serial == g_worldSerial && g_worldValid)
+      return;
+   std::vector<float> t;
+   for (const WorldGroup &g : g_world) {
+      // (see-through or not there for light: sky, water, grates)
+      if (g.flags & (kRenderRTWorldSky | kRenderRTWorldWater | kRenderRTWorldTransparent))
+         continue;
+      for (size_t k = 0; k + 2 < g.indices.size(); k += 3)
+         for (int v = 0; v < 3; ++v)
+            for (int j = 0; j < 3; ++j)
+               t.push_back(g.verts[g.indices[k + v]].position[j]);
+   }
+   g_worldBvh.build(std::move(t));
+   g_worldBvh.serial = g_worldSerial;
+}
+
+// anything given this frame between a and b (metres)?
+bool segment_blocked(const float a[3], const float b[3])
+{
+   float d[3] = {b[0] - a[0], b[1] - a[1], b[2] - a[2]};
+   const float len = std::sqrt(d[0] * d[0] + d[1] * d[1] + d[2] * d[2]);
+   if (len < 1e-4f)
+      return false;
+   for (float &x : d)
+      x /= len;
+   // stop short of the light: its own lamp's glass and fittings are round it
+   const float reach = std::max(0.0f, len - 0.12f);
+   if (g_worldBvh.blocked(a, d, reach))
+      return true;
+   float smn[3], smx[3];
+   for (int k = 0; k < 3; ++k) {
+      smn[k] = std::min(a[k], b[k]);
+      smx[k] = std::max(a[k], b[k]);
+   }
+   for (const auto &e : g_objects) {
+      const CachedObject &c = e.second;
+      if (c.givenFrame + 1 < g_frameNumber || c.passLight)
+         continue;
+      bool overlap = true;
+      for (int k = 0; k < 3 && overlap; ++k)
+         overlap = c.bmin[k] <= smx[k] && c.bmax[k] >= smn[k];
+      if (!overlap)
+         continue;
+      for (const CapturedPrim &p : c.prims) {
+         if (p.sprite || (p.flags & (RG_MESH_PRIMITIVE_TRANSLUCENT | RG_MESH_PRIMITIVE_NO_SHADOW)))
+            continue;
+         for (size_t t = 0; t + 2 < p.verts.size(); t += 3) {
+            float hit;
+            if (ray_triangle(a, d, p.verts[t].position, p.verts[t + 1].position, p.verts[t + 2].position,
+                             hit) &&
+                hit < reach)
+               return true;
+         }
+      }
+   }
+   return false;
+}
+
+} // namespace
+
+// ============================================================================
 // render_rt.h: called by the engine
 
 extern "C" {
 
 int RenderRTActive(void) { return g_active ? 1 : 0; }
+
+int RenderRTDetectionWanted(void) { return g_active && g_cfg.rtDetection && g_frameNumber > 2 ? 1 : 0; }
+
+int RenderRTPointLighting(const float pos[3], float *value)
+{
+   if (!g_active || !value)
+      return 0;
+   // asked many times a frame (each guard): once
+   static uint32_t s_frame = 0;
+   static float s_pos[3] = {1e30f, 0, 0}, s_value = 0;
+   if (s_frame == g_frameNumber && pos[0] == s_pos[0] && pos[1] == s_pos[1] && pos[2] == s_pos[2]) {
+      *value = s_value;
+      return 1;
+   }
+   ensure_world_bvh();
+   // the body: legs, middle, head (Dark units are feet)
+   const float offs[3] = {-1.6f, 0.0f, 1.3f};
+   float body[3][3];
+   for (int i = 0; i < 3; ++i) {
+      const float q[3] = {pos[0], pos[1], pos[2] + offs[i]};
+      const RgFloat3D r = to_rt(q);
+      memcpy(body[i], r.data, sizeof(body[i]));
+   }
+   // the game's own scale: a light of brightness B 3 m (9.84 ft) away gives
+   // sqrt(3)*B/32/9.84 there; RTGL1's falls off with the square of distance
+   const float kScale = 1.7320508f * 9.0f / (32.0f * 9.8425f * 4.0f);
+   float total = 0.0f;
+   for (const PendingLight &L : g_lastLights) {
+      if (L.peak <= 0.5f)
+         continue;
+      const RgFloat3D lp = to_rt(L.pos);
+      const float lumens = L.peak * 4.0f * g_cfg.light;
+      const float r = std::max(g_cfg.lightSize, 0.02f);
+      float sum = 0.0f;
+      for (int i = 0; i < 3; ++i) {
+         const float dx = lp.data[0] - body[i][0], dy = lp.data[1] - body[i][1], dz = lp.data[2] - body[i][2];
+         const float d = std::sqrt(dx * dx + dy * dy + dz * dz);
+         // as RTGL1's sphere: the solid angle it covers, over that of its disc far away
+         const float sinT = r / std::max(r, d);
+         const float omega = 2.0f * 3.14159265f * (1.0f - std::sqrt(1.0f - sinT * sinT));
+         float e = lumens * omega / (3.14159265f * r * r);
+         if (L.inner >= 0.0f && (L.dir[0] != 0 || L.dir[1] != 0 || L.dir[2] != 0)) {
+            const float dl = std::sqrt(L.dir[0] * L.dir[0] + L.dir[1] * L.dir[1] + L.dir[2] * L.dir[2]);
+            const float cosA = d > 1e-4f ? -(dx * L.dir[0] + dy * L.dir[1] + dz * L.dir[2]) / (d * dl) : 1.0f;
+            const float lo = std::min(L.outer, L.inner), hi = std::max(L.outer, L.inner);
+            float t = hi > lo ? std::clamp((cosA - lo) / (hi - lo), 0.0f, 1.0f) : (cosA >= hi ? 1.0f : 0.0f);
+            t = t * t * (3.0f - 2.0f * t);
+            e *= t * t;
+         }
+         if (e * kScale < 0.002f)
+            continue;
+         if (!segment_blocked(body[i], lp.data))
+            sum += e;
+      }
+      total += kScale * sum / 3.0f;
+   }
+   s_frame = g_frameNumber;
+   memcpy(s_pos, pos, sizeof(s_pos));
+   s_value = total;
+   *value = total;
+   return 1;
+}
+
+void RenderRTNoteLighting(float original, float traced)
+{
+   g_noteOriginal = original;
+   g_noteTraced = traced;
+}
 
 void RenderRTSceneBegin(const float pos[3], const float fwd[3], const float left[3],
                         const float up[3], float zoom, int width, int height)
