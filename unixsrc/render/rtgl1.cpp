@@ -318,7 +318,9 @@ bool g_vsync = true;
 // Test switch (panel): the scene given to the path tracer stops changing --
 // models and lights stay as they were -- while the camera still moves. What
 // still changes as you walk is then the path tracer's own doing.
-bool g_freeze = false;
+bool g_freeze = false;         // the models as they were (test)
+bool g_freezeLights = false;   // the lights as they were (test)
+int g_freezeMode = 0;          // 0 off, 1 both, 2 models only, 3 lights only
 // Test switch (panel): faces turned away from the camera, which the game culls,
 // are dropped instead of kept for shadows.
 bool g_dropBackFaces = false;
@@ -1341,7 +1343,10 @@ std::string row_value(int row)
    case kRowSmooth: return g_cfg.smoothModels ? "Smooth" : "Flat (steady)";
    case kRowLightFix: return g_cfg.lightFix ? "Moved out" : "Left as placed";
    case kRowFixtures: return g_cfg.fixturesPass ? "Let their light out" : "Block their own light";
-   case kRowFreeze: return g_freeze ? "On (frozen)" : "Off";
+   case kRowFreeze: {
+      static const char *kModes[] = {"Off", "Models and lights", "Models only", "Lights only"};
+      return kModes[std::clamp(g_freezeMode, 0, 3)];
+   }
    case kRowBackFaces: return g_dropBackFaces ? "Dropped" : "Shadows only";
    case kRowBlink: return g_blinkTest ? "On" : "Off";
    case kRowReuse: {
@@ -1454,11 +1459,15 @@ void change_row(int row, int dir)
    case kRowBackFaces: g_dropBackFaces = !g_dropBackFaces; return;   // not saved
    case kRowReuse: g_reuseTest = (g_reuseTest + dir + 4) % 4; return;   // not saved
    case kRowBlink: g_blinkTest = !g_blinkTest; g_blinkId = ~0u; return;   // not saved
-   case kRowFreeze:
-      g_freeze = !g_freeze;
-      if (g_freeze)
+   case kRowFreeze: {
+      g_freezeMode = (g_freezeMode + dir + 4) % 4;
+      g_freeze = g_freezeMode == 1 || g_freezeMode == 2;
+      const bool lights = g_freezeMode == 1 || g_freezeMode == 3;
+      if (lights && !g_freezeLights)
          g_frozenLights = g_lastLights;
+      g_freezeLights = lights;
       return;   // not saved
+   }
    case kRowRough:
       g_cfg.minRoughness = std::clamp(std::round(g_cfg.minRoughness * 20.0f) / 20.0f + 0.05f * dir,
                                       0.0f, 1.0f);
@@ -1984,6 +1993,39 @@ void inspect_view()
    };
    out("\n=== RT inspect #%d: camera (%.2f %.2f %.2f) m, looking (%.3f %.3f %.3f)\n", n, o[0], o[1],
        o[2], d[0], d[1], d[2]);
+   {
+      // every triangle of the models within 10 m of the camera, as given to
+      // the path tracer: two of these from different places show whether the
+      // shadow-casting geometry changes with where you stand
+      char gpath[64];
+      snprintf(gpath, sizeof(gpath), "/inspect-%d-geometry.txt", n);
+      if (FILE *g = fopen((dir + gpath).c_str(), "w")) {
+         fprintf(g, "camera %.3f %.3f %.3f frame %u\n", o[0], o[1], o[2], g_frameNumber);
+         for (const auto &e : g_objects) {
+            const CachedObject &c = e.second;
+            const float dx = c.center[0] - o[0], dy = c.center[1] - o[1], dz = c.center[2] - o[2];
+            if (dx * dx + dy * dy + dz * dz > 100.0f)
+               continue;
+            char name[128];
+            RenderRTGameObjectName(e.first, name, sizeof(name));
+            fprintf(g, "object %u \"%s\" drawn %u whole %d pass %d\n", e.first, name, c.frame,
+                    int(c.whole), int(c.passLight));
+            for (const CapturedPrim &p : c.prims) {
+               if (p.sprite)
+                  continue;
+               for (size_t t = 0; t + 2 < p.verts.size(); t += 3) {
+                  fprintf(g, "%c", (p.flags & RG_MESH_PRIMITIVE_SHADOW_ONLY) ? 'S'
+                                   : (p.flags & RG_MESH_PRIMITIVE_NO_SHADOW) ? 'N' : 'V');
+                  for (int k = 0; k < 3; ++k)
+                     fprintf(g, " %.3f %.3f %.3f", p.verts[t + k].position[0],
+                             p.verts[t + k].position[1], p.verts[t + k].position[2]);
+                  fprintf(g, " %s\n", p.texture.c_str());
+               }
+            }
+         }
+         fclose(g);
+      }
+   }
    char what[160];
    if (best >= 1e29f) {
       out("nothing hit\n");
@@ -2818,7 +2860,7 @@ void smooth_flicker()
 // set does not flicker between frames.
 void flush_lights()
 {
-   if (g_freeze) {
+   if (g_freezeLights) {
       for (const PendingLight &L : g_frozenLights)
          upload_light(L);
       g_pendingLights.clear();
