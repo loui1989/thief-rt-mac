@@ -630,6 +630,7 @@ void note_dropped(uint32_t obj, const char *why)
       g_droppedObjects.pop_front();
 }
 uint32_t g_currentObject = 0;
+uint32_t g_emptyCaptures = 0, g_pieceCaptures = 0;   // for the inspector
 bool g_currentWhole = false;
 bool g_currentNoShadow = false;
 std::vector<CapturedPrim> g_currentCapture;
@@ -2446,6 +2447,8 @@ void inspect_view()
       const RgFloat3D cam = to_rt(g_camera.pos);
       list_models(cam.data, 8.0f, "models within 8 m of the camera");
    }
+   out("model draws so far that captured nothing: %u; drawn only in pieces (the whole model kept): %u\n",
+       g_emptyCaptures, g_pieceCaptures);
    if (!g_droppedObjects.empty()) {
       out("models recently dropped (not drawn by the game and moved or gone):\n");
       for (const DroppedObject &d : g_droppedObjects) {
@@ -3045,7 +3048,33 @@ void RenderRTObjectEnd(void)
       g_currentCapture.clear();
       return;
    }
+   // Nothing of the model reached the capture this time (a piece of a model
+   // split across cells that its cell clipped away, a draw that bailed
+   // out): that says nothing about the model, so what is known of it stays.
+   // Replacing it with nothing made models vanish from the traced scene
+   // while the game still drew them.
+   if (g_currentCapture.empty()) {
+      ++g_emptyCaptures;
+      return;
+   }
    CachedObject &c = g_objects[obj];
+   if (c.frame != g_frameNumber && !g_currentWhole && c.whole && !c.prims.empty() && c.posed) {
+      // Only a piece of a model this time (drawn split across cells, each
+      // piece clipped to its cell), where the whole model is known and has
+      // not moved: the whole one stays, else the rest of it -- and its
+      // shadow -- went missing until the game next drew it in one piece.
+      float pose[6];
+      bool same = RenderRTGameObjectPose(obj, pose) != 0;
+      for (int k = 0; k < 3 && same; ++k)
+         same = std::fabs(pose[k] - c.pose[k]) < 0.01f;
+      same = same && pose[3] == c.pose[3] && pose[4] == c.pose[4] && pose[5] == c.pose[5];
+      if (same) {
+         ++g_pieceCaptures;
+         c.frame = g_frameNumber;
+         g_currentCapture.clear();
+         return;
+      }
+   }
    if (c.frame == g_frameNumber) {
       // drawn twice this frame (split across cells): keep both parts, unless
       // the first one already had all of it
