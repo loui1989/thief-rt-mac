@@ -961,6 +961,22 @@ void objmodelInit(void)
 #endif
 }
 
+// The content picker activates a fan mission in place, after objmodelInit:
+// the FM's own DARK.CFG (ObjTextures16 / MeshTextures16, which put obj\txt16
+// on the model texture path) is read only then, so the paths are made again.
+// Without it an FM's txt16 model textures fell back to the checkerboard when
+// it was chosen from the menu, though not when launched with fm=.
+void objmodelFreePaths();
+void objmodelRebuildResPaths(void)
+{
+   objmodelFreePaths();
+   allow_16bit_obj_textures=config_is_defined("ObjTextures16") ||
+                            config_is_defined("MeshTextures16");
+   objmodelSetupRes();
+   config_get_int("character_detail",&g_highpoly_characters);
+   objmodelRefreshResPaths(g_highpoly_characters);
+}
+
 void objmodelFreePaths()
 {
    SafeRelease(MDModelPath);

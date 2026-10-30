@@ -608,6 +608,7 @@ struct CachedObject {
    bool settled = false;     // prims made steady and given normals for hash
    bool keptOut = false;     // given out of view last frame
    uint32_t givenFrame = 0;  // last given to the path tracer
+   size_t givenTris = 0;     // how many triangles it had when last given
    // each texture's look as a face turned toward the camera (flags, glow,
    // colour), for its faces captured turned away: kept across frames
    std::unordered_map<std::string, CapturedPrim> looks;
@@ -615,6 +616,12 @@ struct CachedObject {
 
 // cached objects farther than this from the camera are not drawn out of view
 constexpr float kKeepDistance = 60.0f;
+
+// The log of models near the camera that leave the traced scene or lose much
+// of their shape (logs/thief.log), to find what makes models pop in and out.
+int g_modelLogLines = 0;
+constexpr int kModelLogMax = 400;
+void log_model_change(uint32_t obj, const char *what, ...);
 
 std::unordered_map<uint32_t, CachedObject> g_objects;
 uint32_t g_frameNumber = 1;
@@ -949,6 +956,10 @@ void upload_objects()
          const float ext = std::max({c.bmax[0] - c.bmin[0], c.bmax[1] - c.bmin[1], c.bmax[2] - c.bmin[2], 0.0f});
          const float keepAt = std::clamp(12.0f + 12.0f * ext, 12.0f, 40.0f) + (c.keptOut ? 8.0f : 0.0f);
          if (dx * dx + dy * dy + dz * dz > std::min(keepAt, kKeepDistance) * std::min(keepAt, kKeepDistance)) {
+            if (c.givenFrame + 1 == g_frameNumber && dx * dx + dy * dy + dz * dz < 20.0f * 20.0f)
+               log_model_change(obj, "leaves the scene: not drawn by the game for %u frames, %.1f m away (kept to %.1f m)",
+                                g_frameNumber - c.frame, std::sqrt(dx * dx + dy * dy + dz * dz),
+                                std::min(keepAt, kKeepDistance));
             c.keptOut = false;
             ++it;   // remembered, but too far away to shadow anything seen
             continue;
@@ -960,6 +971,10 @@ void upload_objects()
                            std::fabs(pose[2] - c.pose[2]) < 0.01f &&
                            pose[3] == c.pose[3] && pose[4] == c.pose[4] && pose[5] == c.pose[5];
          if (!keep) {
+            if (c.givenFrame + 1 == g_frameNumber && dx * dx + dy * dy + dz * dz < 20.0f * 20.0f)
+               log_model_change(obj, "leaves the scene: not drawn by the game this frame and %s, %.1f m away",
+                                c.posed ? "moved since it was last drawn" : "no position known",
+                                std::sqrt(dx * dx + dy * dy + dz * dz));
             note_dropped(obj, c.posed ? "moved since it was last drawn" : "no position known");
             it = g_objects.erase(it);
             continue;
@@ -967,6 +982,7 @@ void upload_objects()
          draw = true;
          ++g_cachedDrawn;
       }
+      const bool givenLast = c.givenFrame + 1 == g_frameNumber;
       c.givenFrame = g_frameNumber;
       c.passLight = false;
       if (g_cfg.fixturesPass) {
@@ -982,11 +998,41 @@ void upload_objects()
                }
             }
       }
+      size_t tris = 0;
+      for (const CapturedPrim &p : c.prims)
+         if (!(p.flags & RG_MESH_PRIMITIVE_SHADOW_ONLY))
+            tris += p.verts.size() / 3;
+      if (givenLast && c.givenTris > 0 && tris * 10 < c.givenTris * 7) {
+         const RgFloat3D cam = to_rt(g_camera.pos);
+         const float dx = c.center[0] - cam.data[0], dy = c.center[1] - cam.data[1], dz = c.center[2] - cam.data[2];
+         if (dx * dx + dy * dy + dz * dz < 20.0f * 20.0f)
+            log_model_change(obj, "shrinks from %zu to %zu seen triangles (%s, drawn %s)", c.givenTris, tris,
+                             c.whole ? "whole" : "in pieces", c.frame == g_frameNumber ? "this frame" : "earlier, kept");
+      }
+      c.givenTris = tris;
       const std::vector<uint64_t> ids = object_prim_ids(obj, c.prims);
       for (size_t i = 0; i < c.prims.size(); ++i)
          upload_captured(ids[i], c.prims[i], c.passLight);
       ++it;
    }
+}
+
+void log_model_change(uint32_t obj, const char *what, ...)
+{
+   if (g_modelLogLines >= kModelLogMax)
+      return;
+   if (++g_modelLogLines == kModelLogMax) {
+      fprintf(stderr, "RT: (no more model changes logged)\n");
+      return;
+   }
+   char name[128];
+   RenderRTGameObjectName(obj, name, sizeof(name));
+   char text[256];
+   va_list args;
+   va_start(args, what);
+   vsnprintf(text, sizeof(text), what, args);
+   va_end(args);
+   fprintf(stderr, "RT: model %u \"%s\" %s (frame %u)\n", obj, name, text, g_frameNumber);
 }
 
 // ---- world representation -------------------------------------------------

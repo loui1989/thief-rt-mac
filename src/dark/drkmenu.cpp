@@ -32,6 +32,7 @@
 #include <filepanl.h>
 #include <platform_services.h>
 #include <resapp.h>
+extern "C" void objmodelRebuildResPaths(void);
 #include <scrptprp.h>
 
 #pragma pack(push, 8)
@@ -553,6 +554,7 @@ protected:
       // only republish content-owned search paths before constructing the
       // first database and switching to the ordinary main menu.
       ResSysRefreshContentPath();
+      objmodelRebuildResPaths();
       RefreshScriptModulePath();
       dbBuildDefault();
 
