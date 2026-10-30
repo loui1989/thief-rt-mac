@@ -45,6 +45,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <deque>
+#include <map>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -94,6 +95,7 @@ struct Settings {
    float ambient = 1.0f;      // the level's ambient light, as a faint glow of every surface
    int candidates = 24;       // lights tried per pixel and per bounce (RTGL1: no rays, ALU only)
    int response = 1;          // how fast lighting changes show: 0 calm (Blood RT), 1 quick, 2 instant
+   bool steadyFaces = true;   // models' faces seen or shadow-only by a fixed rule, not by the view
    bool lightFix = true;      // lights moved out of the walls they sit in
    bool fixturesPass = true;  // a torch or small lamp lets its own light out
    bool lightCull = true;     // skip lights the level's lighting has on no cell near or in view
@@ -155,6 +157,7 @@ void load_settings()
       else if (k == "smooth_models") g_cfg.smoothModels = value != 0;
       else if (k == "candidates") g_cfg.candidates = std::clamp(int(value), 4, 32);
       else if (k == "response") g_cfg.response = std::clamp(int(value), 0, 2);
+      else if (k == "steady_faces") g_cfg.steadyFaces = value != 0;
       else if (k == "light_fix") g_cfg.lightFix = value != 0;
       else if (k == "fixtures_pass") g_cfg.fixturesPass = value != 0;
       else if (k == "ambient") g_cfg.ambient = std::clamp(value, 0.0f, 20.0f);
@@ -175,13 +178,13 @@ void save_settings()
       return;
    fprintf(f, "upscale = %d\nscale = %.2f\nfps = %d\nvsync = %d\nlight = %.3f\nsky = %.3f\n"
               "light_size = %.3f\nglow = %.3f\nwater = %d\nsprite_glow = %.3f\ngi = %d\n"
-              "volumetric = %d\ndynres = %d\nmax_lights = %d\nmin_roughness = %.2f\nlight_cull = %d\nflicker = %d\nambient = %.3f\nsmooth_models = %d\nfixtures_pass = %d\nlight_fix = %d\nresponse = %d\ncandidates = %d\n",
+              "volumetric = %d\ndynres = %d\nmax_lights = %d\nmin_roughness = %.2f\nlight_cull = %d\nflicker = %d\nambient = %.3f\nsmooth_models = %d\nfixtures_pass = %d\nlight_fix = %d\nresponse = %d\ncandidates = %d\nsteady_faces = %d\n",
            g_cfg.upscale, g_cfg.scale, int(g_cfg.fps), int(g_cfg.vsync), g_cfg.light, g_cfg.sky,
            g_cfg.lightSize, g_cfg.glow, g_cfg.water, g_cfg.spriteGlow, g_cfg.gi,
            int(g_cfg.volumetric), g_cfg.dynres, g_cfg.maxLights, g_cfg.minRoughness,
            int(g_cfg.lightCull), g_cfg.flicker, g_cfg.ambient, int(g_cfg.smoothModels),
            int(g_cfg.fixturesPass), int(g_cfg.lightFix), g_cfg.response,
-           g_cfg.candidates);
+           g_cfg.candidates, int(g_cfg.steadyFaces));
    fclose(f);
 }
 
@@ -586,6 +589,9 @@ struct CachedObject {
    uint64_t normalsHash = 0;
    float bmin[3] = {}, bmax[3] = {};   // meters
    bool passLight = false;   // a small fixture around a light: it does not block it
+   // each texture's look as a face turned toward the camera (flags, glow,
+   // colour), for its faces captured turned away: kept across frames
+   std::unordered_map<std::string, CapturedPrim> looks;
 };
 
 // cached objects farther than this from the camera are not drawn out of view
@@ -689,6 +695,112 @@ void compute_normals(CapturedPrim *prims, size_t count)
          memcpy(n, mine, sizeof(n));
       dst.normalPacked = rt.rgUtilPackNormal ? rt.rgUtilPackNormal(n[0], n[1], n[2]) : 0;
    }
+}
+
+// The game draws the faces of a model that are turned toward the camera; the
+// ones turned away were captured too, as shadow-only. Which is which changed
+// with every step: a face the path tracer's bounce light (and what it sees
+// in a reflection) did not see one moment, it did the next, and a glass pane
+// captured from behind was a solid shadow caster -- the shadows and light
+// that came and went as you walked up to a lamp (frozen models: steady).
+// So every face is given as seen, by the look its texture has from the front;
+// only one of each pair of coincident opposite faces (a two-sided part) stays
+// shadow-only, chosen by a fixed rule, so the two do not fight. The order of
+// everything is fixed too, so the same model gives the same primitives.
+void steady_faces(CachedObject &c)
+{
+   for (const CapturedPrim &p : c.prims)
+      if (!(p.flags & RG_MESH_PRIMITIVE_SHADOW_ONLY) && !p.sprite) {
+         CapturedPrim look = p;
+         look.verts.clear();
+         c.looks[p.texture] = look;
+      }
+   struct Tri {
+      std::array<int64_t, 9> key;   // the corners, 2 mm grid, sorted
+      float n[3];
+      const CapturedPrim *from;
+      size_t at;
+      bool shadowOnly;
+   };
+   std::vector<Tri> tris;
+   std::vector<CapturedPrim> keep;   // sprites: as they are
+   for (const CapturedPrim &p : c.prims) {
+      if (p.sprite) {
+         keep.push_back(p);
+         continue;
+      }
+      for (size_t t = 0; t + 2 < p.verts.size(); t += 3) {
+         Tri tri{};
+         std::array<std::array<int64_t, 3>, 3> q;
+         for (int k = 0; k < 3; ++k)
+            for (int j = 0; j < 3; ++j)
+               q[k][j] = int64_t(std::llround(p.verts[t + k].position[j] * 500.0f));
+         std::sort(q.begin(), q.end());
+         for (int k = 0; k < 3; ++k)
+            for (int j = 0; j < 3; ++j)
+               tri.key[k * 3 + j] = q[k][j];
+         const float *a = p.verts[t].position, *b = p.verts[t + 1].position, *e = p.verts[t + 2].position;
+         const float e1[3] = {b[0] - a[0], b[1] - a[1], b[2] - a[2]};
+         const float e2[3] = {e[0] - a[0], e[1] - a[1], e[2] - a[2]};
+         tri.n[0] = e1[1] * e2[2] - e1[2] * e2[1];
+         tri.n[1] = e1[2] * e2[0] - e1[0] * e2[2];
+         tri.n[2] = e1[0] * e2[1] - e1[1] * e2[0];
+         tri.from = &p;
+         tri.at = t;
+         tris.push_back(tri);
+      }
+   }
+   // a fixed order: by corners, then by facing
+   const float ref[3] = {0.267f, 0.535f, 0.802f};
+   auto facing = [&ref](const Tri &t) { return t.n[0] * ref[0] + t.n[1] * ref[1] + t.n[2] * ref[2]; };
+   std::sort(tris.begin(), tris.end(), [&](const Tri &x, const Tri &y) {
+      if (x.key != y.key)
+         return x.key < y.key;
+      return facing(x) > facing(y);
+   });
+   // the same corners again: a coincident face; facing the other way, it is
+   // the back of a two-sided part and only casts shadows
+   for (size_t i = 1; i < tris.size(); ++i)
+      if (tris[i].key == tris[i - 1].key) {
+         const float d = tris[i].n[0] * tris[i - 1].n[0] + tris[i].n[1] * tris[i - 1].n[1] +
+                         tris[i].n[2] * tris[i - 1].n[2];
+         tris[i].shadowOnly = true;   // the same way, a duplicate: shadow-only too
+         (void)d;
+      }
+   // regroup: by texture and final look, in a fixed order
+   std::map<std::pair<std::string, int>, CapturedPrim> out;
+   for (const Tri &t : tris) {
+      const CapturedPrim &src = *t.from;
+      const bool wasShadow = (src.flags & RG_MESH_PRIMITIVE_SHADOW_ONLY) != 0;
+      const CapturedPrim *look = &src;
+      bool shadowOnly = t.shadowOnly;
+      if (wasShadow && !shadowOnly) {
+         auto f = c.looks.find(src.texture);
+         if (f == c.looks.end())
+            shadowOnly = true;   // never seen from the front yet: as it was
+         else
+            look = &f->second;
+      }
+      const std::pair<std::string, int> key{src.texture, shadowOnly ? 1 : 0};
+      auto it = out.find(key);
+      if (it == out.end()) {
+         CapturedPrim p = shadowOnly ? src : *look;
+         p.verts.clear();
+         if (shadowOnly) {
+            p.flags = RG_MESH_PRIMITIVE_SHADOW_ONLY | (src.flags & RG_MESH_PRIMITIVE_ALPHA_TESTED);
+            p.emissive = 0.0f;
+         }
+         it = out.emplace(key, std::move(p)).first;
+      }
+      for (int k = 0; k < 3; ++k)
+         it->second.verts.push_back(src.verts[t.at + k]);
+   }
+   std::vector<CapturedPrim> prims;
+   for (auto &e : out)
+      prims.push_back(std::move(e.second));
+   for (CapturedPrim &p : keep)
+      prims.push_back(std::move(p));
+   c.prims = std::move(prims);
 }
 
 void upload_captured(uint64_t id, const CapturedPrim &p, bool passLight = false)
@@ -1288,7 +1400,7 @@ const char *kUpscaleNames[] = {"Off",
 
 enum UiRow {
    kRowUpscale, kRowScale, kRowDynres, kRowBounces, kRowLights, kRowCandidates, kRowLightCull, kRowResponse, kRowFlicker, kRowVolumetric, kRowVsync,
-   kRowFps, kRowLight, kRowAmbient, kRowSky, kRowLightSize, kRowRough, kRowSmooth, kRowFixtures, kRowLightFix, kRowGlow, kRowWater,
+   kRowFps, kRowLight, kRowAmbient, kRowSky, kRowLightSize, kRowRough, kRowSmooth, kRowSteady, kRowFixtures, kRowLightFix, kRowGlow, kRowWater,
    kRowDebug, kRowFreeze, kRowBackFaces, kRowReuse, kRowBlink, kRowInspect, kRowReset, kRowCount
 };
 
@@ -1296,7 +1408,7 @@ const char *kRowLabels[kRowCount] = {
    "Upscaler", "Render resolution", "Dynamic resolution", "Bounce light", "Lights traced",
    "Lights tried per pixel", "Lights behind walls", "Light changes", "Light flicker",
    "Volumetric light", "VSync", "FPS counter", "Light brightness", "Ambient light", "Sky brightness",
-   "Light size (soft shadows)", "Surface roughness", "Model shading", "Torches and lamps", "Lights in walls", "Lamp glow", "Water",
+   "Light size (soft shadows)", "Surface roughness", "Model shading", "Model faces", "Torches and lamps", "Lights in walls", "Lamp glow", "Water",
    "Debug view", "Freeze scene (test)", "Back faces (test)", "Light sampling (test)", "Blink nearest light (test)", "Inspect centre of view", "Reset to defaults",
 };
 
@@ -1342,6 +1454,7 @@ std::string row_value(int row)
    case kRowLightSize: snprintf(buf, sizeof(buf), "%.2f m", g_cfg.lightSize); return buf;
    case kRowSmooth: return g_cfg.smoothModels ? "Smooth" : "Flat (steady)";
    case kRowLightFix: return g_cfg.lightFix ? "Moved out" : "Left as placed";
+   case kRowSteady: return g_cfg.steadyFaces ? "Steady (all seen)" : "As the game draws them";
    case kRowFixtures: return g_cfg.fixturesPass ? "Let their light out" : "Block their own light";
    case kRowFreeze: {
       static const char *kModes[] = {"Off", "Models and lights", "Models only", "Lights only"};
@@ -1428,6 +1541,7 @@ void change_row(int row, int dir)
    case kRowLightCull: g_cfg.lightCull = !g_cfg.lightCull; break;
    case kRowSmooth: g_cfg.smoothModels = !g_cfg.smoothModels; break;
    case kRowFixtures: g_cfg.fixturesPass = !g_cfg.fixturesPass; break;
+   case kRowSteady: g_cfg.steadyFaces = !g_cfg.steadyFaces; break;
    case kRowLightFix: g_cfg.lightFix = !g_cfg.lightFix; g_lightFixes.clear(); break;
    case kRowCandidates: {
       static const int kSteps[] = {8, 12, 16, 24, 32};
@@ -2510,11 +2624,14 @@ void RenderRTObjectEnd(void)
             c.bmax[k] = std::max(c.bmax[k], v.position[k]);
          }
    }
+   if (g_cfg.steadyFaces && c.whole)
+      steady_faces(c);
+   const uint64_t shapeHash = hash_prims(c.prims);
    // the normals are recomputed only when the shape changed
    size_t total = 0;
    for (const CapturedPrim &p : c.prims)
       total += p.verts.size();
-   if (c.normals.size() == total && c.normalsHash == c.hash) {
+   if (c.normals.size() == total && c.normalsHash == shapeHash) {
       size_t i = 0;
       for (CapturedPrim &p : c.prims)
          for (RgPrimitiveVertex &v : p.verts)
@@ -2525,7 +2642,7 @@ void RenderRTObjectEnd(void)
       for (const CapturedPrim &p : c.prims)
          for (const RgPrimitiveVertex &v : p.verts)
             c.normals.push_back(v.normalPacked);
-      c.normalsHash = c.hash;
+      c.normalsHash = shapeHash;
    }
    g_currentCapture.clear();
 }
