@@ -92,6 +92,7 @@ struct Settings {
    int flicker = 0;           // flickering lights: 0 smoothed, 1 as the game, 2 nearly steady
    bool smoothModels = false; // models shaded smooth (their normals blended across edges)
    float ambient = 1.0f;      // the level's ambient light, as a faint glow of every surface
+   int candidates = 24;       // lights tried per pixel and per bounce (RTGL1: no rays, ALU only)
    int response = 1;          // how fast lighting changes show: 0 calm (Blood RT), 1 quick, 2 instant
    bool lightFix = true;      // lights moved out of the walls they sit in
    bool fixturesPass = true;  // a torch or small lamp lets its own light out
@@ -152,6 +153,7 @@ void load_settings()
       else if (k == "max_lights") g_cfg.maxLights = std::clamp(int(value), 0, 4096);
       else if (k == "flicker") g_cfg.flicker = std::clamp(int(value), 0, 2);
       else if (k == "smooth_models") g_cfg.smoothModels = value != 0;
+      else if (k == "candidates") g_cfg.candidates = std::clamp(int(value), 4, 32);
       else if (k == "response") g_cfg.response = std::clamp(int(value), 0, 2);
       else if (k == "light_fix") g_cfg.lightFix = value != 0;
       else if (k == "fixtures_pass") g_cfg.fixturesPass = value != 0;
@@ -173,12 +175,13 @@ void save_settings()
       return;
    fprintf(f, "upscale = %d\nscale = %.2f\nfps = %d\nvsync = %d\nlight = %.3f\nsky = %.3f\n"
               "light_size = %.3f\nglow = %.3f\nwater = %d\nsprite_glow = %.3f\ngi = %d\n"
-              "volumetric = %d\ndynres = %d\nmax_lights = %d\nmin_roughness = %.2f\nlight_cull = %d\nflicker = %d\nambient = %.3f\nsmooth_models = %d\nfixtures_pass = %d\nlight_fix = %d\nresponse = %d\n",
+              "volumetric = %d\ndynres = %d\nmax_lights = %d\nmin_roughness = %.2f\nlight_cull = %d\nflicker = %d\nambient = %.3f\nsmooth_models = %d\nfixtures_pass = %d\nlight_fix = %d\nresponse = %d\ncandidates = %d\n",
            g_cfg.upscale, g_cfg.scale, int(g_cfg.fps), int(g_cfg.vsync), g_cfg.light, g_cfg.sky,
            g_cfg.lightSize, g_cfg.glow, g_cfg.water, g_cfg.spriteGlow, g_cfg.gi,
            int(g_cfg.volumetric), g_cfg.dynres, g_cfg.maxLights, g_cfg.minRoughness,
            int(g_cfg.lightCull), g_cfg.flicker, g_cfg.ambient, int(g_cfg.smoothModels),
-           int(g_cfg.fixturesPass), int(g_cfg.lightFix), g_cfg.response);
+           int(g_cfg.fixturesPass), int(g_cfg.lightFix), g_cfg.response,
+           g_cfg.candidates);
    fclose(f);
 }
 
@@ -1282,14 +1285,14 @@ const char *kUpscaleNames[] = {"Off",
                                "MetalFX Custom"};
 
 enum UiRow {
-   kRowUpscale, kRowScale, kRowDynres, kRowBounces, kRowLights, kRowLightCull, kRowResponse, kRowFlicker, kRowVolumetric, kRowVsync,
+   kRowUpscale, kRowScale, kRowDynres, kRowBounces, kRowLights, kRowCandidates, kRowLightCull, kRowResponse, kRowFlicker, kRowVolumetric, kRowVsync,
    kRowFps, kRowLight, kRowAmbient, kRowSky, kRowLightSize, kRowRough, kRowSmooth, kRowFixtures, kRowLightFix, kRowGlow, kRowWater,
    kRowDebug, kRowFreeze, kRowBackFaces, kRowReuse, kRowBlink, kRowInspect, kRowReset, kRowCount
 };
 
 const char *kRowLabels[kRowCount] = {
    "Upscaler", "Render resolution", "Dynamic resolution", "Bounce light", "Lights traced",
-   "Lights behind walls", "Light changes", "Light flicker",
+   "Lights tried per pixel", "Lights behind walls", "Light changes", "Light flicker",
    "Volumetric light", "VSync", "FPS counter", "Light brightness", "Ambient light", "Sky brightness",
    "Light size (soft shadows)", "Surface roughness", "Model shading", "Torches and lamps", "Lights in walls", "Lamp glow", "Water",
    "Debug view", "Freeze scene (test)", "Back faces (test)", "Light sampling (test)", "Blink nearest light (test)", "Inspect centre of view", "Reset to defaults",
@@ -1322,6 +1325,7 @@ std::string row_value(int row)
       snprintf(buf, sizeof(buf), "nearest %d", g_cfg.maxLights);
       return buf;
    case kRowLightCull: return g_cfg.lightCull ? "Skipped" : "Traced";
+   case kRowCandidates: snprintf(buf, sizeof(buf), "%d", g_cfg.candidates); return buf;
    case kRowResponse: return g_cfg.response == 0 ? "Calm (slow to show)" : g_cfg.response == 2 ? "Instant (noisier)" : "Quick";
    case kRowFlicker: return g_cfg.flicker == 1 ? "As the game" : g_cfg.flicker == 2 ? "Nearly steady" : "Smoothed";
    case kRowVolumetric: return g_cfg.volumetric ? "On" : "Off";
@@ -1420,6 +1424,14 @@ void change_row(int row, int dir)
    case kRowSmooth: g_cfg.smoothModels = !g_cfg.smoothModels; break;
    case kRowFixtures: g_cfg.fixturesPass = !g_cfg.fixturesPass; break;
    case kRowLightFix: g_cfg.lightFix = !g_cfg.lightFix; g_lightFixes.clear(); break;
+   case kRowCandidates: {
+      static const int kSteps[] = {8, 12, 16, 24, 32};
+      int i = 0;
+      while (i < 4 && kSteps[i] < g_cfg.candidates)
+         ++i;
+      g_cfg.candidates = kSteps[std::clamp(i + dir, 0, 4)];
+      break;
+   }
    case kRowResponse: g_cfg.response = (g_cfg.response + dir + 3) % 3; break;
    case kRowFlicker: g_cfg.flicker = (g_cfg.flicker + dir + 3) % 3; break;
    case kRowVolumetric: g_cfg.volumetric = !g_cfg.volumetric; break;
@@ -1719,7 +1731,7 @@ void draw_frame(bool sceneDrawn)
       // 0: bounce light traced for half of the pixels each frame
       .indirectSamples = (g_cfg.gi == 0 || g_cfg.gi == 3) ? 0u : 1u,
       // more candidate lights per pixel (no extra rays): Thief has many small lights
-      .restirInitialSamples = 12,
+      .restirInitialSamples = uint32_t(g_cfg.candidates),
       .restirSpatialSamples = (g_reuseTest == 1 || g_reuseTest == 2) ? 0u : 8u,
       // in pixels: 30 at ~1150 wide (Blood RT's), wider at higher resolutions so
       // neighbours are taken from as far across the surface as there
@@ -2908,6 +2920,29 @@ void flush_lights()
       std::unordered_map<uint32_t, bool> now;
       for (const PendingLight &L : g_pendingLights)
          now[L.id] = true;
+      {
+         // the traced set's changes, for matching against lighting that pops
+         static int s_lines = 0;
+         std::unordered_map<uint32_t, bool> before;
+         for (const PendingLight &L : s_prev)
+            before[L.id] = true;
+         auto dist = [&cam](const PendingLight &L) {
+            const RgFloat3D p = to_rt(L.pos);
+            const float dx = p.data[0] - cam.data[0], dy = p.data[1] - cam.data[1],
+                        dz = p.data[2] - cam.data[2];
+            return std::sqrt(dx * dx + dy * dy + dz * dz);
+         };
+         if (!s_prev.empty() && s_lines < 4000) {
+            for (const PendingLight &L : g_pendingLights)
+               if (!before.count(L.id) && s_lines++ < 4000)
+                  fprintf(stderr, "RT: light %u joins the traced set, %.1f m away (frame %u)\n", L.id,
+                          dist(L), g_frameNumber);
+            for (const PendingLight &L : s_prev)
+               if (!now.count(L.id) && s_lines++ < 4000)
+                  fprintf(stderr, "RT: light %u leaves the traced set, %.1f m away (frame %u)\n", L.id,
+                          dist(L), g_frameNumber);
+         }
+      }
       for (const PendingLight &L : s_prev)
          if (!now.count(L.id) && !s_fading.count(L.id))
             s_fading[L.id] = {L, 30};
