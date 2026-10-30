@@ -2553,6 +2553,20 @@ void RenderRTLight(uint32_t id, const float pos[3], const float rgb[3], float ra
    if (!g_inScene)
       return;
    const float peak = std::max({rgb[0], rgb[1], rgb[2]});
+   {
+      // a timeline of brightness changes (a doused torch: at once, or a fade?)
+      static std::unordered_map<uint32_t, float> s_last;
+      static int s_lines = 0;
+      static const auto s_start = std::chrono::steady_clock::now();
+      auto it = s_last.find(id);
+      if (it != s_last.end() && std::fabs(it->second - peak) >= 1.0f && s_lines < 3000) {
+         ++s_lines;
+         fprintf(stderr, "RT: light %u brightness %.1f -> %.1f at %.2f s\n", id, it->second, peak,
+                 std::chrono::duration<float>(std::chrono::steady_clock::now() - s_start).count());
+      }
+      if (it == s_last.end() || std::fabs(it->second - peak) >= 1.0f)
+         s_last[id] = peak;
+   }
    if (peak <= 0.5f) {
       PendingLight d;
       d.id = id;
