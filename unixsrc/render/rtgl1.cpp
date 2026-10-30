@@ -92,6 +92,7 @@ struct Settings {
    int flicker = 0;           // flickering lights: 0 smoothed, 1 as the game, 2 nearly steady
    bool smoothModels = false; // models shaded smooth (their normals blended across edges)
    float ambient = 1.0f;      // the level's ambient light, as a faint glow of every surface
+   bool lightFix = true;      // lights moved out of the walls they sit in
    bool fixturesPass = true;  // a torch or small lamp lets its own light out
    bool lightCull = true;     // skip lights the level's lighting has on no cell near or in view
    float minRoughness = 0.7f; // no surface glossier than this (1: no glossy highlights)
@@ -150,6 +151,7 @@ void load_settings()
       else if (k == "max_lights") g_cfg.maxLights = std::clamp(int(value), 0, 4096);
       else if (k == "flicker") g_cfg.flicker = std::clamp(int(value), 0, 2);
       else if (k == "smooth_models") g_cfg.smoothModels = value != 0;
+      else if (k == "light_fix") g_cfg.lightFix = value != 0;
       else if (k == "fixtures_pass") g_cfg.fixturesPass = value != 0;
       else if (k == "ambient") g_cfg.ambient = std::clamp(value, 0.0f, 20.0f);
       else if (k == "light_cull") g_cfg.lightCull = value != 0;
@@ -169,12 +171,12 @@ void save_settings()
       return;
    fprintf(f, "upscale = %d\nscale = %.2f\nfps = %d\nvsync = %d\nlight = %.3f\nsky = %.3f\n"
               "light_size = %.3f\nglow = %.3f\nwater = %d\nsprite_glow = %.3f\ngi = %d\n"
-              "volumetric = %d\ndynres = %d\nmax_lights = %d\nmin_roughness = %.2f\nlight_cull = %d\nflicker = %d\nambient = %.3f\nsmooth_models = %d\nfixtures_pass = %d\n",
+              "volumetric = %d\ndynres = %d\nmax_lights = %d\nmin_roughness = %.2f\nlight_cull = %d\nflicker = %d\nambient = %.3f\nsmooth_models = %d\nfixtures_pass = %d\nlight_fix = %d\n",
            g_cfg.upscale, g_cfg.scale, int(g_cfg.fps), int(g_cfg.vsync), g_cfg.light, g_cfg.sky,
            g_cfg.lightSize, g_cfg.glow, g_cfg.water, g_cfg.spriteGlow, g_cfg.gi,
            int(g_cfg.volumetric), g_cfg.dynres, g_cfg.maxLights, g_cfg.minRoughness,
            int(g_cfg.lightCull), g_cfg.flicker, g_cfg.ambient, int(g_cfg.smoothModels),
-           int(g_cfg.fixturesPass));
+           int(g_cfg.fixturesPass), int(g_cfg.lightFix));
    fclose(f);
 }
 
@@ -326,6 +328,13 @@ struct PendingLight {
    bool reaches = true;   // shines on a cell near the camera or in view
 };
 std::vector<PendingLight> g_pendingLights;
+// lights moved out of walls (see fix_light_position)
+struct LightFix {
+   float offset[3];   // meters
+   float before;      // clearance found, meters
+   bool done;
+};
+std::unordered_map<uint64_t, LightFix> g_lightFixes;
 uint32_t g_lightsTotal = 0, g_frameLightsShown = 0, g_lightsReaching = 0;
 std::vector<PendingLight> g_lastLights;   // last frame's, for the inspector
 std::vector<PendingLight> g_lastOffered;  // all the game gave last frame, before culling
@@ -1270,7 +1279,7 @@ const char *kUpscaleNames[] = {"Off",
 
 enum UiRow {
    kRowUpscale, kRowScale, kRowDynres, kRowBounces, kRowLights, kRowLightCull, kRowFlicker, kRowVolumetric, kRowVsync,
-   kRowFps, kRowLight, kRowAmbient, kRowSky, kRowLightSize, kRowRough, kRowSmooth, kRowFixtures, kRowGlow, kRowWater,
+   kRowFps, kRowLight, kRowAmbient, kRowSky, kRowLightSize, kRowRough, kRowSmooth, kRowFixtures, kRowLightFix, kRowGlow, kRowWater,
    kRowDebug, kRowFreeze, kRowBackFaces, kRowReuse, kRowInspect, kRowReset, kRowCount
 };
 
@@ -1278,7 +1287,7 @@ const char *kRowLabels[kRowCount] = {
    "Upscaler", "Render resolution", "Dynamic resolution", "Bounce light", "Lights traced",
    "Lights behind walls", "Light flicker",
    "Volumetric light", "VSync", "FPS counter", "Light brightness", "Ambient light", "Sky brightness",
-   "Light size (soft shadows)", "Surface roughness", "Model shading", "Torches and lamps", "Lamp glow", "Water",
+   "Light size (soft shadows)", "Surface roughness", "Model shading", "Torches and lamps", "Lights in walls", "Lamp glow", "Water",
    "Debug view", "Freeze scene (test)", "Back faces (test)", "Light sampling (test)", "Inspect centre of view", "Reset to defaults",
 };
 
@@ -1321,6 +1330,7 @@ std::string row_value(int row)
    case kRowSky: snprintf(buf, sizeof(buf), "%.2fx", g_cfg.sky); return buf;
    case kRowLightSize: snprintf(buf, sizeof(buf), "%.2f m", g_cfg.lightSize); return buf;
    case kRowSmooth: return g_cfg.smoothModels ? "Smooth" : "Flat (steady)";
+   case kRowLightFix: return g_cfg.lightFix ? "Moved out" : "Left as placed";
    case kRowFixtures: return g_cfg.fixturesPass ? "Let their light out" : "Block their own light";
    case kRowFreeze: return g_freeze ? "On (frozen)" : "Off";
    case kRowBackFaces: return g_dropBackFaces ? "Dropped" : "Shadows only";
@@ -1403,6 +1413,7 @@ void change_row(int row, int dir)
    case kRowLightCull: g_cfg.lightCull = !g_cfg.lightCull; break;
    case kRowSmooth: g_cfg.smoothModels = !g_cfg.smoothModels; break;
    case kRowFixtures: g_cfg.fixturesPass = !g_cfg.fixturesPass; break;
+   case kRowLightFix: g_cfg.lightFix = !g_cfg.lightFix; g_lightFixes.clear(); break;
    case kRowFlicker: g_cfg.flicker = (g_cfg.flicker + dir + 3) % 3; break;
    case kRowVolumetric: g_cfg.volumetric = !g_cfg.volumetric; break;
    case kRowVsync: g_cfg.vsync = !g_cfg.vsync; break;
@@ -2025,10 +2036,22 @@ void inspect_view()
          const float dist = std::sqrt(dx * dx + dy * dy + dz * dz);
          if (dist > 12.0f)
             continue;
+         char fixed[96] = "";
+         for (const auto &f : g_lightFixes)
+            if ((f.first >> 40) == L.id && f.second.done) {
+               const float m = std::sqrt(f.second.offset[0] * f.second.offset[0] +
+                                         f.second.offset[1] * f.second.offset[1] +
+                                         f.second.offset[2] * f.second.offset[2]);
+               snprintf(fixed, sizeof(fixed), "; %.0f cm from the nearest wall%s", f.second.before * 100,
+                        m > 0.001f ? "" : " (left there)");
+               if (m > 0.001f)
+                  snprintf(fixed + strlen(fixed), sizeof(fixed) - strlen(fixed), ", moved out %.0f cm",
+                           m * 100);
+            }
          out("  light %u at (%.2f %.2f %.2f), %.2f m away: rgb %.0f %.0f %.0f, radius %.1f ft, "
-             "%s inner %.3f outer %.3f dir (%.2f %.2f %.2f)\n",
+             "%s inner %.3f outer %.3f dir (%.2f %.2f %.2f)%s\n",
              L.id, p.data[0], p.data[1], p.data[2], dist, L.rgb[0], L.rgb[1], L.rgb[2], L.radius,
-             L.inner >= 0 ? "spot" : "point", L.inner, L.outer, L.dir[0], L.dir[1], L.dir[2]);
+             L.inner >= 0 ? "spot" : "point", L.inner, L.outer, L.dir[0], L.dir[1], L.dir[2], fixed);
       }
       // and the ones near it that were NOT traced, with why
       for (const PendingLight &L : g_lastOffered) {
@@ -2607,6 +2630,98 @@ void upload_light(const PendingLight &L)
       ++g_frameLights;
 }
 
+// A torch's light sits where the torch is fixed to the wall, often a few
+// centimetres inside it. Dark's own lighting does not mind; a ray-traced
+// light inside a wall is shadowed for everything in front of it -- a lit
+// torch and a doused one looked the same. Each light is moved out of the
+// walls around it (once; the result is kept) until it has room for its size.
+
+uint64_t light_fix_key(const PendingLight &L)
+{
+   return (uint64_t(L.id) << 40) ^ (uint64_t(uint32_t(int32_t(L.pos[0] * 8))) << 20) ^
+          uint64_t(uint32_t(int32_t(L.pos[1] * 8)) * 2654435761u) ^ uint64_t(int32_t(L.pos[2] * 8));
+}
+
+// the nearest world surface along each of 26 directions, up to 1 m
+float world_clearance(const float p[3], const std::vector<const float *> &tris, float *openDir)
+{
+   static float dirs[26][3];
+   static bool init = false;
+   if (!init) {
+      int n = 0;
+      for (int x = -1; x <= 1; ++x)
+         for (int y = -1; y <= 1; ++y)
+            for (int z = -1; z <= 1; ++z) {
+               if (!x && !y && !z)
+                  continue;
+               const float l = std::sqrt(float(x * x + y * y + z * z));
+               dirs[n][0] = x / l; dirs[n][1] = y / l; dirs[n][2] = z / l;
+               ++n;
+            }
+      init = true;
+   }
+   float minT = 1.0f;
+   float open[3] = {0, 0, 0};
+   for (const auto &d : dirs) {
+      float best = 1.0f;
+      for (size_t i = 0; i + 2 < tris.size(); i += 3) {
+         float t;
+         if (ray_triangle(p, d, tris[i], tris[i + 1], tris[i + 2], t) && t < best)
+            best = t;
+      }
+      minT = std::min(minT, best);
+      for (int k = 0; k < 3; ++k)
+         open[k] += d[k] * best;
+   }
+   if (openDir) {
+      const float l = std::sqrt(open[0] * open[0] + open[1] * open[1] + open[2] * open[2]);
+      for (int k = 0; k < 3; ++k)
+         openDir[k] = l > 1e-6f ? open[k] / l : 0.0f;
+   }
+   return minT;
+}
+
+void fix_light_position(const PendingLight &L, LightFix &fix)
+{
+   fix = LightFix{{0, 0, 0}, 1.0f, true};
+   const RgFloat3D c = to_rt(L.pos);
+   // the world's triangles within reach
+   std::vector<const float *> tris;
+   for (const WorldGroup &g : g_world) {
+      if (g.flags & (kRenderRTWorldSky | kRenderRTWorldWater | kRenderRTWorldTransparent))
+         continue;
+      for (size_t k = 0; k + 2 < g.indices.size(); k += 3) {
+         const float *a = g.verts[g.indices[k]].position, *b = g.verts[g.indices[k + 1]].position,
+                     *e = g.verts[g.indices[k + 2]].position;
+         bool near = true;
+         for (int j = 0; j < 3 && near; ++j)
+            near = std::min({a[j], b[j], e[j]}) < c.data[j] + 1.2f &&
+                   std::max({a[j], b[j], e[j]}) > c.data[j] - 1.2f;
+         if (near) {
+            tris.push_back(a);
+            tris.push_back(b);
+            tris.push_back(e);
+         }
+      }
+   }
+   if (tris.empty())
+      return;
+   const float want = std::min(g_cfg.lightSize + 0.05f, 0.5f);
+   float p[3] = {c.data[0], c.data[1], c.data[2]}, open[3];
+   float clear = world_clearance(p, tris, open);
+   fix.before = clear;
+   for (int step = 0; step < 12 && clear < want; ++step) {
+      if (open[0] == 0 && open[1] == 0 && open[2] == 0)
+         break;
+      for (int k = 0; k < 3; ++k)
+         p[k] += open[k] * 0.05f;
+      clear = world_clearance(p, tris, open);
+   }
+   if (clear >= want * 0.6f)
+      for (int k = 0; k < 3; ++k)
+         fix.offset[k] = p[k] - c.data[k];
+}
+
 // Thief's torches flicker: their brightness jumps every frame. The denoiser
 // takes a jump in the light as a change and throws away what it had gathered
 // for every pixel that light reaches -- walls by torchlight never settle, the
@@ -2721,7 +2836,16 @@ void flush_lights()
                        [](const PendingLight &a, const PendingLight &b) { return a.score > b.score; });
       g_pendingLights.resize(keep);
    }
-   for (const PendingLight &L : g_pendingLights) {
+   int fixesLeft = 6;   // the new ones this frame (a few ms at most)
+   for (PendingLight &L : g_pendingLights) {
+      if (g_cfg.lightFix && L.id < 0x10000u) {
+         LightFix &fix = g_lightFixes[light_fix_key(L)];
+         if (!fix.done && fixesLeft-- > 0)
+            fix_light_position(L, fix);
+         if (fix.done)
+            for (int k = 0; k < 3; ++k)
+               L.pos[k] += fix.offset[k] / kMetersPerUnit;
+      }
       upload_light(L);
       s_chosen[L.id] = s_frame;
    }
