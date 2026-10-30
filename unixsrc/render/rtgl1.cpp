@@ -92,6 +92,7 @@ struct Settings {
    int flicker = 0;           // flickering lights: 0 smoothed, 1 as the game, 2 nearly steady
    bool smoothModels = false; // models shaded smooth (their normals blended across edges)
    float ambient = 1.0f;      // the level's ambient light, as a faint glow of every surface
+   int response = 1;          // how fast lighting changes show: 0 calm (Blood RT), 1 quick, 2 instant
    bool lightFix = true;      // lights moved out of the walls they sit in
    bool fixturesPass = true;  // a torch or small lamp lets its own light out
    bool lightCull = true;     // skip lights the level's lighting has on no cell near or in view
@@ -151,6 +152,7 @@ void load_settings()
       else if (k == "max_lights") g_cfg.maxLights = std::clamp(int(value), 0, 4096);
       else if (k == "flicker") g_cfg.flicker = std::clamp(int(value), 0, 2);
       else if (k == "smooth_models") g_cfg.smoothModels = value != 0;
+      else if (k == "response") g_cfg.response = std::clamp(int(value), 0, 2);
       else if (k == "light_fix") g_cfg.lightFix = value != 0;
       else if (k == "fixtures_pass") g_cfg.fixturesPass = value != 0;
       else if (k == "ambient") g_cfg.ambient = std::clamp(value, 0.0f, 20.0f);
@@ -171,12 +173,12 @@ void save_settings()
       return;
    fprintf(f, "upscale = %d\nscale = %.2f\nfps = %d\nvsync = %d\nlight = %.3f\nsky = %.3f\n"
               "light_size = %.3f\nglow = %.3f\nwater = %d\nsprite_glow = %.3f\ngi = %d\n"
-              "volumetric = %d\ndynres = %d\nmax_lights = %d\nmin_roughness = %.2f\nlight_cull = %d\nflicker = %d\nambient = %.3f\nsmooth_models = %d\nfixtures_pass = %d\nlight_fix = %d\n",
+              "volumetric = %d\ndynres = %d\nmax_lights = %d\nmin_roughness = %.2f\nlight_cull = %d\nflicker = %d\nambient = %.3f\nsmooth_models = %d\nfixtures_pass = %d\nlight_fix = %d\nresponse = %d\n",
            g_cfg.upscale, g_cfg.scale, int(g_cfg.fps), int(g_cfg.vsync), g_cfg.light, g_cfg.sky,
            g_cfg.lightSize, g_cfg.glow, g_cfg.water, g_cfg.spriteGlow, g_cfg.gi,
            int(g_cfg.volumetric), g_cfg.dynres, g_cfg.maxLights, g_cfg.minRoughness,
            int(g_cfg.lightCull), g_cfg.flicker, g_cfg.ambient, int(g_cfg.smoothModels),
-           int(g_cfg.fixturesPass), int(g_cfg.lightFix));
+           int(g_cfg.fixturesPass), int(g_cfg.lightFix), g_cfg.response);
    fclose(f);
 }
 
@@ -1280,14 +1282,14 @@ const char *kUpscaleNames[] = {"Off",
                                "MetalFX Custom"};
 
 enum UiRow {
-   kRowUpscale, kRowScale, kRowDynres, kRowBounces, kRowLights, kRowLightCull, kRowFlicker, kRowVolumetric, kRowVsync,
+   kRowUpscale, kRowScale, kRowDynres, kRowBounces, kRowLights, kRowLightCull, kRowResponse, kRowFlicker, kRowVolumetric, kRowVsync,
    kRowFps, kRowLight, kRowAmbient, kRowSky, kRowLightSize, kRowRough, kRowSmooth, kRowFixtures, kRowLightFix, kRowGlow, kRowWater,
    kRowDebug, kRowFreeze, kRowBackFaces, kRowReuse, kRowBlink, kRowInspect, kRowReset, kRowCount
 };
 
 const char *kRowLabels[kRowCount] = {
    "Upscaler", "Render resolution", "Dynamic resolution", "Bounce light", "Lights traced",
-   "Lights behind walls", "Light flicker",
+   "Lights behind walls", "Light changes", "Light flicker",
    "Volumetric light", "VSync", "FPS counter", "Light brightness", "Ambient light", "Sky brightness",
    "Light size (soft shadows)", "Surface roughness", "Model shading", "Torches and lamps", "Lights in walls", "Lamp glow", "Water",
    "Debug view", "Freeze scene (test)", "Back faces (test)", "Light sampling (test)", "Blink nearest light (test)", "Inspect centre of view", "Reset to defaults",
@@ -1320,6 +1322,7 @@ std::string row_value(int row)
       snprintf(buf, sizeof(buf), "nearest %d", g_cfg.maxLights);
       return buf;
    case kRowLightCull: return g_cfg.lightCull ? "Skipped" : "Traced";
+   case kRowResponse: return g_cfg.response == 0 ? "Calm (slow to show)" : g_cfg.response == 2 ? "Instant (noisier)" : "Quick";
    case kRowFlicker: return g_cfg.flicker == 1 ? "As the game" : g_cfg.flicker == 2 ? "Nearly steady" : "Smoothed";
    case kRowVolumetric: return g_cfg.volumetric ? "On" : "Off";
    case kRowVsync: return g_cfg.vsync ? "On" : "Off";
@@ -1343,8 +1346,8 @@ std::string row_value(int row)
    }
    case kRowDebug: {
       static const char *kViews[] = {"Off", "Shadows only", "Direct light only", "Glossy only",
-                                     "Bounce light only", "Change detection", "Change test stages"};
-      return kViews[std::clamp(g_cfg.debugView, 0, 6)];
+                                     "Bounce light only", "Change detection"};
+      return kViews[std::clamp(g_cfg.debugView, 0, 5)];
    }
    case kRowRough:
       snprintf(buf, sizeof(buf), g_cfg.minRoughness >= 0.999f ? "%.2f (matte)" : "at least %.2f",
@@ -1417,6 +1420,7 @@ void change_row(int row, int dir)
    case kRowSmooth: g_cfg.smoothModels = !g_cfg.smoothModels; break;
    case kRowFixtures: g_cfg.fixturesPass = !g_cfg.fixturesPass; break;
    case kRowLightFix: g_cfg.lightFix = !g_cfg.lightFix; g_lightFixes.clear(); break;
+   case kRowResponse: g_cfg.response = (g_cfg.response + dir + 3) % 3; break;
    case kRowFlicker: g_cfg.flicker = (g_cfg.flicker + dir + 3) % 3; break;
    case kRowVolumetric: g_cfg.volumetric = !g_cfg.volumetric; break;
    case kRowVsync: g_cfg.vsync = !g_cfg.vsync; break;
@@ -1434,7 +1438,7 @@ void change_row(int row, int dir)
       g_cfg.lightSize = std::clamp(std::round(g_cfg.lightSize * 20.0f) / 20.0f + 0.05f * dir,
                                    0.05f, 1.5f);
       break;
-   case kRowDebug: g_cfg.debugView = (g_cfg.debugView + dir + 7) % 7; return;   // not saved
+   case kRowDebug: g_cfg.debugView = (g_cfg.debugView + dir + 6) % 6; return;   // not saved
    case kRowBackFaces: g_dropBackFaces = !g_dropBackFaces; return;   // not saved
    case kRowReuse: g_reuseTest = (g_reuseTest + dir + 4) % 4; return;   // not saved
    case kRowBlink: g_blinkTest = !g_blinkTest; g_blinkId = ~0u; return;   // not saved
@@ -1689,9 +1693,14 @@ void draw_frame(bool sceneDrawn)
       .indirectBounces = (g_cfg.gi == 1 || g_cfg.gi == 3) ? 1u : 2u,
       .indirectLegacyBounceWeight = true,
       .cellWorldSize = 1.0f,
-      .directDiffuseSensitivityToChange = 0.5f,
-      .indirectDiffuseSensitivityToChange = 0.2f,
-      .specularSensitivityToChange = 0.5f,
+      // How strongly the denoiser throws away what it has gathered where the
+      // lighting changed. It notices a change for one frame only (after that
+      // the place is dark and there is nothing to compare); at Blood RT's
+      // values that frame removed only part of the old light, and the rest
+      // faded at 1% a frame -- a doused torch took seconds to go dark.
+      .directDiffuseSensitivityToChange = g_cfg.response == 0 ? 0.5f : 1.0f,
+      .indirectDiffuseSensitivityToChange = g_cfg.response == 0 ? 0.2f : g_cfg.response == 1 ? 0.6f : 1.0f,
+      .specularSensitivityToChange = g_cfg.response == 0 ? 0.5f : g_cfg.response == 1 ? 0.8f : 1.0f,
       .polygonalLightSpotlightFactor = 2.0f,
       .lightUniqueIdIgnoreFirstPersonViewerShadows = nullptr,
       .enableRrTemporalPrefilter = false,
@@ -1703,8 +1712,7 @@ void draw_frame(bool sceneDrawn)
       // the panel's debug view: which part of the lighting is what
       .debugVisibility = g_cfg.debugView == 1 ? 1u : 0u,
       .debugShowFlags = g_cfg.debugView == 2 ? 32u : g_cfg.debugView == 3 ? 64u
-                        : g_cfg.debugView == 4 ? 128u : g_cfg.debugView == 5 ? 2u
-                        : g_cfg.debugView == 6 ? (2u | (1u << 20)) : 0u,
+                        : g_cfg.debugView == 4 ? 128u : g_cfg.debugView == 5 ? 2u : 0u,
       .restirTemporalJitter = g_reuseTest == 2 ? 0.0f : 2.0f,
       .rrSpecularHitDistance = true,
       .directSamples = g_reuseTest == 3 ? 4u : 1u,
