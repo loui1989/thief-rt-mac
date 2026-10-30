@@ -205,7 +205,7 @@ struct Ui {
    double fps = 0, frameMs = 0, worstMs = 0, windowWorst = 0;
    // where a frame's time goes, averaged over the same window: the game's own
    // work, waiting in rgStartFrame for the GPU, submitting in rgDrawFrame
-   double waitSum = 0, drawSum = 0, waitMs = 0, drawMs = 0;
+   double waitSum = 0, drawSum = 0, waitMs = 0, drawMs = 0, captureSum = 0, captureMs = 0;
    std::string status;        // a line shown in the panel for a while
    double statusUntil = 0;
 } g_ui;
@@ -598,6 +598,7 @@ struct CachedObject {
    uint64_t normalsHash = 0;
    float bmin[3] = {}, bmax[3] = {};   // meters
    bool passLight = false;   // a small fixture around a light: it does not block it
+   bool settled = false;     // prims made steady and given normals for hash
    // each texture's look as a face turned toward the camera (flags, glow,
    // colour), for its faces captured turned away: kept across frames
    std::unordered_map<std::string, CapturedPrim> looks;
@@ -1711,7 +1712,8 @@ void count_frame(bool scene)
       g_ui.worstMs = g_ui.windowWorst;
       g_ui.waitMs = g_ui.waitSum * 1000.0 / g_ui.windowFrames;
       g_ui.drawMs = g_ui.drawSum * 1000.0 / g_ui.windowFrames;
-      g_ui.waitSum = g_ui.drawSum = 0;
+      g_ui.captureMs = g_ui.captureSum * 1000.0 / g_ui.windowFrames;
+      g_ui.waitSum = g_ui.drawSum = g_ui.captureSum = 0;
       g_ui.windowStart = t;
       g_ui.windowFrames = 0;
       g_ui.windowWorst = 0;
@@ -1753,8 +1755,8 @@ void draw_ui(bool scene)
                   g_ui.fps, g_ui.frameMs, g_ui.worstMs, w, h, g_drawableW, g_drawableH);
       // waiting in rgStartFrame is the GPU still busy with earlier frames
       const double game = std::max(0.0, g_ui.frameMs - g_ui.waitMs - g_ui.drawMs);
-      snprintf(line2, sizeof(line2), "game %4.1f ms   rt submit %4.1f ms   gpu wait %4.1f ms   lights %u/%u/%u",
-               game, g_ui.drawMs, g_ui.waitMs, g_frameLightsShown, g_lightsReaching, g_lightsTotal);
+      snprintf(line2, sizeof(line2), "game %4.1f ms (capture %4.1f)  rt submit %4.1f ms  gpu wait %4.1f ms  lights %u/%u/%u",
+               game, g_ui.captureMs, g_ui.drawMs, g_ui.waitMs, g_frameLightsShown, g_lightsReaching, g_lightsTotal);
       const float s = std::round(px * 0.8f);
       const float tw = std::max(text_width(s, line), text_width(s, line2));
       panel(0, 0, tw + 2 * pad, 2 * s + pad * 1.5f, 0.6f);
@@ -2501,10 +2503,20 @@ void RenderRTSceneBegin(const float pos[3], const float fwd[3], const float left
    g_RenderRTCaptureVertices = 0;
 }
 
+// the CPU time the ray tracer's own capture takes (for the frame counter)
+struct CaptureTimer {
+   std::chrono::steady_clock::time_point t0 = std::chrono::steady_clock::now();
+   ~CaptureTimer()
+   {
+      g_ui.captureSum += std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
+   }
+};
+
 void RenderRTSceneEnd(void)
 {
    if (!g_active || !g_inScene)
       return;
+   CaptureTimer timer;
    flush_lights();
    upload_world();
    upload_objects();
@@ -2526,6 +2538,7 @@ int RenderRTSuppressCapture(int suppress)
 void RenderRTDrawWorld(int primitive, const sRenderBackendVertex *v, const float *xyz,
                        int count)
 {
+   CaptureTimer timer;
    if (g_RenderRTShadowOnly && g_dropBackFaces)
       return;
    if (!g_inScene || primitive != kRenderBackendTriangles || count < 3)
@@ -2695,6 +2708,7 @@ void RenderRTCameraMedium(int underwater) { g_underwater = underwater != 0; }
 
 void RenderRTObjectEnd(void)
 {
+   CaptureTimer timer;
    const uint32_t obj = g_currentObject;
    g_currentObject = 0;
    if (!obj || !g_inScene)
@@ -2721,6 +2735,17 @@ void RenderRTObjectEnd(void)
       // (in any order: the game draws a model's faces in an order that
       // changes as they turn toward or away from the camera)
       const uint64_t h = hash_prims_unordered(g_currentCapture);
+      // a model that has not changed since it was last made ready: as it was
+      // (sorting its faces and finding its normals again each frame cost
+      // milliseconds a frame in a busy street)
+      if (h == c.hash && c.settled && c.whole && g_cfg.steadyFaces) {
+         ++c.unchanged;
+         c.frame = g_frameNumber;
+         c.posed = RenderRTGameObjectPose(obj, c.pose) != 0;
+         g_currentCapture.clear();
+         return;
+      }
+      c.settled = false;
       c.unchanged = (h == c.hash) ? c.unchanged + 1 : 0;
       c.hash = h;
       c.prims = std::move(g_currentCapture);
@@ -2753,8 +2778,10 @@ void RenderRTObjectEnd(void)
    // only for a model that holds still: sorting a moving one's faces anew
    // each frame broke the match between its frames (its motion), so the
    // denoiser smeared characters as they walked
-   if (g_cfg.steadyFaces && c.whole && c.unchanged >= 1)
+   if (g_cfg.steadyFaces && c.whole && c.unchanged >= 1) {
       steady_faces(c);
+      c.settled = true;
+   }
    const uint64_t shapeHash = hash_prims(c.prims);
    // the normals are recomputed only when the shape changed
    size_t total = 0;
