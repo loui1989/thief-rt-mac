@@ -2238,7 +2238,11 @@ void cPhysModel::UpdateTargetLocation(tPhysSubModId i, mxs_real dt)
             return;
          }
 
-         mx_scale_vec(&submod_offset, &kGravityDir, (mxs_real)(i) * (pRopeProp->length / 8.0f));
+         // the links: length / 8 apart leaves the last an eighth short;
+         // with correct lengths it reaches the rope's length (phoprop.cpp)
+         const int links = NumSubModels() > 1 ? NumSubModels() - 1 : 1;
+         mx_scale_vec(&submod_offset, &kGravityDir,
+                      (mxs_real)(i) * (pRopeProp->length / (PhysRopeCorrectLengths() ? (float)links : 8.0f)));
 
          if (i > 0)
          {

@@ -46,9 +46,25 @@
 #include <portal.h>
 
 #include <aiprops.h>
+#include <aisgtcst.h>
+#include <config.h>
 
 // Must be last header
 #include <dbmem.h>
+
+// Can an AI see a body or a suspicious object? The world only, as the
+// original did -- or, with NewDark's enhanced_aidetect_trace, the objects
+// that block AI vision too (closed doors), so no body is seen through a door.
+static BOOL AIDetectLineClear(Location *from, Location *to)
+{
+   if (config_is_defined("enhanced_aidetect_trace"))
+   {
+      Location a = *from, b = *to;
+      return AISightCast(&a, &b);
+   }
+   Location hit;
+   return PortalRaycast(from, to, &hit, 0);
+}
 
 
 
@@ -202,7 +218,7 @@ BOOL cAIDetect::SearchForBodies(void)
             if ((distSq < kBodyLookDistSq) && (mx_dot_vec(&relfac,&ourvecfac) >= kBodyDotMinimum))
             {  // need to check lighting and raycast
                Location hit;
-               if (PortalRaycast(&themLoc->loc,&ourLoc->loc,&hit,0))
+               if (AIDetectLineClear(&themLoc->loc,&ourLoc->loc))
                {  // should check verse objects
                   float light = AIGetObjectLighting(targ);
 
@@ -321,7 +337,7 @@ BOOL cAIDetect::SearchForSuspicious(void)
               (mx_dot_vec(&relfac,&ourvecfac) >= kSuspiciousDotMinimum))
             {  // need to check lighting and raycast
               Location hit;
-              if (PortalRaycast(&themLoc->loc,&ourLoc->loc,&hit,0))
+              if (AIDetectLineClear(&themLoc->loc,&ourLoc->loc))
                 {  // should check verse objects
                   float light = AIGetObjectLighting(targ);
 

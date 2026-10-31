@@ -18,6 +18,7 @@
 #include <lg.h>
 #include <command.h>
 #include <config.h>
+#include <contentctx.h>
 #include <rand.h>
 #include <dbfile.h>
 
@@ -3074,13 +3075,16 @@ void PhysPlayerJump(ObjID player, mxs_real jump_speed)
 
       mx_scale_vec(&grav_comp, &kGravityDir, mx_dot_vec(&kGravityDir, &velocity));
       mx_subeq_vec(&velocity, &grav_comp);
-      // NewDark's jump_speed_boost: how much of the running speed a jump
-      // adds on (fan missions ask for 1.4, for the longer running jumps
-      // their routes are built around); the original 1.05 otherwise
-      float boost = 1.05f;
+      // NewDark's jump_speed_boost: the factor on the running speed a jump
+      // keeps. 1.05 in Thief 2, but 1.4 when NewDark runs Thief 1 (its
+      // documentation: missions are built around the default distance)
+      const char *profile = DarkContentProfile();
+      const BOOL thief1 = profile && (_stricmp(profile, "gold") == 0 ||
+                                      _stricmp(profile, "tdp") == 0);
+      float boost = thief1 ? 1.4f : 1.05f;
       config_get_float("jump_speed_boost", &boost);
-      if (boost < 0.5f || boost > 3.0f)
-         boost = 1.05f;
+      if (boost < 1.0f || boost > 3.0f)
+         boost = thief1 ? 1.4f : 1.05f;
       mx_scaleeq_vec(&velocity, boost);
       mx_scale_addeq_vec(&velocity, &kGravityDir, -jump_speed);
 

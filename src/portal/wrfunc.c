@@ -7,6 +7,8 @@
 
 // World Representation Functions
 
+#include <config.h>
+#include <string.h>
 #include <wrtype.h>
 #include <wrdb.h>
 #include <wrfunc.h>
@@ -137,6 +139,10 @@ bool PortalTestInCell(int r, Location *loc)
 
 #define TOO_CLOSE    0.05
 #define ADJUST_DIST  0.06
+#define SMALL_TOO_CLOSE    0.01
+#define SMALL_ADJUST_DIST  0.015
+static int small_repel = 0;
+static uchar wall_plane[256];
 
 void PortalMovePointInsideCell(Location *loc)
 {
@@ -150,6 +156,18 @@ void PortalMovePointInsideCell(Location *loc)
       return;
 
    n = WR_CELL(cell)->num_planes;
+   // NewDark's small_portal_repel: a plane that is only an opening into the
+   // next cell (no wall lies on it) keeps the camera a much smaller distance
+   // away -- the margin made the view jump crossing a doorway
+   small_repel = config_is_defined("small_portal_repel") ? 1 : 0;
+   if (small_repel && n <= 256) {
+      PortalCell *c = WR_CELL(cell);
+      int solid = c->num_polys - c->num_portal_polys;
+      memset(wall_plane, 0, n);
+      for (i = 0; i < solid; ++i)
+         if (c->poly_list[i].planeid < n)
+            wall_plane[c->poly_list[i].planeid] = 1;
+   }
    // check if we're very close to any planes
    iter = 0;
    do {
@@ -157,8 +175,11 @@ void PortalMovePointInsideCell(Location *loc)
       changed = FALSE;
       for (i=0; i < n; ++i,++p) {
          double dist = PortalDistPointFromPlane(p, loc);
-         if (dist < TOO_CLOSE) {
-            mx_scale_addeq_vec(vec, &p->normal, (mxs_real)(ADJUST_DIST-dist));
+         const int opening = small_repel && n <= 256 && !wall_plane[i];
+         const double too_close = opening ? SMALL_TOO_CLOSE : TOO_CLOSE;
+         const double adjust = opening ? SMALL_ADJUST_DIST : ADJUST_DIST;
+         if (dist < too_close) {
+            mx_scale_addeq_vec(vec, &p->normal, (mxs_real)(adjust-dist));
             changed = TRUE;
          }
       }

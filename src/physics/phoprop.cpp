@@ -50,6 +50,7 @@
 #include <phprop.h>
 
 #include <phoprop.h>
+#include <config.h>
 
 #include <mprintf.h>
 
@@ -242,6 +243,24 @@ static sStructDesc RopeDesc = StructDescBuild(sPhysRopeProp, kStructFlagNone, Ro
 
 IPhysRopeProperty *g_pPhysRopeProp = NULL;
 
+// NewDark's force_correct_rope_lengths: a rope's eight links are spaced so
+// the last reaches the rope's length (the original spacing, length / 8 from
+// the top link, leaves it an eighth short), and a rope stopped by the floor
+// ends rope_ground_margin feet (default 4.5) above it.
+BOOL PhysRopeCorrectLengths()
+{
+   int value = 0;
+   return config_is_defined("force_correct_rope_lengths") &&
+          (!config_get_int("force_correct_rope_lengths", &value) || value != 0);
+}
+
+static float RopeGroundMargin()
+{
+   float margin = 4.5f;
+   config_get_float("rope_ground_margin", &margin);
+   return margin < 1.0f ? 1.0f : margin > 6.0f ? 6.0f : margin;
+}
+
 BOOL DeployRope(ObjID objID)
 {
    sPhysRopeProp *pRopeProp;
@@ -269,13 +288,17 @@ BOOL DeployRope(ObjID objID)
 
    Location end, hit;
 
+   const BOOL correct = PhysRopeCorrectLengths();
+   const float margin = correct ? RopeGroundMargin() : 1.0f;
    MakeLocationFromVector(&end, &base_loc);
-   end.vec.z -= pRopeProp->desired_length + 1.0f;
+   end.vec.z -= pRopeProp->desired_length + margin;
 
    if (!PortalRaycast(&start, &end, &hit, TRUE))
-      true_length = (start.vec.z - hit.vec.z) - 1.0f;
+      true_length = (start.vec.z - hit.vec.z) - margin;
    else
       true_length = pRopeProp->desired_length;
+   if (true_length < 1.0f)
+      true_length = 1.0f;
 
    pRopeProp->length = true_length;
 

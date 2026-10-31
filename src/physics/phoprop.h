@@ -93,6 +93,7 @@ EXTERN void PhysRopePropInit();
 EXTERN void PhysRopePropTerm();
 
 EXTERN BOOL DeployRope(ObjID objID); 
+EXTERN BOOL PhysRopeCorrectLengths();
 
 EXTERN BOOL PhysRopeListenerLock;
 

@@ -508,6 +508,17 @@ static inline BOOL CanMantleOnto(ObjID objid)
 
 ////////////////////////////////////////
 
+// NewDark's new_mantle: a mantle is taken when the player can move at least
+// new_mantle_fwd (0.5-1.0, default 0.5) of the usual distance onto the ledge,
+// rather than only the whole of it -- the usual reason a mantle was refused,
+// or had to be retried from another angle. The forward move is scaled to match.
+static float g_MantleForward = 1.0f;
+
+static BOOL NewMantle()
+{
+   return config_is_defined("new_mantle");
+}
+
 BOOL CheckMantle(ObjID objID)
 {
    cPhysModel *pModel;
@@ -715,9 +726,33 @@ BOOL CheckMantle(ObjID objID)
          return FALSE;
       }
 
+     mxs_vector delta_full = delta;
      mx_addeq_vec(&delta, &movement_dir);
      delta.z += -PLAYER_FOOT_POS;
-     if (!PhysObjValidPos(objID, &delta))
+     g_MantleForward = 1.0f;
+     BOOL fits = PhysObjValidPos(objID, &delta);
+     if (!fits && NewMantle())
+     {
+        float min_fwd = 0.5f;
+        config_get_float("new_mantle_fwd", &min_fwd);
+        min_fwd = min(1.0f, max(0.5f, min_fwd));
+        for (float f = 0.875f; f >= min_fwd - 0.001f && !fits; f -= 0.125f)
+        {
+           delta = delta_full;
+           mx_scale_addeq_vec(&delta, &movement_dir, f);
+           delta.z += -PLAYER_FOOT_POS;
+           if (PhysObjValidPos(objID, &delta))
+           {
+              fits = TRUE;
+              g_MantleForward = f;
+              #ifndef SHIP
+              if (config_is_defined("MantleSpew"))
+                 mprintf("New mantle: fits moving %.3f of the way forward\n", f);
+              #endif
+           }
+        }
+     }
+     if (!fits)
      {
          #ifndef SHIP
          if (config_is_defined("MantleSpew"))
@@ -814,7 +849,7 @@ void UpdateMantling(cPhysModel *pModel, mxs_real dt)
             if (!IsZeroVector(facing))
                mx_normeq_vec(&facing);
 
-            mx_scale_addeq_vec(&targ_loc, &facing, PLAYER_RADIUS * 2);
+            mx_scale_addeq_vec(&targ_loc, &facing, PLAYER_RADIUS * 2 * g_MantleForward);
 
             pModel->SetMantlingTargVec(targ_loc);
             pModel->SetTargetLocation(pModel->GetLocationVec(PLAYER_HEAD));
