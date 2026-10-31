@@ -28,7 +28,7 @@
 // must be last header
 #include <dbmem.h>
 
-#define kAUXSND_SecondsOfBuffer 1.0F
+#define kAUXSND_SecondsOfBuffer 2.0F
 
 typedef struct _fakeSplicerThingy {
    ISndSource        *pSource;
@@ -971,7 +971,9 @@ CreateNRezStreamedSoundSource( ISndMixer           *pMixer,          // your mix
    //  compressed data from the passed-in memory buffer, and will decompress
    //  directly to the DirectSoundBuffer.
    //
-   int streamBufSize = (int)(attribs.sampleRate * kAUXSND_SecondsOfBuffer * (attribs.bitsPerSample >> 3));
+   // (seconds of sound: every channel's samples -- a stereo stream had half)
+   int streamBufSize = (int)(attribs.sampleRate * kAUXSND_SecondsOfBuffer * (attribs.bitsPerSample >> 3) *
+                             (attribs.nChannels > 1 ? attribs.nChannels : 1));
    *ppStreamBuffer = new char[streamBufSize];
    pSample = ISndMixer_CreateRawSample( pMixer, kSndSampleStream, *ppStreamBuffer,
                                         streamBufSize, totalSamples, &attribs );
@@ -1164,7 +1166,9 @@ CreateSongSoundSource ( ISndMixer           *pMixer,
    //  compressed data from the passed-in memory buffer, and will decompress
    //  directly to the DirectSoundBuffer.
    //
-   int streamBufSize = (int)(attribs.sampleRate * kAUXSND_SecondsOfBuffer * (attribs.bitsPerSample >> 3));
+   // (seconds of sound: every channel's samples -- a stereo stream had half)
+   int streamBufSize = (int)(attribs.sampleRate * kAUXSND_SecondsOfBuffer * (attribs.bitsPerSample >> 3) *
+                             (attribs.nChannels > 1 ? attribs.nChannels : 1));
    *ppStreamBuffer = new char[streamBufSize];
    pSample = ISndMixer_CreateRawSample( pMixer, kSndSampleStream, *ppStreamBuffer,
                                         streamBufSize, totalSamples, &attribs );

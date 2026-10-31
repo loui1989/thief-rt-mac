@@ -4460,7 +4460,15 @@ void upload_light(const PendingLight &L)
    RgLightSphericalEXT sphere{};
    RgLightSpotEXT spot{};
    void *ext;
-   if (L.inner >= 0.0f && (dir[0] != 0 || dir[1] != 0 || dir[2] != 0)) {
+   // A lamp the mapper lit with a spotlight (a pool under it, the walls
+   // around it lit by separate dim fill lights): its glass glows, so it is
+   // one light all round, a little dimmer -- it was a spot and a sphere at
+   // the same place, two lights the sampler took turns with, the shimmer in
+   // the pool under it.
+   const bool lampSpot = fixture && L.inner >= 0.0f && !g_flameLights.count(L.id);
+   if (lampSpot)
+      lumens *= 0.6f;
+   if (!lampSpot && L.inner >= 0.0f && (dir[0] != 0 || dir[1] != 0 || dir[2] != 0)) {
       const float l = std::sqrt(dir[0] * dir[0] + dir[1] * dir[1] + dir[2] * dir[2]);
       spot = RgLightSpotEXT{
          .sType = RG_STRUCTURE_TYPE_LIGHT_SPOT_EXT,
@@ -4494,27 +4502,6 @@ void upload_light(const PendingLight &L)
    };
    if (rt.rgUploadLight(&info) == RG_RESULT_SUCCESS)
       ++g_frameLights;
-   // A lamp the mapper lit with a spotlight (a pool of light under it, the
-   // walls around it lit by separate dim fill lights): its glass glows, so it
-   // lights the walls around it too -- a third of its light, all round.
-   if (ext == &spot && fixture) {
-      sphere = RgLightSphericalEXT{
-         .sType = RG_STRUCTURE_TYPE_LIGHT_SPHERICAL_EXT,
-         .pNext = nullptr,
-         .color = color,
-         .intensity = lumens * 0.35f,
-         .position = spot.position,
-         .radius = g_cfg.lightSize,
-      };
-      auto all = RgLightInfo{
-         .sType = RG_STRUCTURE_TYPE_LIGHT_INFO,
-         .pNext = &sphere,
-         .uniqueID = 0x800000000ull + L.id,
-         .isExportable = false,
-      };
-      if (rt.rgUploadLight(&all) == RG_RESULT_SUCCESS)
-         ++g_frameLights;
-   }
 }
 
 // A torch's light sits where the torch is fixed to the wall, often a few
@@ -4688,12 +4675,19 @@ void flush_lights()
       std::vector<PendingLight> kept;
       for (PendingLight L : g_pendingLights) {
          float d = L.walk;
-         if (d == -2.0f) {
-            const RgFloat3D p = to_rt(L.pos);
-            d = std::sqrt((p.data[0] - c.data[0]) * (p.data[0] - c.data[0]) +
-                          (p.data[1] - c.data[1]) * (p.data[1] - c.data[1]) +
-                          (p.data[2] - c.data[2]) * (p.data[2] - c.data[2]));
-         }
+         const RgFloat3D p = to_rt(L.pos);
+         const float straight = std::sqrt((p.data[0] - c.data[0]) * (p.data[0] - c.data[0]) +
+                                          (p.data[1] - c.data[1]) * (p.data[1] - c.data[1]) +
+                                          (p.data[2] - c.data[2]) * (p.data[2] - c.data[2]));
+         if (d == -2.0f)
+            d = straight;
+         // A light that shines on a cell on screen (the level's light lists
+         // say so) is in reach as for a light seen: its straight distance
+         // over 2.5. Walked to through the openings, the lamps lighting a
+         // big square's far side, round a corner, were out of reach and
+         // came on one by one as you walked toward them.
+         if (L.reaches && L.id < 0x10000u)
+            d = d < 0.0f ? straight / 2.5f : std::min(d, straight / 2.5f);
          if (d < 0.0f)
             continue;
          float t = std::clamp((reach - d) / (reach * 0.33f), 0.0f, 1.0f);
