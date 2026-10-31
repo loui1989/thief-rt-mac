@@ -877,8 +877,14 @@ void DarkContentConfigure(int argc, const char* argv[])
 
    // mod_path_skip_fm (ours, in cam_mod.ini): the mods are for the original
    // missions only -- an HD pack's models and textures stay out of fan
-   // missions, which bring their own
-   if (!vanilla && !(gFMPath[0] && config_is_defined("mod_path_skip_fm")) &&
+   // missions, which bring their own. fm_mod_path (ours): the mods for a fan
+   // mission instead of mod_path (an HD pack's fan-mission variants first).
+   // Either way a fan mission's own files come first.
+   if (!vanilla && gFMPath[0] && config_get_raw("fm_mod_path", value, sizeof(value)))
+      for (i = 0; i < 5; ++i)
+         AddExpandedList(gPaths[i], sizeof(gPaths[i]), value,
+                         i == kDarkContentMovies ? movieDir : NULL);
+   else if (!vanilla && !(gFMPath[0] && config_is_defined("mod_path_skip_fm")) &&
        config_get_raw("mod_path", value, sizeof(value)))
       for (i = 0; i < 5; ++i)
          AddExpandedList(gPaths[i], sizeof(gPaths[i]), value,
