@@ -112,9 +112,15 @@ more_than_one_cell:
 
             if (num_cells == (BSPSPHR_OUTPUT_LIMIT - 1)) {
 #ifndef SHIP
-               mprintf("portal_cells_intersecting_sphere: "
-                       "too many cells @ (%g %g %g)\n",
-                       loc->vec.x, loc->vec.y, loc->vec.z);
+               {
+                  // (once in a while: printed every time, it was 100,000 lines
+                  // and a good part of the frame)
+                  static unsigned s_count;
+                  if ((s_count++ & 1023) == 0)
+                     mprintf("portal_cells_intersecting_sphere: "
+                             "too many cells @ (%g %g %g), radius %g (%u times)\n",
+                             loc->vec.x, loc->vec.y, loc->vec.z, radius, s_count);
+               }
 #endif
                return num_cells;
             }

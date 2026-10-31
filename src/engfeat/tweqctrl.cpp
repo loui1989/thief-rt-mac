@@ -851,7 +851,10 @@ int processTweqDelete(ObjID obj, void* state, int ms)
       Warning(("Cant get DeleteCfg for obj %s\n",ObjEditName(obj)));
       return TWEQ_STATUS_QUO;
    }
-   if (!tweq_process_needed(&twq_cfg->cfg,obj)) return TWEQ_STATUS_QUO;
+   // A delete tweq is a lifetime: it runs whether or not its object is seen.
+   // (Only on screen, the Thief Gold HD Mod's water bubbles and algae -- particle
+   // groups emitted under water, often out of sight or inside a wall -- were
+   // never deleted: hundreds piled up, and physics took most of a second a frame.)
    addTime(&twq_state->tm_info.cur_time,ms,&twq_cfg->cfg);  //need to pass jitter/curve flags in here!
 
 #ifdef NEW_NETWORK_ENABLED

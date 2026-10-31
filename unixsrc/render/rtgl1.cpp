@@ -749,6 +749,9 @@ struct PendingLight {
    float walk = -2.0f;    // metres from the camera through the openings; -1 out of reach, -2 not known
 };
 std::vector<PendingLight> g_pendingLights;
+// lights a lamp's glowing glass (or a flame's bowl) was seen at: a lamp, so
+// it lights its surroundings as well as the cone the mapper gave it
+std::unordered_set<uint32_t> g_fixtureLights;
 // lights moved out of walls (see fix_light_position)
 struct LightFix {
    float offset[3];   // meters
@@ -3858,10 +3861,14 @@ void RenderRTDrawWorld(int primitive, const sRenderBackendVertex *v, const float
       }
       // only small parts: never a wall or a whole statue near a torch
       if (extent < 0.6f * 0.6f)
-         for (const RgFloat3D &l : g_lightPositions) {
+         for (size_t li = 0; li < g_lightPositions.size(); ++li) {
+            const RgFloat3D &l = g_lightPositions[li];
             const float dx = l.data[0] - c[0], dy = l.data[1] - c[1], dz = l.data[2] - c[2];
             if (dx * dx + dy * dy + dz * dz < 0.5f * 0.5f) {
                prim.emissive = std::max(prim.emissive, g_cfg.glow);
+               // (g_lightPositions is in the order of g_pendingLights)
+               if (li < g_pendingLights.size())
+                  g_fixtureLights.insert(g_pendingLights[li].id);
                break;
             }
          }
@@ -4125,6 +4132,7 @@ void RenderRTWorldBegin(uint32_t serial)
    g_world.clear();
    g_worldIndex.clear();
    g_worldTextures.clear();
+   g_fixtureLights.clear();   // (marked again as the lamps are drawn)
    g_worldSerial = serial;
    g_worldValid = false;
 }
@@ -4295,6 +4303,27 @@ void upload_light(const PendingLight &L)
    };
    if (rt.rgUploadLight(&info) == RG_RESULT_SUCCESS)
       ++g_frameLights;
+   // A lamp the mapper lit with a spotlight (a pool of light under it, the
+   // walls around it lit by separate dim fill lights): its glass glows, so it
+   // lights the walls around it too -- a third of its light, all round.
+   if (ext == &spot && g_fixtureLights.count(L.id)) {
+      sphere = RgLightSphericalEXT{
+         .sType = RG_STRUCTURE_TYPE_LIGHT_SPHERICAL_EXT,
+         .pNext = nullptr,
+         .color = color,
+         .intensity = lumens * 0.35f,
+         .position = spot.position,
+         .radius = g_cfg.lightSize,
+      };
+      auto all = RgLightInfo{
+         .sType = RG_STRUCTURE_TYPE_LIGHT_INFO,
+         .pNext = &sphere,
+         .uniqueID = 0x800000000ull + L.id,
+         .isExportable = false,
+      };
+      if (rt.rgUploadLight(&all) == RG_RESULT_SUCCESS)
+         ++g_frameLights;
+   }
 }
 
 // A torch's light sits where the torch is fixed to the wall, often a few
