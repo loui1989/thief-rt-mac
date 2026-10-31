@@ -875,7 +875,11 @@ void DarkContentConfigure(int argc, const char* argv[])
       }
    }
 
-   if (!vanilla && config_get_raw("mod_path", value, sizeof(value)))
+   // mod_path_skip_fm (ours, in cam_mod.ini): the mods are for the original
+   // missions only -- an HD pack's models and textures stay out of fan
+   // missions, which bring their own
+   if (!vanilla && !(gFMPath[0] && config_is_defined("mod_path_skip_fm")) &&
+       config_get_raw("mod_path", value, sizeof(value)))
       for (i = 0; i < 5; ++i)
          AddExpandedList(gPaths[i], sizeof(gPaths[i]), value,
                          i == kDarkContentMovies ? movieDir : NULL);
