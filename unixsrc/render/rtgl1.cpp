@@ -1199,7 +1199,17 @@ void compute_normals(CapturedPrim *prims, size_t count)
 // only one of each pair of coincident opposite faces (a two-sided part) stays
 // shadow-only, chosen by a fixed rule, so the two do not fight. The order of
 // everything is fixed too, so the same model gives the same primitives.
-void steady_faces(CachedObject &c)
+//
+// A model that moves or animates is ordered by what does not change as it
+// does: its texture coordinates (and, between faces mapped alike -- a left
+// and a right arm -- where they are on the model, turned with it). The game
+// draws a model's faces in an order that changes as they turn toward or away
+// from the camera; given so, a face's vertices were other vertices each
+// frame, the path tracer's motion vectors pointed anywhere, and its denoiser
+// threw its history away: characters and horses flickered and blotched as
+// they walked (frozen models: steady). pose: the game's (feet, fixang), or
+// null for a model holding still.
+void steady_faces(CachedObject &c, const float *pose = nullptr)
 {
    for (const CapturedPrim &p : c.prims)
       if (!(p.flags & RG_MESH_PRIMITIVE_SHADOW_ONLY) && !p.sprite) {
@@ -1209,6 +1219,7 @@ void steady_faces(CachedObject &c)
       }
    struct Tri {
       std::array<int64_t, 9> key;   // the corners, 2 mm grid, sorted
+      std::array<int64_t, 9> order; // a moving model's: its corners' texture coordinates, then its place
       float n[3];
       const CapturedPrim *from;
       size_t at;
@@ -1231,6 +1242,29 @@ void steady_faces(CachedObject &c)
          for (int k = 0; k < 3; ++k)
             for (int j = 0; j < 3; ++j)
                tri.key[k * 3 + j] = q[k][j];
+         if (pose) {
+            std::array<std::array<int64_t, 2>, 3> uv;
+            float m[3] = {0, 0, 0};
+            for (int k = 0; k < 3; ++k) {
+               uv[k][0] = int64_t(std::llround(p.verts[t + k].texCoord[0] * 8192.0f));
+               uv[k][1] = int64_t(std::llround(p.verts[t + k].texCoord[1] * 8192.0f));
+               for (int j = 0; j < 3; ++j)
+                  m[j] += p.verts[t + k].position[j] / 3.0f;
+            }
+            std::sort(uv.begin(), uv.end());
+            for (int k = 0; k < 3; ++k) {
+               tri.order[k * 2] = uv[k][0];
+               tri.order[k * 2 + 1] = uv[k][1];
+            }
+            // where on the model, in its own turn (15 cm cells)
+            const float h = pose[5] * (6.2831853f / 65536.0f);
+            const float dx = m[0] - pose[0] * kMetersPerUnit, dy = m[1] - pose[1] * kMetersPerUnit,
+                        dz = m[2] - pose[2] * kMetersPerUnit;
+            const float lx = dx * std::cos(h) + dy * std::sin(h), ly = -dx * std::sin(h) + dy * std::cos(h);
+            tri.order[6] = int64_t(std::floor(lx / 0.15f));
+            tri.order[7] = int64_t(std::floor(ly / 0.15f));
+            tri.order[8] = int64_t(std::floor(dz / 0.15f));
+         }
          const float *a = p.verts[t].position, *b = p.verts[t + 1].position, *e = p.verts[t + 2].position;
          const float e1[3] = {b[0] - a[0], b[1] - a[1], b[2] - a[2]};
          const float e2[3] = {e[0] - a[0], e[1] - a[1], e[2] - a[2]};
@@ -1259,6 +1293,13 @@ void steady_faces(CachedObject &c)
          tris[i].shadowOnly = true;   // the same way, a duplicate: shadow-only too
          (void)d;
       }
+   // a moving model: then in the order that does not change as it moves
+   if (pose)
+      std::stable_sort(tris.begin(), tris.end(), [&](const Tri &x, const Tri &y) {
+         if (x.from->texture != y.from->texture)
+            return x.from->texture < y.from->texture;
+         return x.order < y.order;
+      });
    // regroup: by texture and final look, in a fixed order
    std::map<std::pair<std::string, int>, CapturedPrim> out;
    for (const Tri &t : tris) {
@@ -4249,6 +4290,8 @@ void RenderRTObjectEnd(void)
    if (g_cfg.steadyFaces && c.whole && c.unchanged >= 1 && !hasSprites) {
       steady_faces(c);
       c.settled = true;
+   } else if (g_cfg.steadyFaces && c.whole && !hasSprites && c.posed) {
+      steady_faces(c, c.pose);   // moving: ordered by what does not move
    }
    const uint64_t shapeHash = hash_prims(c.prims);
    // the normals are recomputed only when the shape changed
