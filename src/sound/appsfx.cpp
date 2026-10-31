@@ -472,11 +472,10 @@ BOOL SFXInit(void)
 
    if (initialized) {
       TIMELOG_INIT( 16384 );
-      // The stream-refill thread wakes by itself every 30 ms (the default
-      // here; sfx_mixer_timeout sets it): waiting for the game loop to ask
-      // for a refill, music and long sounds ran dry whenever a frame was
-      // slow -- a menu, a hitch, a load -- and broke up.
-      pSndMixer->SetTimeout(sgMixerTimeout != -1 ? sgMixerTimeout : 30);
+      // (a stream-refill thread waking by itself every 30 ms crackled in
+      // the menus: refilled only when the game loop asks, as the original)
+      if (sgMixerTimeout != -1)
+         pSndMixer->SetTimeout(sgMixerTimeout);
 
       SongUtilInit(pSndMixer);
       SongUtilSetVolume(sgVolMusic);

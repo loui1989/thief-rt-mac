@@ -4465,7 +4465,11 @@ void upload_light(const PendingLight &L)
    // one light all round, a little dimmer -- it was a spot and a sphere at
    // the same place, two lights the sampler took turns with, the shimmer in
    // the pool under it.
-   const bool lampSpot = fixture && L.inner >= 0.0f && !g_flameLights.count(L.id);
+   // (only a hanging lamp's, pointing down: a floodlight aimed up at a
+   // statue stays a spot -- its shadow on the wall behind went)
+   const float dl = std::sqrt(dir[0] * dir[0] + dir[1] * dir[1] + dir[2] * dir[2]);
+   const bool lampSpot = fixture && L.inner >= 0.0f && !g_flameLights.count(L.id) &&
+                         dl > 0.0f && dir[2] / dl < -0.7f;
    if (lampSpot)
       lumens *= 0.6f;
    if (!lampSpot && L.inner >= 0.0f && (dir[0] != 0 || dir[1] != 0 || dir[2] != 0)) {
