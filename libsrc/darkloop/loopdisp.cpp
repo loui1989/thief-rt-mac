@@ -6,6 +6,12 @@
 #include <appagg.h>
 #include <mprintf.h>
 #include <platform_services.h>
+#include <chrono>
+
+// The ray tracer's performance log: each loop client's time in the frame
+// messages, when set.
+extern "C" void (*g_LoopClientTimeHook)(const char* client, unsigned message, double seconds);
+void (*g_LoopClientTimeHook)(const char* client, unsigned message, double seconds) = nullptr;
 
 unsigned MessageToIndex(eLoopMessage message)
 {
@@ -203,11 +209,20 @@ HRESULT cLoopDispatch::SendMessage(eLoopMessage message, tLoopMessageData hData,
 			pTimer->Start();
 		}
 
+		auto* timeHook = (message & kMsgsFrame) ? g_LoopClientTimeHook : nullptr;
+		std::chrono::steady_clock::time_point hookStart;
+		if (timeHook)
+			hookStart = std::chrono::steady_clock::now();
+
 		eLoopMessageResult clientResult{};
 		if (m_ProfileSet & message)
 			clientResult = LoopProfileSend(pClient, message, hData);
 		else
 			clientResult = pClient->ReceiveMessage(message, hData);
+
+		if (timeHook)
+			timeHook((const char*)pszClient, (unsigned)message,
+			         std::chrono::duration<double>(std::chrono::steady_clock::now() - hookStart).count());
 
 		if (fLoopTimeThisMsg)
 			pTimer->Stop();

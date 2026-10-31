@@ -92,6 +92,7 @@ struct Settings {
    bool volumetric = false;   // haze lit by every light
    int dynres = 0;            // dynamic resolution's target fps, 0 off
    int outputHeight = 0;      // the frame's height in pixels, 0 = the screen's own (Retina)
+   bool perfLog = false;      // logs/perf.log: where each frame's time goes, every 2 s
    int reach = 40;            // lights fade out with their walking distance (metres); 0: nearest maxLights
    int maxLights = 64;        // lights given to the path tracer, nearest first; 0 all
    int flicker = 0;           // flickering lights: 0 smoothed, 1 as the game, 2 nearly steady
@@ -177,6 +178,7 @@ void load_settings()
       else if (k == "light_cull") g_cfg.lightCull = value != 0;
       else if (k == "min_roughness") g_cfg.minRoughness = std::clamp(value, 0.0f, 1.0f);
       else if (k == "output_height") g_cfg.outputHeight = std::clamp(int(value), 0, 4320);
+      else if (k == "perf_log") g_cfg.perfLog = value != 0;
    }
    fclose(f);
 }
@@ -192,13 +194,13 @@ void save_settings()
       return;
    fprintf(f, "upscale = %d\nscale = %.2f\nfps = %d\nvsync = %d\nlight = %.3f\nsky = %.3f\n"
               "light_size = %.3f\nglow = %.3f\nwater = %d\nsprite_glow = %.3f\ngi = %d\n"
-              "volumetric = %d\ndynres = %d\nmax_lights = %d\nmin_roughness = %.2f\nlight_cull = %d\nflicker = %d\nambient = %.3f\nsmooth_models = %d\nfixtures_pass = %d\nlight_fix = %d\nlight_response = %d\nev_min = %d\nlight_candidates = %d\nsteady_faces = %d\nlight_fade = %d\nbloom = %d\nrt_detection = %d\nreach = %d\noutput_height = %d\n",
+              "volumetric = %d\ndynres = %d\nmax_lights = %d\nmin_roughness = %.2f\nlight_cull = %d\nflicker = %d\nambient = %.3f\nsmooth_models = %d\nfixtures_pass = %d\nlight_fix = %d\nlight_response = %d\nev_min = %d\nlight_candidates = %d\nsteady_faces = %d\nlight_fade = %d\nbloom = %d\nrt_detection = %d\nreach = %d\noutput_height = %d\nperf_log = %d\n",
            g_cfg.upscale, g_cfg.scale, int(g_cfg.fps), int(g_cfg.vsync), g_cfg.light, g_cfg.sky,
            g_cfg.lightSize, g_cfg.glow, g_cfg.water, g_cfg.spriteGlow, g_cfg.gi,
            int(g_cfg.volumetric), g_cfg.dynres, g_cfg.maxLights, g_cfg.minRoughness,
            int(g_cfg.lightCull), g_cfg.flicker, g_cfg.ambient, int(g_cfg.smoothModels),
            int(g_cfg.fixturesPass), int(g_cfg.lightFix), g_cfg.response, g_cfg.evMin,
-           g_cfg.candidates, int(g_cfg.steadyFaces), int(g_cfg.lightFade), int(g_cfg.bloom), int(g_cfg.rtDetection), g_cfg.reach, g_cfg.outputHeight);
+           g_cfg.candidates, int(g_cfg.steadyFaces), int(g_cfg.lightFade), int(g_cfg.bloom), int(g_cfg.rtDetection), g_cfg.reach, g_cfg.outputHeight, int(g_cfg.perfLog));
    fclose(f);
 }
 
@@ -907,6 +909,9 @@ void upload_captured(uint64_t id, const CapturedPrim &p, bool passLight = false)
 }
 
 uint32_t g_cachedDrawn = 0;
+// this frame's models for the performance log
+uint32_t g_perfModels = 0, g_perfPrims = 0;
+size_t g_perfTris = 0;
 
 // A model's primitive named by its texture and kind, the n-th such in the
 // model, not by its place in the list: the list's order changed as faces
@@ -935,6 +940,8 @@ std::vector<uint64_t> object_prim_ids(uint32_t obj, const std::vector<CapturedPr
 void upload_objects()
 {
    g_cachedDrawn = 0;
+   g_perfModels = g_perfPrims = 0;
+   g_perfTris = 0;
    if (g_freeze) {
       // the test switch: the models exactly as they were when it was set
       for (const auto &e : g_objects) {
@@ -1015,6 +1022,10 @@ void upload_objects()
                              c.whole ? "whole" : "in pieces", c.frame == g_frameNumber ? "this frame" : "earlier, kept");
       }
       c.givenTris = tris;
+      ++g_perfModels;
+      g_perfPrims += uint32_t(c.prims.size());
+      for (const CapturedPrim &p : c.prims)
+         g_perfTris += p.verts.size() / 3;
       const std::vector<uint64_t> ids = object_prim_ids(obj, c.prims);
       for (size_t i = 0; i < c.prims.size(); ++i)
          upload_captured(ids[i], c.prims[i], c.passLight);
@@ -1160,7 +1171,11 @@ bool Open(SDL_Window *window)
 {
    load_settings();
    // the Metal backend's GPU timeline, every 2 seconds, in the log
-   if (env_float("THIEF_RT_PROFILE", 0) != 0)
+   if (env_float("THIEF_RT_PERF", 0) != 0)
+      g_cfg.perfLog = true;
+   // the GPU's time per pass (in logs/thief.log every 2 s) with the
+   // performance log; read by the library when it starts
+   if (env_float("THIEF_RT_PROFILE", 0) != 0 || g_cfg.perfLog)
       setenv("RTGL1_METAL_PROFILE", "1", 1);
    g_cfg.upscale = std::clamp(int(env_float("THIEF_RT_UPSCALE", float(g_cfg.upscale))), 0, 5);
    g_cfg.scale = std::clamp(env_float("THIEF_RT_SCALE", g_cfg.scale), 0.25f, 1.0f);
@@ -1582,7 +1597,7 @@ const char *kUpscaleNames[] = {"Off",
 enum UiRow {
    kRowUpscale, kRowScale, kRowOutput, kRowDynres, kRowBounces, kRowReach, kRowLights, kRowLightFade, kRowCandidates, kRowLightCull, kRowResponse, kRowFlicker, kRowVolumetric, kRowBloom, kRowVsync,
    kRowFps, kRowDetection, kRowLight, kRowExposure, kRowAmbient, kRowSky, kRowLightSize, kRowRough, kRowSmooth, kRowSteady, kRowFixtures, kRowLightFix, kRowGlow, kRowWater,
-   kRowDebug, kRowFreeze, kRowBackFaces, kRowReuse, kRowBlink, kRowInspect, kRowReset, kRowCount
+   kRowDebug, kRowFreeze, kRowBackFaces, kRowReuse, kRowBlink, kRowPerf, kRowInspect, kRowReset, kRowCount
 };
 
 const char *kRowLabels[kRowCount] = {
@@ -1590,7 +1605,7 @@ const char *kRowLabels[kRowCount] = {
    "Lights coming into range", "Lights tried per pixel", "Lights behind walls", "Light changes", "Light flicker",
    "Volumetric light", "Bloom", "VSync", "FPS counter", "Light gem and guards", "Light brightness", "Darkest exposure", "Ambient light", "Sky brightness",
    "Light size (soft shadows)", "Surface roughness", "Model shading", "Model faces", "Torches and lamps", "Lights in walls", "Lamp glow", "Water",
-   "Debug view", "Freeze scene (test)", "Back faces (test)", "Light sampling (test)", "Blink nearest light (test)", "Inspect centre of view", "Reset to defaults",
+   "Debug view", "Freeze scene (test)", "Back faces (test)", "Light sampling (test)", "Blink nearest light (test)", "Performance log", "Inspect centre of view", "Reset to defaults",
 };
 
 // rows that do something when chosen rather than having a value
@@ -1659,6 +1674,7 @@ std::string row_value(int row)
    }
    case kRowBackFaces: return g_dropBackFaces ? "Dropped" : "Shadows only";
    case kRowBlink: return g_blinkTest ? "On" : "Off";
+   case kRowPerf: return g_cfg.perfLog ? "On: logs/perf.log" : "Off";
    case kRowReuse: {
       static const char *kReuse[] = {"Normal", "No spatial reuse", "No reuse", "8 shadow rays"};
       return kReuse[std::clamp(g_reuseTest, 0, 3)];
@@ -1791,6 +1807,7 @@ void change_row(int row, int dir)
    case kRowBackFaces: g_dropBackFaces = !g_dropBackFaces; return;   // not saved
    case kRowReuse: g_reuseTest = (g_reuseTest + dir + 4) % 4; return;   // not saved
    case kRowBlink: g_blinkTest = !g_blinkTest; g_blinkId = ~0u; return;   // not saved
+   case kRowPerf: g_cfg.perfLog = !g_cfg.perfLog; break;
    case kRowFreeze: {
       g_freezeMode = (g_freezeMode + dir + 4) % 4;
       g_freeze = g_freezeMode == 1 || g_freezeMode == 2;
@@ -1821,6 +1838,136 @@ void change_row(int row, int dir)
    save_settings();
 }
 
+// ---- performance log: logs/perf.log ----------------------------------------
+// Every 2 seconds while on: frame times (average, median, 95th percentile,
+// worst), where a frame's time goes (the engine's loop clients, the ray
+// tracer's capture and preparations, submitting, waiting for the GPU), the
+// scene's size and the settings that matter. The GPU's own time per pass
+// goes to logs/thief.log (RTGL1_METAL_PROFILE) when the log was on at start.
+std::string logs_dir();
+struct Perf {
+   bool wasOn = false;
+   double start = 0, last = 0, windowStart = 0;
+   std::vector<double> frames;   // ms
+   double wait = 0, draw = 0, capture = 0, prep = 0;
+   std::map<std::string, double> clients;   // seconds in the window
+   std::unordered_map<const char *, std::string> names;
+   uint64_t models = 0, prims = 0, tris = 0, kept = 0, lights = 0;
+   double lastWait = 0, lastDraw = 0, lastCapture = 0, lastPrep = 0;
+} g_perf;
+
+void perf_client_time(const char *client, unsigned, double seconds)
+{
+   auto it = g_perf.names.find(client);
+   if (it == g_perf.names.end())
+      it = g_perf.names.emplace(client, client ? client : "?").first;
+   g_perf.clients[it->second] += seconds;
+}
+
+} // namespace
+extern "C" void (*g_LoopClientTimeHook)(const char *client, unsigned message, double seconds);
+namespace {
+
+void perf_frame(double t)
+{
+   if (!g_cfg.perfLog) {
+      if (g_perf.wasOn) {
+         g_LoopClientTimeHook = nullptr;
+         g_perf.wasOn = false;
+      }
+      return;
+   }
+   if (!g_perf.wasOn) {
+      g_perf = Perf{};
+      g_perf.wasOn = true;
+      g_perf.start = g_perf.windowStart = g_perf.last = t;
+      g_perf.lastWait = g_ui.waitSum; g_perf.lastDraw = g_ui.drawSum;
+      g_perf.lastCapture = g_ui.captureSum; g_perf.lastPrep = g_ui.prepSum;
+      g_LoopClientTimeHook = perf_client_time;
+      if (FILE *f = fopen((logs_dir() + "/perf.log").c_str(), "a")) {
+         time_t now = time(nullptr);
+         char when[64];
+         strftime(when, sizeof(when), "%Y-%m-%d %H:%M:%S", localtime(&now));
+         fprintf(f, "\n==== performance log started %s ====\n", when);
+         fclose(f);
+      }
+      return;
+   }
+   // this frame: its time and the ray tracer's sums since the last frame
+   // (count_frame's window resets them, so differences are taken carefully)
+   auto delta = [](double now, double &last) {
+      const double d = now >= last ? now - last : now;
+      last = now;
+      return d;
+   };
+   g_perf.frames.push_back((t - g_perf.last) * 1000.0);
+   g_perf.last = t;
+   g_perf.wait += delta(g_ui.waitSum, g_perf.lastWait);
+   g_perf.draw += delta(g_ui.drawSum, g_perf.lastDraw);
+   g_perf.capture += delta(g_ui.captureSum, g_perf.lastCapture);
+   g_perf.prep += delta(g_ui.prepSum, g_perf.lastPrep);
+   g_perf.models += g_perfModels;
+   g_perf.prims += g_perfPrims;
+   g_perf.tris += g_perfTris;
+   g_perf.kept += g_cachedDrawn;
+   g_perf.lights += g_frameLightsShown;
+   if (t - g_perf.windowStart < 2.0 || g_perf.frames.empty())
+      return;
+
+   FILE *f = fopen((logs_dir() + "/perf.log").c_str(), "a");
+   if (f) {
+      const double n = double(g_perf.frames.size());
+      std::vector<double> sorted = g_perf.frames;
+      std::sort(sorted.begin(), sorted.end());
+      double sum = 0;
+      for (double ms : sorted)
+         sum += ms;
+      const double avg = sum / n;
+      auto pct = [&](double p) { return sorted[std::min(sorted.size() - 1, size_t(p * (n - 1) + 0.5))]; };
+      const double ms = 1000.0 / n;   // seconds summed over the window -> ms per frame
+      const double wait = g_perf.wait * ms, draw = g_perf.draw * ms, capture = g_perf.capture * ms,
+                   prep = g_perf.prep * ms;
+      const double game = std::max(0.0, avg - wait - draw);
+      const RgFloat3D cam = to_rt(g_camera.pos);
+      int rw, rh;
+      render_size(rw, rh);
+      static const char *kGi[] = {"2 half rate", "1", "2", "1 half rate"};
+      fprintf(f, "[%7.1f s] camera (%.1f %.1f %.1f) m  traced %dx%d -> output %dx%d  %s%s  bounces %s  reach %d m  lights tried %d  bloom %d  vsync %d\n",
+              t - g_perf.start, cam.data[0], cam.data[1], cam.data[2], rw, rh, g_drawableW, g_drawableH,
+              kUpscaleNames[std::clamp(g_cfg.upscale, 0, 5)], g_cfg.dynres > 0 ? " (dynamic)" : "",
+              kGi[std::clamp(g_cfg.gi, 0, 3)], g_cfg.reach, g_cfg.candidates, int(g_cfg.bloom), int(g_vsync));
+      fprintf(f, "  %.1f fps  frame avg %.1f ms  median %.1f  95%% %.1f  worst %.1f\n", n / (t - g_perf.windowStart),
+              avg, pct(0.5), pct(0.95), sorted.back());
+      fprintf(f, "  per frame: game %.1f ms (of it: rt capture+upload %.1f, rt prep %.1f)  rt submit %.1f  gpu wait %.1f\n",
+              game, capture, prep, draw, wait);
+      // the engine's loop clients, busiest first
+      std::vector<std::pair<double, std::string>> clients;
+      double clientsSum = 0;
+      for (const auto &c : g_perf.clients) {
+         clients.push_back({c.second * ms, c.first});
+         clientsSum += c.second * ms;
+      }
+      std::sort(clients.rbegin(), clients.rend());
+      fprintf(f, "  engine loop clients (ms per frame, %.1f in all):", clientsSum);
+      int shown = 0;
+      for (const auto &c : clients) {
+         if (shown >= 14 || c.first < 0.05)
+            break;
+         fprintf(f, "%s %s %.2f", shown ? "," : "", c.second.c_str(), c.first);
+         ++shown;
+      }
+      fprintf(f, "\n  scene per frame: %.0f models (%.0f kept out of view), %.0f primitives, %.0fk model triangles; world %zu groups; %.0f lights traced of %u\n",
+              g_perf.models / n, g_perf.kept / n, g_perf.prims / n, g_perf.tris / n / 1000.0,
+              g_world.size(), g_perf.lights / n, g_lightsTotal);
+      fclose(f);
+   }
+   g_perf.frames.clear();
+   g_perf.clients.clear();
+   g_perf.wait = g_perf.draw = g_perf.capture = g_perf.prep = 0;
+   g_perf.models = g_perf.prims = g_perf.tris = g_perf.kept = g_perf.lights = 0;
+   g_perf.windowStart = t;
+}
+
 void count_frame(bool scene)
 {
    const double t = now_seconds();
@@ -1847,6 +1994,7 @@ void count_frame(bool scene)
    }
    if (scene && g_ui.hintUntil < 0)
       g_ui.hintUntil = t + 8.0;
+   perf_frame(t);
 }
 
 void draw_ui(bool scene)
