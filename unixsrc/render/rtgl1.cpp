@@ -754,6 +754,8 @@ std::vector<PendingLight> g_pendingLights;
 // lights a lamp's glowing glass (or a flame's bowl) was seen at: a lamp, so
 // it lights its surroundings as well as the cone the mapper gave it
 std::unordered_set<uint32_t> g_fixtureLights;
+// of those, a flame's (a torch's, a brazier's): warm, and flickering
+std::unordered_set<uint32_t> g_flameLights;
 // lights moved out of walls (see fix_light_position)
 struct LightFix {
    float offset[3];   // meters
@@ -3831,6 +3833,10 @@ void RenderRTDrawWorld(int primitive, const sRenderBackendVertex *v, const float
          if (hi > 0.2f && c[0] >= c[1] && c[1] >= c[2] * 0.9f && (hi - lo) > 0.25f * hi)
             if (const char *flame = flame_texture(tex, c[0] / hi, c[1] / hi, c[2] / hi)) {
                prim.texture = flame;
+               // its emission map is black outside the flame's shape, so it
+               // glows without the sprite's square (with none, the rasterised
+               // translucent pass showed no glow at all: a dim, brown flame)
+               prim.emissive = 2.0f * std::clamp(g_cfg.spriteGlow, 0.0f, 1.0f);
                // the light at a flame is a torch's (or a candle's, a brazier's)
                float m[3] = {0, 0, 0};
                for (const RgPrimitiveVertex &d : prim.verts)
@@ -3841,6 +3847,7 @@ void RenderRTDrawWorld(int primitive, const sRenderBackendVertex *v, const float
                   const float dx = l.data[0] - m[0], dy = l.data[1] - m[1], dz = l.data[2] - m[2];
                   if (dx * dx + dy * dy + dz * dz < 0.6f * 0.6f) {
                      g_fixtureLights.insert(g_pendingLights[li].id);
+                     g_flameLights.insert(g_pendingLights[li].id);
                      break;
                   }
                }
@@ -3896,6 +3903,9 @@ void RenderRTDrawWorld(int primitive, const sRenderBackendVertex *v, const float
             const float dx = l.data[0] - c[0], dy = l.data[1] - c[1], dz = l.data[2] - c[2];
             if (dx * dx + dy * dy + dz * dz < 0.5f * 0.5f) {
                prim.emissive = std::max(prim.emissive, g_cfg.glow);
+               // the glass lets its light out: a street lamp's light sits
+               // inside its lantern, and the panes kept the street dark
+               prim.flags |= RG_MESH_PRIMITIVE_NO_SHADOW;
                // (g_lightPositions is in the order of g_pendingLights)
                if (li < g_pendingLights.size())
                   g_fixtureLights.insert(g_pendingLights[li].id);
@@ -4163,6 +4173,7 @@ void RenderRTWorldBegin(uint32_t serial)
    g_worldIndex.clear();
    g_worldTextures.clear();
    g_fixtureLights.clear();   // (marked again as the lamps are drawn)
+   g_flameLights.clear();
    // a new world (a mission or a saved game loaded): the models kept from the
    // last one are not this one's, though some have the same numbers and places
    g_objects.clear();
@@ -4291,7 +4302,6 @@ namespace {
 void upload_light(const PendingLight &L)
 {
    const float peak = L.peak;
-   const uint32_t color = pack_color(L.rgb[0] / peak, L.rgb[1] / peak, L.rgb[2] / peak, 1);
    // Dark's brightness is a light level (0..255 at the source, falling off
    // with distance); RTGL1's intensity is luminous flux. Calibrated by eye.
    // Dark falls off as 1/distance up to the light's radius, RTGL1 as
@@ -4301,7 +4311,25 @@ void upload_light(const PendingLight &L)
    // (Dark lit the walls around them with baked lightmaps; traced, at the
    // level's own brightness, they hardly showed against their surroundings)
    const bool fixture = g_fixtureLights.count(L.id) != 0;
-   const float lumens = peak * 4.0f * g_cfg.light * (fixture ? g_cfg.fixtureLight : 1.0f);
+   float lumens = peak * 4.0f * g_cfg.light * (fixture ? g_cfg.fixtureLight : 1.0f);
+   uint32_t color = pack_color(L.rgb[0] / peak, L.rgb[1] / peak, L.rgb[2] / peak, 1);
+   if (g_flameLights.count(L.id)) {
+      // a flame's light: firelight orange (Thief's torches are a pale 88 73 62,
+      // white in the path tracer), and a flicker of its own -- the game's
+      // torches burn steadily (their anim lights stay at full)
+      float c[3] = {L.rgb[0] / peak, L.rgb[1] / peak, L.rgb[2] / peak};
+      static const float kFire[3] = {1.0f, 0.58f, 0.26f};
+      for (int k = 0; k < 3; ++k)
+         c[k] = c[k] * 0.35f + kFire[k] * 0.65f;
+      color = pack_color(c[0], c[1], c[2], 1);
+      if (g_cfg.flicker != 2) {
+         const double t = now_seconds();
+         const float ph = float(L.id % 97) * 0.71f;
+         const float n = 0.5f * std::sin(float(t) * 7.3f + ph) + 0.3f * std::sin(float(t) * 13.1f + ph * 2.3f) +
+                         0.2f * std::sin(float(t) * 23.7f + ph * 3.7f);
+         lumens *= 1.0f + 0.12f * n;
+      }
+   }
    const float *dir = L.dir;
    RgLightSphericalEXT sphere{};
    RgLightSpotEXT spot{};
