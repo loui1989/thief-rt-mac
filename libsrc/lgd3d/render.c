@@ -27,6 +27,9 @@ extern int r3d_rt_backface;
 extern int g_RenderRTShadowOnly;
 // set while lgd3d draws a glowing sprite (lgd3d_hack_light)
 extern int g_RenderRTEmissiveSprite;
+// for the ray tracer's log: this model's draws, and its triangles dropped
+// for want of a world position
+extern int g_RenderRTCaptureCalls, g_RenderRTCaptureDropped;
 #endif
 extern void *g_ModernTextures[LGD3D_MAX_TEXTURES];
 extern grs_bitmap *g_ModernBitmaps[LGD3D_MAX_TEXTURES];
@@ -649,6 +652,7 @@ static BOOL ModernCapture(int primitive, int count, const sRenderBackendVertex *
    sRenderBackendVertex *out;
    if (!RenderRTCaptureDraws())
       return FALSE;
+   ++g_RenderRTCaptureCalls;
    if (primitive != kRenderBackendTriangles || count < 3)
       return TRUE;
    xyz = (float *)temp_malloc(count * 3 * sizeof(float));
@@ -668,8 +672,11 @@ static BOOL ModernCapture(int primitive, int count, const sRenderBackendVertex *
             k = n;
          v[i] = &src[k];
       }
-      if (!v[0]->wvalid || !v[1]->wvalid || !v[2]->wvalid)
+      if (!v[0]->wvalid || !v[1]->wvalid || !v[2]->wvalid) {
+         if (pass == 0)
+            ++g_RenderRTCaptureDropped;
          continue;
+      }
       if ((v[0]->wback != 0) != (pass == 1))
          continue;
       for (i = 0; i < 3; ++i) {

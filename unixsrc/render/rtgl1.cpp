@@ -66,6 +66,7 @@
 
 extern "C" int g_RenderRTCaptureVertices = 0;
 extern "C" int g_RenderRTEmissiveSprite = 0;
+extern "C" int g_RenderRTCaptureCalls = 0, g_RenderRTCaptureDropped = 0;
 extern "C" int g_RenderRTShadowOnly = 0;
 
 namespace {
@@ -3345,6 +3346,7 @@ void RenderRTObjectBegin(uint32_t obj, int flags)
    g_currentWhole = (flags & kRenderRTObjectWhole) != 0;
    g_currentNoShadow = (flags & kRenderRTObjectNoShadow) != 0;
    g_currentCapture.clear();
+   g_RenderRTCaptureCalls = g_RenderRTCaptureDropped = 0;
 }
 
 int RenderRTObjectWanted(uint32_t obj)
@@ -3391,9 +3393,12 @@ void RenderRTObjectEnd(void)
       static std::unordered_set<uint32_t> s_emptyLogged, s_lostLogged;
       auto known = g_objects.find(obj);
       if (known != g_objects.end() && !known->second.prims.empty()) {
-         if (s_lostLogged.size() < 100 && s_lostLogged.insert(obj).second)
-            log_model_change(obj, "drawn by the game with nothing captured, though captured before (%s)",
-                             g_currentWhole ? "whole" : "in pieces");
+         static std::unordered_set<uint32_t> s_lostWithDraws;
+         if (s_lostLogged.size() < 100 &&
+             (s_lostLogged.insert(obj).second ||
+              (g_RenderRTCaptureCalls > 0 && s_lostWithDraws.insert(obj).second)))
+            log_model_change(obj, "drawn by the game with nothing captured, though captured before (%s; %d draws, %d triangles without a world position)",
+                             g_currentWhole ? "whole" : "in pieces", g_RenderRTCaptureCalls, g_RenderRTCaptureDropped);
       } else if (s_emptyLogged.size() < 40 && s_emptyLogged.insert(obj).second)
          log_model_change(obj, "drawn by the game with nothing captured (%s)",
                           g_currentWhole ? "whole" : "in pieces");

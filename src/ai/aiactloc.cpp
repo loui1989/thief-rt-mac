@@ -457,6 +457,19 @@ STDMETHODIMP_(eAIResult) cAILocoAction::Update()
             p.best = d;
             p.dest = m_dest;
          }
+         else if (result <= kAIR_NoResultSwitch && now - p.since > 2500 &&
+                  d < max(6.0f, 2.0f * sqrtf(m_accuracySq)) &&
+                  m_pAIState->DiffZ(m_dest) < m_accuracyZ + m_pAI->GetGroundOffset())
+         {
+            // Blocked just short of where it is going -- a marker by a wall
+            // or a table that a large creature (a horse) cannot get within
+            // three feet of: near enough. Otherwise it walked on the spot
+            // into the obstacle for ever, and its patrol never went on.
+            mprintf("AI %s: near enough to (%.1f %.1f %.1f) at %.1f ft (blocked), arrived\n",
+                    ObjWarnName(id), m_dest.x, m_dest.y, m_dest.z, d);
+            result = kAIR_Success;
+            p.since = now;
+         }
          else if (!p.logged && now - p.since > 4000)
          {
             const cMxsVector * at = m_pAIState->GetLocation();
