@@ -1928,6 +1928,22 @@ static void portal_rt_compute_reach(int start, float limit)
    static int *heap;       // cells, by distance (a binary heap)
    static int heap_cap;
    int n = 0, i;
+   // The distances change little until the camera has moved: worked out
+   // again only when it is in another cell or a foot from where they were
+   // last measured (a city's 90 m of portals each frame cost milliseconds).
+   static int last_start = -1, last_cells = -1;
+   static PortalCell *last_world = NULL;
+   static mxs_vector last_cam;
+   static float last_limit = -1.0f;
+   if (start == last_start && wr_num_cells == last_cells && wr_num_cells > 0 && wr_cell[0] == last_world &&
+       limit == last_limit && portal_rt_dist_size >= wr_num_cells &&
+       mx_dist2_vec(&portal_camera_loc, &last_cam) < 1.0f)
+      return;
+   last_start = start;
+   last_cells = wr_num_cells;
+   last_world = wr_num_cells > 0 ? wr_cell[0] : NULL;
+   last_cam = portal_camera_loc;
+   last_limit = limit;
    portal_rt_dist_limit = limit;
    if (wr_num_cells <= 0)
       return;
@@ -2067,10 +2083,12 @@ static void portal_rt_begin(float zoom, int cell)
    // MEDIA_WATER (engfeat/media.h) is 2
    RenderRTCameraMedium(cell >= 0 && cell < wr_num_cells && WR_CELL(cell) &&
                         WR_CELL(cell)->medium == 2);
+   RenderRTPrepBegin();
    portal_rt_submit_world();
    portal_rt_find_lights(cell);
    portal_rt_compute_reach(cell, 90.0f / 0.3048f);
    objlight_rt_submit();
+   RenderRTPrepEnd();
 }
 #endif
 
@@ -2334,7 +2352,9 @@ cleanup:
    {
       // nearby objects out of view: their shadows and the light they block
       const int rt_suppressed = RenderRTSuppressCapture(0);
+      RenderRTPrepBegin();
       RenderRTGameDrawExtraObjects();
+      RenderRTPrepEnd();
       RenderRTSuppressCapture(rt_suppressed);
    }
    RenderRTSceneEnd();

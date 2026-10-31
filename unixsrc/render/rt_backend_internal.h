@@ -18,6 +18,9 @@ bool Wanted();
 bool Open(SDL_Window *window);
 void Close();
 bool Active();
+// Sets the Metal layer's pixel size for the output resolution setting
+// (before the drawable size is read).
+void ApplyOutputSize();
 
 void *CreateTexture(int width, int height, const void *rgba, int rowBytes);
 int UpdateTexture(void *texture, int width, int height, const void *rgba,

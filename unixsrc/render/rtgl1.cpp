@@ -77,6 +77,7 @@ RgInterface rt{};
 RgLibraryHandle g_lib = nullptr;
 bool g_active = false;
 SDL_MetalView g_metalView = nullptr;
+SDL_Window *g_sdlWindow = nullptr;
 std::string g_rtDir;
 
 struct Settings {
@@ -90,6 +91,7 @@ struct Settings {
                               // 1 one bounce, 2 two bounces, 3 one bounce at half rate
    bool volumetric = false;   // haze lit by every light
    int dynres = 0;            // dynamic resolution's target fps, 0 off
+   int outputHeight = 0;      // the frame's height in pixels, 0 = the screen's own (Retina)
    int reach = 40;            // lights fade out with their walking distance (metres); 0: nearest maxLights
    int maxLights = 64;        // lights given to the path tracer, nearest first; 0 all
    int flicker = 0;           // flickering lights: 0 smoothed, 1 as the game, 2 nearly steady
@@ -174,6 +176,7 @@ void load_settings()
       else if (k == "ambient") g_cfg.ambient = std::clamp(value, 0.0f, 20.0f);
       else if (k == "light_cull") g_cfg.lightCull = value != 0;
       else if (k == "min_roughness") g_cfg.minRoughness = std::clamp(value, 0.0f, 1.0f);
+      else if (k == "output_height") g_cfg.outputHeight = std::clamp(int(value), 0, 4320);
    }
    fclose(f);
 }
@@ -189,13 +192,13 @@ void save_settings()
       return;
    fprintf(f, "upscale = %d\nscale = %.2f\nfps = %d\nvsync = %d\nlight = %.3f\nsky = %.3f\n"
               "light_size = %.3f\nglow = %.3f\nwater = %d\nsprite_glow = %.3f\ngi = %d\n"
-              "volumetric = %d\ndynres = %d\nmax_lights = %d\nmin_roughness = %.2f\nlight_cull = %d\nflicker = %d\nambient = %.3f\nsmooth_models = %d\nfixtures_pass = %d\nlight_fix = %d\nlight_response = %d\nev_min = %d\nlight_candidates = %d\nsteady_faces = %d\nlight_fade = %d\nbloom = %d\nrt_detection = %d\nreach = %d\n",
+              "volumetric = %d\ndynres = %d\nmax_lights = %d\nmin_roughness = %.2f\nlight_cull = %d\nflicker = %d\nambient = %.3f\nsmooth_models = %d\nfixtures_pass = %d\nlight_fix = %d\nlight_response = %d\nev_min = %d\nlight_candidates = %d\nsteady_faces = %d\nlight_fade = %d\nbloom = %d\nrt_detection = %d\nreach = %d\noutput_height = %d\n",
            g_cfg.upscale, g_cfg.scale, int(g_cfg.fps), int(g_cfg.vsync), g_cfg.light, g_cfg.sky,
            g_cfg.lightSize, g_cfg.glow, g_cfg.water, g_cfg.spriteGlow, g_cfg.gi,
            int(g_cfg.volumetric), g_cfg.dynres, g_cfg.maxLights, g_cfg.minRoughness,
            int(g_cfg.lightCull), g_cfg.flicker, g_cfg.ambient, int(g_cfg.smoothModels),
            int(g_cfg.fixturesPass), int(g_cfg.lightFix), g_cfg.response, g_cfg.evMin,
-           g_cfg.candidates, int(g_cfg.steadyFaces), int(g_cfg.lightFade), int(g_cfg.bloom), int(g_cfg.rtDetection), g_cfg.reach);
+           g_cfg.candidates, int(g_cfg.steadyFaces), int(g_cfg.lightFade), int(g_cfg.bloom), int(g_cfg.rtDetection), g_cfg.reach, g_cfg.outputHeight);
    fclose(f);
 }
 
@@ -211,6 +214,7 @@ struct Ui {
    // where a frame's time goes, averaged over the same window: the game's own
    // work, waiting in rgStartFrame for the GPU, submitting in rgDrawFrame
    double waitSum = 0, drawSum = 0, waitMs = 0, drawMs = 0, captureSum = 0, captureMs = 0;
+   double prepSum = 0, prepMs = 0;   // the game's preparations for the ray tracer
    std::string status;        // a line shown in the panel for a while
    double statusUntil = 0;
    int scroll = 0;            // first row shown, when the rows do not all fit
@@ -1169,6 +1173,7 @@ bool Open(SDL_Window *window)
    g_cfg.fps = env_float("THIEF_RT_FPS", g_cfg.fps ? 1.0f : 0.0f) != 0;
    g_ui.hintUntil = -1;
 
+   g_sdlWindow = window;
    g_metalView = SDL_Metal_CreateView(window);
    if (!g_metalView) {
       fprintf(stderr, "RT: no Metal view: %s\n", SDL_GetError());
@@ -1517,6 +1522,41 @@ float text_width(float px, const char *s)
 }
 
 // The size the scene is traced at.
+#if defined(__APPLE__)
+// The frame's size: the screen's own pixels, or fewer (g_cfg.outputHeight)
+// with the system scaling the frame up to the window -- as Blood RT's 1800p.
+// The upscaler's output, and everything done at the output's size (bloom,
+// tone mapping, the 2D overlay), shrink with it.
+struct RtCGSize { double width, height; };
+void apply_output_size()
+{
+   if (!g_metalView || !g_sdlWindow)
+      return;
+   using SelFn = void *(*)(const char *);
+   static SelFn sel = reinterpret_cast<SelFn>(dlsym(RTLD_DEFAULT, "sel_registerName"));
+   static void *msg = dlsym(RTLD_DEFAULT, "objc_msgSend");
+   if (!sel || !msg)
+      return;
+   void *layer = SDL_Metal_GetLayer(g_metalView);
+   int pw = 0, ph = 0, nw = 0, nh = 0;
+   SDL_GetWindowSize(g_sdlWindow, &pw, &ph);
+   SDL_GetWindowSizeInPixels(g_sdlWindow, &nw, &nh);
+   if (!layer || pw <= 0 || ph <= 0 || nh <= 0)
+      return;
+   double scale = double(nh) / double(ph);
+   if (g_cfg.outputHeight > 0 && g_cfg.outputHeight < nh)
+      scale = double(g_cfg.outputHeight) / double(ph);
+   const RtCGSize want{std::floor(pw * scale), std::floor(ph * scale)};
+   const RtCGSize have = reinterpret_cast<RtCGSize (*)(void *, void *)>(msg)(layer, sel("drawableSize"));
+   if (std::fabs(have.width - want.width) < 1.0 && std::fabs(have.height - want.height) < 1.0)
+      return;
+   reinterpret_cast<void (*)(void *, void *, double)>(msg)(layer, sel("setContentsScale:"), scale);
+   reinterpret_cast<void (*)(void *, void *, RtCGSize)>(msg)(layer, sel("setDrawableSize:"), want);
+}
+#else
+void apply_output_size() {}
+#endif
+
 void render_size(int &w, int &h)
 {
    float f;
@@ -1540,13 +1580,13 @@ const char *kUpscaleNames[] = {"Off",
                                "MetalFX Custom"};
 
 enum UiRow {
-   kRowUpscale, kRowScale, kRowDynres, kRowBounces, kRowReach, kRowLights, kRowLightFade, kRowCandidates, kRowLightCull, kRowResponse, kRowFlicker, kRowVolumetric, kRowBloom, kRowVsync,
+   kRowUpscale, kRowScale, kRowOutput, kRowDynres, kRowBounces, kRowReach, kRowLights, kRowLightFade, kRowCandidates, kRowLightCull, kRowResponse, kRowFlicker, kRowVolumetric, kRowBloom, kRowVsync,
    kRowFps, kRowDetection, kRowLight, kRowExposure, kRowAmbient, kRowSky, kRowLightSize, kRowRough, kRowSmooth, kRowSteady, kRowFixtures, kRowLightFix, kRowGlow, kRowWater,
    kRowDebug, kRowFreeze, kRowBackFaces, kRowReuse, kRowBlink, kRowInspect, kRowReset, kRowCount
 };
 
 const char *kRowLabels[kRowCount] = {
-   "Upscaler", "Render resolution", "Dynamic resolution", "Bounce light", "Light reach", "Lights traced",
+   "Upscaler", "Render resolution", "Output resolution", "Dynamic resolution", "Bounce light", "Light reach", "Lights traced",
    "Lights coming into range", "Lights tried per pixel", "Lights behind walls", "Light changes", "Light flicker",
    "Volumetric light", "Bloom", "VSync", "FPS counter", "Light gem and guards", "Light brightness", "Darkest exposure", "Ambient light", "Sky brightness",
    "Light size (soft shadows)", "Surface roughness", "Model shading", "Model faces", "Torches and lamps", "Lights in walls", "Lamp glow", "Water",
@@ -1568,6 +1608,12 @@ std::string row_value(int row)
          snprintf(buf, sizeof(buf), "%dx%d (preset)", w, h);
       else
          snprintf(buf, sizeof(buf), "%d%%  %dx%d", int(std::lround(g_cfg.scale * 100)), w, h);
+      return buf;
+   case kRowOutput:
+      if (g_cfg.outputHeight <= 0)
+         snprintf(buf, sizeof(buf), "Screen's own  %dx%d", g_drawableW, g_drawableH);
+      else
+         snprintf(buf, sizeof(buf), "%dp  %dx%d", g_cfg.outputHeight, g_drawableW, g_drawableH);
       return buf;
    case kRowDynres:
       if (g_cfg.dynres <= 0) return "Off";
@@ -1669,6 +1715,15 @@ void change_row(int row, int dir)
       const float lo = g_cfg.upscale == 5 ? 0.35f : 0.25f;
       const float s = std::round(g_cfg.scale * 20.0f) / 20.0f + 0.05f * dir;
       g_cfg.scale = std::clamp(s, lo, 1.0f);
+      break;
+   }
+   case kRowOutput: {
+      static const int kHeights[] = {0, 2160, 1800, 1600, 1440, 1200, 1080, 900};
+      constexpr int n = int(sizeof(kHeights) / sizeof(kHeights[0]));
+      int i = 0;
+      while (i < n && kHeights[i] != g_cfg.outputHeight)
+         ++i;
+      g_cfg.outputHeight = kHeights[((i < n ? i : 0) + dir + n) % n];
       break;
    }
    case kRowDynres: {
@@ -1784,7 +1839,8 @@ void count_frame(bool scene)
       g_ui.waitMs = g_ui.waitSum * 1000.0 / g_ui.windowFrames;
       g_ui.drawMs = g_ui.drawSum * 1000.0 / g_ui.windowFrames;
       g_ui.captureMs = g_ui.captureSum * 1000.0 / g_ui.windowFrames;
-      g_ui.waitSum = g_ui.drawSum = g_ui.captureSum = 0;
+      g_ui.prepMs = g_ui.prepSum * 1000.0 / g_ui.windowFrames;
+      g_ui.waitSum = g_ui.drawSum = g_ui.captureSum = g_ui.prepSum = 0;
       g_ui.windowStart = t;
       g_ui.windowFrames = 0;
       g_ui.windowWorst = 0;
@@ -1831,8 +1887,8 @@ void draw_ui(bool scene)
       if (g_noteTraced >= 0)
          snprintf(seen, sizeof(seen), "  lit %d (game %d)", int(std::lround(g_noteTraced * 100)),
                   int(std::lround(g_noteOriginal * 100)));
-      snprintf(line2, sizeof(line2), "game %4.1f ms (capture %4.1f)  rt submit %4.1f ms  gpu wait %4.1f ms  lights %u/%u/%u%s",
-               game, g_ui.captureMs, g_ui.drawMs, g_ui.waitMs, g_frameLightsShown, g_lightsReaching, g_lightsTotal, seen);
+      snprintf(line2, sizeof(line2), "game %4.1f ms (capture %4.1f, rt prep %4.1f)  rt submit %4.1f ms  gpu wait %4.1f ms  lights %u/%u/%u%s",
+               game, g_ui.captureMs, g_ui.prepMs, g_ui.drawMs, g_ui.waitMs, g_frameLightsShown, g_lightsReaching, g_lightsTotal, seen);
       const float s = std::round(px * 0.8f);
       const float tw = std::max(text_width(s, line), text_width(s, line2));
       panel(0, 0, tw + 2 * pad, 2 * s + pad * 1.5f, 0.6f);
@@ -2799,10 +2855,27 @@ int RenderRTActive(void) { return g_active ? 1 : 0; }
 
 int RenderRTDetectionWanted(void) { return g_active && g_cfg.rtDetection && g_frameNumber > 2 ? 1 : 0; }
 
+static std::chrono::steady_clock::time_point s_prepStart;
+static int s_prepDepth = 0;
+void RenderRTPrepBegin(void)
+{
+   if (s_prepDepth++ == 0)
+      s_prepStart = std::chrono::steady_clock::now();
+}
+void RenderRTPrepEnd(void)
+{
+   if (s_prepDepth > 0 && --s_prepDepth == 0)
+      g_ui.prepSum += std::chrono::duration<double>(std::chrono::steady_clock::now() - s_prepStart).count();
+}
+
 int RenderRTPointLighting(const float pos[3], float *value)
 {
    if (!g_active || !value)
       return 0;
+   struct PrepScope {
+      PrepScope() { RenderRTPrepBegin(); }
+      ~PrepScope() { RenderRTPrepEnd(); }
+   } prepScope;
    // asked many times a frame (each guard): once
    static uint32_t s_frame = 0;
    static float s_pos[3] = {1e30f, 0, 0}, s_value = 0;
@@ -3853,3 +3926,11 @@ extern "C" {
 
 } // extern "C"
 #pragma pack(pop)
+
+namespace darkrt {
+void ApplyOutputSize()
+{
+   if (g_active)
+      apply_output_size();
+}
+} // namespace darkrt

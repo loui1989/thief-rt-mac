@@ -103,6 +103,10 @@ void RenderRTWorldTexture(int textureId, void *texture);
 // point (Dark units) in the game's own scale (as compute_object_lighting),
 // returning 0 if it cannot. RenderRTNoteLighting shows both on the counter.
 int RenderRTDetectionWanted(void);
+// Time the game spends on the ray tracer's own preparations (finding the
+// lights, their walking distances, models out of view): on the counter.
+void RenderRTPrepBegin(void);
+void RenderRTPrepEnd(void);
 int RenderRTPointLighting(const float pos[3], float *value);
 void RenderRTNoteLighting(float original, float traced);
 

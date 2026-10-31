@@ -110,7 +110,7 @@ void window_drawable_size(int &w, int &h)
    w = g_clientWidth; h = g_clientHeight;
    if (!g_window) return;
 #ifdef DARK_RT
-   if (g_rt) { SDL_Metal_GetDrawableSize(g_window, &w, &h); return; }
+   if (g_rt) { darkrt::ApplyOutputSize(); SDL_Metal_GetDrawableSize(g_window, &w, &h); return; }
 #endif
    SDL_GL_GetDrawableSize(g_window, &w, &h);
 }
