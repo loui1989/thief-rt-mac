@@ -48,6 +48,7 @@
 #include <wrdbrend.h> // to get access to cell texutre
 #include <memall.h>
 extern int ResImageMaterialTile(const void *bitmap, float *su, float *sv);
+extern int ResImageTerrainScale(const void *bitmap, int *w, int *h);
 #include <fogzone.h>
 #include <dbmem.h>   // must be last header! 
 
@@ -1736,8 +1737,19 @@ static void portal_rt_submit_world(void)
                flags |= kRenderRTWorldFullbright;
             tex = (flags & kRenderRTWorldSky) ? NULL : portal_get_texture(ri->texture_id);
             if (tex) {
-               u_scale = (mxs_real)ldexp(1.0, 6 - tex->wlog);
-               v_scale = (mxs_real)ldexp(1.0, 6 - tex->hlog);
+               int tw, th;
+               if (ResImageTerrainScale(tex, &tw, &th)) {
+                  // an HD replacement, mapped at its original's size (.mtl)
+                  u_scale = 64.0f / tw;
+                  v_scale = 64.0f / th;
+               } else if (tex->type != BMT_FLAT8 && tex->w > 0 && tex->h > 0) {
+                  // (wlog is of the row in bytes: twice the width at 16 bits)
+                  u_scale = 64.0f / tex->w;
+                  v_scale = 64.0f / tex->h;
+               } else {
+                  u_scale = (mxs_real)ldexp(1.0, 6 - tex->wlog);
+                  v_scale = (mxs_real)ldexp(1.0, 6 - tex->hlog);
+               }
                if (tex->flags & BMF_TRANS)
                   flags |= kRenderRTWorldTransparent;
             }

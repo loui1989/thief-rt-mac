@@ -260,6 +260,19 @@ extern "C" int ResImageMaterialTile(const void* bitmap, float* su, float* sv)
 	return *su != 1.0f || *sv != 1.0f;
 }
 
+// The size the world maps the texture at (its .mtl's terrain_scale, NewDark):
+// an HD replacement says its original's, so it covers a wall as that did.
+extern "C" int ResImageTerrainScale(const void* bitmap, int* w, int* h)
+{
+	sResImageInfo info;
+	*w = *h = 0;
+	if (!ResImageInfoFind(bitmap, &info) || info.terrainScaleW <= 0)
+		return 0;
+	*w = info.terrainScaleW;
+	*h = info.terrainScaleH > 0 ? info.terrainScaleH : info.terrainScaleW;
+	return 1;
+}
+
 // A copy of an image made elsewhere (texmem's mip-mapped world textures)
 // takes its name, material and full colour with it. The copy's colour is its
 // own allocation, freed by ResImageFreeCopyAttachments.
