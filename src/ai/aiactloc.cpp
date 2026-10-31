@@ -28,6 +28,9 @@
 #include <platform_services.h>
 #include <osysbase.h>
 #include <objedit.h>
+#include <aiutils.h>
+#include <doorphys.h>
+#include <objpos.h>
 #include <dbmem.h>
 
 
@@ -478,6 +481,19 @@ STDMETHODIMP_(eAIResult) cAILocoAction::Update()
                     ObjWarnName(id), m_dest.x, m_dest.y, m_dest.z, at->x, at->y, at->z, d,
                     sqrtf(m_accuracySq), m_pAIState->DiffZ(m_dest), m_accuracyZ,
                     m_pPath ? "" : ", no path");
+            // doors near it: the usual reason an AI stands still
+            const cDynArray<sAIDoorInfo> & doors = AIGetDoors();
+            for (int k = 0; k < doors.Size(); k++)
+            {
+               ObjPos * dp = ObjPosGet(doors[k].obj);
+               if (!dp || AIDistanceSq(dp->loc.vec, *at) > 12.0f * 12.0f)
+                  continue;
+               const int status = GetDoorStatus(doors[k].obj);
+               mprintf("    door %s %.1f ft away: %s, %s by this AI\n", ObjWarnName(doors[k].obj),
+                       sqrtf(AIDistanceSq(dp->loc.vec, *at)),
+                       AIDoorIsOpen(doors[k].obj) ? "open" : (status == kDoorClosed ? "closed" : "moving"),
+                       AICanOpenDoor(id, doors[k].obj) ? "openable" : "not openable");
+            }
             p.logged = TRUE;
          }
       }

@@ -4408,6 +4408,7 @@ static int AIPathRebuildCellDoors()
    g_AIPathDB.m_CellToDoorsTable.SetEmpty();
    g_AIPathDB.m_CellDoors.SetSize(0);
 
+   int nMarked = 0, nMarkedMatched = 0;
    cMxsVector center;
    for (int i = 1; i <= (int)g_AIPathDB.m_nCells; i++)
    {
@@ -4422,41 +4423,57 @@ static int AIPathRebuildCellDoors()
          center.x += pt.x; center.y += pt.y; center.z += pt.z;
       }
       center.x /= cell.vertexCount; center.y /= cell.vertexCount; center.z /= cell.vertexCount;
+      // NewDark's editor marked the cells under doors itself: those take
+      // the door over them whatever its height; others are matched the
+      // editor's way (a door origin can sit a little below the floor)
+      const BOOL marked = (cell.pathFlags & kAIPF_BelowDoor) != 0;
+      int best = -1;
+      float bestHeight = 0;
       for (int j = 0; j < doorBBoxes.Size(); j++)
       {
          ObjPos * pPos = ObjPosGet(doorBBoxes[j].object);
-         if (pPos == NULL)
+         if (pPos == NULL || !CellDoorInXYBox(center, doorBBoxes[j].bbox))
             continue;
-         if (CellDoorInXYBox(center, doorBBoxes[j].bbox))
+         const float height = pPos->loc.vec.z - center.z;
+         if (!marked && (height < -2.0f || height > 7.0f))
+            continue;
+         if (best < 0 || fabs(height - 3.0f) < fabs(bestHeight - 3.0f))
          {
-            const float height = pPos->loc.vec.z - center.z;
-            if (height > -0.01 && height < 7.0f)
-            {
-               g_AIPathDB.m_Cells[i].pathFlags |= kAIPF_BelowDoor;
-               sAICellDoor * pCellDoor = &(g_AIPathDB.m_CellDoors[g_AIPathDB.m_CellDoors.Grow()]);
-               pCellDoor->cell = i;
-               pCellDoor->door = doorBBoxes[j].object;
-               break;
-            }
+            best = j;
+            bestHeight = height;
          }
+      }
+      if (marked)
+         ++nMarked;
+      if (best >= 0)
+      {
+         if (marked)
+            ++nMarkedMatched;
+         g_AIPathDB.m_Cells[i].pathFlags |= kAIPF_BelowDoor;
+         sAICellDoor * pCellDoor = &(g_AIPathDB.m_CellDoors[g_AIPathDB.m_CellDoors.Grow()]);
+         pCellDoor->cell = i;
+         pCellDoor->door = doorBBoxes[best].object;
       }
    }
    // the table points into the array: filled once the array stops growing
    for (int i = 0; i < g_AIPathDB.m_CellDoors.Size(); i++)
       g_AIPathDB.m_CellToDoorsTable.Insert(&g_AIPathDB.m_CellDoors[i]);
 
-   mprintf("AI pathfinding: %d cells under %d doors found (not stored by this database version)\n",
-           g_AIPathDB.m_CellDoors.Size(), doorBBoxes.Size());
+   mprintf("AI pathfinding: %d cells found under %d doors (not stored by this database version; "
+           "%d cells marked as under a door by the editor, %d of them matched)\n",
+           g_AIPathDB.m_CellDoors.Size(), doorBBoxes.Size(), nMarked, nMarkedMatched);
    return g_AIPathDB.m_CellDoors.Size() ? g_AIPathDB.m_CellDoors.Size() : -1;
 }
 
-// Called before pathfinding: the doors may not have been loaded yet when the
-// database was.
+// Called before pathfinding, once the doors' physics exist.
 void AIPathEnsureCellDoors()
 {
    if (g_AIPathCellDoorsPending && g_fAIPathFindInited)
+   {
+      // no door with a box yet: tried again at the next pathfind
       if (AIPathRebuildCellDoors() != 0)
          g_AIPathCellDoorsPending = FALSE;
+   }
 }
 
 
@@ -5956,8 +5973,9 @@ void AIPathFindRead(ITagFile * pTagFile)
 #endif
    pTagFile->CloseBlock();
    
+   // the door table is rebuilt before the first pathfind: the doors' boxes
+   // need their physics, which is not there yet
    g_AIPathCellDoorsPending = g_AIPathCellDoorsPending && g_fAIPathFindInited;
-   AIPathEnsureCellDoors();
 
    if (rehint)
    {

@@ -693,11 +693,13 @@ void AIGetDoorFloorBBoxes(cDynArray<sAIDoorBBox> * pResult)
 
       current.object = obj;
       g_pRotDoorProperty->Get(obj, &pRotDoor);
-      AIGetObjFloorBBox(obj,
-                        &current.bbox,
-                        &pRotDoor->base_closed_location,
-                        &pRotDoor->base_closed_facing);
-      pResult->Append(current);
+      // a door whose box cannot be had yet (no cell, no physics) is left
+      // out rather than given the previous door's box
+      if (AIGetObjFloorBBox(obj,
+                            &current.bbox,
+                            &pRotDoor->base_closed_location,
+                            &pRotDoor->base_closed_facing))
+         pResult->Append(current);
    }
    g_pRotDoorProperty->IterStop(&iter);
 
@@ -714,10 +716,10 @@ void AIGetDoorFloorBBoxes(cDynArray<sAIDoorBBox> * pResult)
       g_pTransDoorProperty->Get(obj, &pTransDoor);
 
       tAIFloorBBox & bbox = current.bbox;
-      AIGetObjFloorBBox(obj,
-                        &bbox,
-                        &pTransDoor->base_closed_location);
-      pResult->Append(current);
+      if (AIGetObjFloorBBox(obj,
+                            &bbox,
+                            &pTransDoor->base_closed_location))
+         pResult->Append(current);
    }
    g_pTransDoorProperty->IterStop(&iter);
 }
