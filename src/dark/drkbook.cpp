@@ -281,6 +281,26 @@ void cBook::RedrawDisplay()
       // find out how tall it is.
       short ch = gr_font_string_height(font,"X"); 
 
+      // A colour font's pixels are colours of the book's own palette. A
+      // book whose picture is a true-colour image (a fan mission's PNG) has
+      // none: the screen palette is a made-up one, and the text came out in
+      // specks of pink, green and blue. Drawn then as ink in the book's text
+      // colour instead, its pixels as how much of the ink they hold.
+      const ushort fontId = font->id;
+      BOOL inkOnly = FALSE;
+      if (font->id == 0xcccc /* FONTT_FLAT8 */)
+      {
+         uchar pal[256 * 3];
+         gr_get_pal(0, 256, pal);
+         inkOnly = TRUE;
+         for (int k = 0; k < 256 && inkOnly; ++k)
+            inkOnly = pal[k * 3] == (uchar)(((k >> 5) & 7) * 255 / 7) &&
+                      pal[k * 3 + 1] == (uchar)(((k >> 2) & 7) * 255 / 7) &&
+                      pal[k * 3 + 2] == (uchar)((k & 3) * 255 / 3);
+         if (inkOnly)
+            font->id = 0x0001;   // FONTT_ANTIALIAS16: its pixels as coverage
+      }
+
       // lookup the the text color 
       
 
@@ -346,6 +366,7 @@ void cBook::RedrawDisplay()
          while (*s != '\0' && isspace(*s))
             s++; 
       }
+      font->id = fontId;
       src->Unlock(); 
       SafeRelease(src); 
       mpFontRes->Unlock(); 

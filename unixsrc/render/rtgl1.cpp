@@ -4847,6 +4847,23 @@ void RenderRTObjectEnd(void)
       // a model that has not moved but whose captured shape is somewhere
       // else now (drawn with another transform): log where it went
       const float jx = c.center[0] - was[0], jy = c.center[1] - was[1], jz = c.center[2] - was[2];
+      // a door or a hatch that jumps (the doors seen flying off as they opened)
+      if ((was[0] != 0 || was[1] != 0 || was[2] != 0) && jx * jx + jy * jy + jz * jz > 0.3f * 0.3f) {
+         static int s_doorLines = 0;
+         char nm[128];
+         RenderRTGameObjectName(obj, nm, sizeof(nm));
+         std::string low(nm);
+         for (char &ch : low)
+            ch = char(tolower((unsigned char)ch));
+         if (s_doorLines < 100 && (low.find("door") != std::string::npos || low.find("hatch") != std::string::npos ||
+                                   low.find("trap") != std::string::npos || low.find("gate") != std::string::npos)) {
+            ++s_doorLines;
+            fprintf(stderr, "RT: door %u \"%s\" drawn %.2f m from last frame's place: (%.2f %.2f %.2f) -> (%.2f %.2f %.2f), "
+                    "the game puts it at (%.2f %.2f %.2f) ft, facing %.0f %.0f %.0f (frame %u)\n",
+                    obj, nm, std::sqrt(jx * jx + jy * jy + jz * jz), was[0], was[1], was[2], c.center[0], c.center[1],
+                    c.center[2], c.pose[0], c.pose[1], c.pose[2], c.pose[3], c.pose[4], c.pose[5], g_frameNumber);
+         }
+      }
       if (c.unchanged == 0 && (was[0] != 0 || was[1] != 0 || was[2] != 0) &&
           jx * jx + jy * jy + jz * jz > 1.0f) {
          const RgFloat3D cam = to_rt(g_camera.pos);

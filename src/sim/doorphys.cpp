@@ -152,6 +152,8 @@ static void SendDoorMessages(ObjID object, int what_happened, int what_was_happe
 // Rotating door functions
 //
 
+static void LogDoor(int o_id, const char* what);
+
 BOOL RotDoorOpenCallback(int o_id)
 {
    cPhysModel    *pModel = g_PhysModels.GetActive(o_id);
@@ -168,6 +170,8 @@ BOOL RotDoorOpenCallback(int o_id)
    // If we're closing, ignore
    if (pDoorProp->status == kDoorClosing)
       return FALSE;
+
+   LogDoor(o_id, "reaches open (set to its open place)");
 
    // Let go of the door
    pModel->GetControls()->StopControlRotationalVelocity();
@@ -213,6 +217,8 @@ BOOL RotDoorCloseCallback(int o_id)
    // If we're opening, ignore
    if (pDoorProp->status == kDoorOpening)
       return FALSE;
+
+   LogDoor(o_id, "reaches closed (set to its closed place)");
 
    // Let go of the door
    pModel->GetControls()->StopControlRotationalVelocity();
@@ -423,8 +429,35 @@ void DoorSlamClosed(int o_id)
    AddDoorBlocking(o_id);
 }
 
+// The door log (logs/thief.log): where a door is against where it should
+// be as it starts, stops and is halted -- to find the doors that fly off.
+static void LogDoor(int o_id, const char* what)
+{
+   static int s_lines = 0;
+   if (s_lines >= 300)
+      return;
+   ++s_lines;
+   cPhysModel* pModel = g_PhysModels.GetActive(o_id);
+   sDoorProp* p = GetDoorProperty(o_id);
+   if (!p)
+      return;
+   const mxs_vector& at = ObjPosGet(o_id)->loc.vec;
+   const mxs_vector zero = {0, 0, 0};
+   const mxs_vector& cog = pModel ? pModel->GetCOGOffset() : zero;
+   fprintf(stderr, "Door %d %s: %s, status %d, at (%.2f %.2f %.2f), base (%.2f %.2f %.2f), "
+           "closed (%.2f %.2f %.2f), open (%.2f %.2f %.2f), centre of mass offset (%.2f %.2f %.2f), "
+           "location held %d, axis %d, open %.0f closed %.0f, speed %.2f\n",
+           o_id, what, p->type == ROTATING_DOOR ? "rotating" : "sliding", p->status,
+           at.x, at.y, at.z, p->base_location.x, p->base_location.y, p->base_location.z,
+           p->base_closed_location.x, p->base_closed_location.y, p->base_closed_location.z,
+           p->base_open_location.x, p->base_open_location.y, p->base_open_location.z,
+           cog.x, cog.y, cog.z, pModel ? (int)pModel->IsLocationControlled() : -1, p->axis,
+           (double)p->open, (double)p->closed, (double)p->base_speed);
+}
+
 BOOL DoorStartOpening(int o_id)
 {
+   LogDoor(o_id, "starts opening");
    cPhysModel  *pModel = g_PhysModels.GetActive(o_id);
    sDoorProp   *pDoorProp;
 
@@ -517,6 +550,7 @@ BOOL DoorStartOpening(int o_id)
 
 BOOL DoorStartClosing(int o_id)
 {
+   LogDoor(o_id, "starts closing");
    cPhysModel  *pModel = g_PhysModels.GetActive(o_id);
    sDoorProp   *pDoorProp;
 
@@ -664,6 +698,8 @@ void DoorPhysAbort(int o_id)
 {
    cPhysModel  *pModel = g_PhysModels.GetActive(o_id);
    sDoorProp   *pDoorProp;
+
+   LogDoor(o_id, "halted (blocked or pushed)");
 
    pDoorProp = GetDoorProperty(o_id);
 
