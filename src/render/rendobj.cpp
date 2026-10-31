@@ -2456,8 +2456,11 @@ BOOL rendobj_core_render_object(ObjID obj, int fragment, int idx, uchar *clut,
    // above the screen stopped, frozen on its last capture). Unclipped, the
    // first piece is all of it and the rest add nothing.
    const BOOL rt_whole = rt_object;
+   int rt_suppressed = 0;
    if (rt_object)
    {
+      // an object is always captured, whatever pass draws it
+      rt_suppressed = RenderRTSuppressCapture(0);
       lgd3d_render_flush();
       RenderRTObjectBegin(obj, (rt_whole ? kRenderRTObjectWhole : 0) |
                                ((rt_type != OM_TYPE_MD && rt_type != OM_TYPE_MESH) ||
@@ -2475,6 +2478,7 @@ BOOL rendobj_core_render_object(ObjID obj, int fragment, int idx, uchar *clut,
       r3d_rt_noclip = 0;
       r3d_rt_backface = 0;
       RenderRTObjectEnd();
+      RenderRTSuppressCapture(rt_suppressed);
    }
 #endif
    rendobj_stop_translucency(obj);

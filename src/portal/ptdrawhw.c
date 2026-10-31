@@ -521,6 +521,11 @@ void portal_render_water_polys(int n)
    gr_set_fill_type(FILL_NORM);
 
    r3_end_block();
+#ifdef DARK_RT
+   // the translucent pass goes on after the water: objects nearer than it
+   // (a fountain's stream over its basin) were drawn with capture still off
+   RenderRTSuppressCapture(rt_suppressed);
+#endif
 
    if (end < num_water_polys)
       start = end;

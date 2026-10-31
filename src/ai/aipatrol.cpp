@@ -528,12 +528,33 @@ ObjID cAIPatrol::TargetNextPatrolObj()
       cMxsVector patrolLoc;
       const cMxsVector & loc = *m_pAIState->GetLocation();
       const char * profile = DarkContentProfile();
+      const char * fm = DarkContentFMName();
+      // Fan missions are made for NewDark, whose Thief 1 is built on the
+      // Thief 2 code and so starts patrols the Thief 2 way. Their scripts
+      // count on it: a patrol link from the AI itself to a marker (the
+      // common "patrol there" trap) only means "go there" under that rule;
+      // the Thief 1 rule sent the AI to whatever patrol point of another
+      // route happened to be nearest (a horse meant to be led away walked
+      // into the nearest guard's route and stood against a wall).
       const BOOL useThief1Initialization =
+         (!fm || !fm[0]) &&
          (_stricmp(profile, "gold") == 0 || _stricmp(profile, "tdp") == 0);
+
+      // A patrol link from the AI itself names where it starts, whichever rule
+      pLinkQuery = g_pAIPatrolLinks->Query(GetID(), LINKOBJ_WILDCARD);
+      if (!pLinkQuery->Done())
+      {
+         pLinkQuery->Link(&link);
+         next = link.dest;
+      }
+      SafeRelease(pLinkQuery);
+      const BOOL startNamed = next != OBJ_NULL;
+      if (startNamed)
+         mprintf("AI %d: patrol starts at %d, linked from the AI\n", GetID(), next);
 
       pLinkQuery = g_pAIPatrolLinks->Query(LINKOBJ_WILDCARD, LINKOBJ_WILDCARD);
 
-      for (; !pLinkQuery->Done(); pLinkQuery->Next())
+      for (; !startNamed && !pLinkQuery->Done(); pLinkQuery->Next())
       {
          pLinkQuery->Link(&link);
          // Thief 1 chooses the nearest patrol destination directly. Thief 2
