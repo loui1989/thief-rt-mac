@@ -447,7 +447,7 @@ inline bool exists(const std::string &p)
 }
 
 // luminance 0..1 at two scales, wrapping (the textures tile)
-inline std::vector<float> heights(const uint8_t *rgba, int w, int h)
+inline std::vector<float> heights(const uint8_t *rgba, int w, int h, bool fineToo = true)
 {
    std::vector<float> l(size_t(w) * h), o(size_t(w) * h);
    for (int i = 0; i < w * h; ++i) {
@@ -496,7 +496,7 @@ inline std::vector<float> heights(const uint8_t *rgba, int w, int h)
    const auto fine = blur(blur(l, small), small);
    const auto broad = blur(blur(l, big), big);
    for (size_t i = 0; i < o.size(); ++i)
-      o[i] = 0.35f * fine[i] + 0.65f * broad[i] * 1.6f;
+      o[i] = (fineToo ? 0.35f * fine[i] : 0.0f) + 0.65f * broad[i] * 1.6f;
    return o;
 }
 
@@ -673,10 +673,17 @@ inline Result prepare(const std::string &dir, const std::string &name, const Cla
    // bumps and heights
    if (c.bump > 0) {
       if (!exists(pN)) {
-         const auto &hg = H();
+         // A polished surface (marble, glazed tile): only its broad relief
+         // (a joint, a worn dip), gently. Its mirror reflection is bent by
+         // every bump: the grain of the stone scattered it into noise -- with
+         // bumps off, the reflection came out nearly clear.
+         std::vector<float> smooth;
+         if (c.polish > 0)
+            smooth = heights(rgba, w, h, false);
+         const auto &hg = c.polish > 0 ? smooth : H();
          std::vector<uint8_t> n(N * 3);
          // a bigger texture has more texels to the same stone: smaller steps
-         const float k = 17.0f * c.bump * std::sqrt(std::clamp(float(std::min(w, h)) / 64.0f, 0.5f, 4.0f));
+         const float k = (c.polish > 0 ? 0.35f : 1.0f) * 17.0f * c.bump * std::sqrt(std::clamp(float(std::min(w, h)) / 64.0f, 0.5f, 4.0f));
          for (int y = 0; y < h; ++y)
             for (int x = 0; x < w; ++x) {
                auto at = [&](int xx, int yy) { return hg[size_t(((yy + h) % h) * w + (xx + w) % w)]; };
