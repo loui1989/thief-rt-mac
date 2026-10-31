@@ -746,7 +746,7 @@ const char *flame_texture(RtTexture *base, float r, float g, float b)
    const int qb = int(std::clamp(b * k, 0.0f, 1.0f) * 15.0f + 0.5f);
    char name[200];
    texture_mean(*base);
-   snprintf(name, sizeof(name), "flame2_%08x_%x%x%x", base->pixelHash, qr, qg, qb);
+   snprintf(name, sizeof(name), "flame3_%08x_%x%x%x", base->pixelHash, qr, qg, qb);
    static std::unordered_set<std::string> s_made;
    if (!s_made.count(name)) {
       if (g_matDir.empty()) {
@@ -763,7 +763,8 @@ const char *flame_texture(RtTexture *base, float r, float g, float b)
             pixels[i + 3] = uint8_t(std::min(255, hi * 3 / 2));
          }
       std::vector<uint8_t> tinted = pixels;
-      const float tint[3] = {qr / 15.0f, qg / 15.0f, qb / 15.0f};
+      // (warmed: a flame's yellow-white picture, glowing, burnt out white)
+      const float tint[3] = {qr / 15.0f, qg / 15.0f * 0.8f, qb / 15.0f * 0.55f};
       for (size_t i = 0; i < tinted.size(); i += 4)
          for (int c = 0; c < 3; ++c)
             tinted[i + c] = uint8_t(std::clamp(tinted[i + c] * tint[c], 0.0f, 255.0f));
@@ -4435,7 +4436,7 @@ void RenderRTDrawWorld(int primitive, const sRenderBackendVertex *v, const float
                // its emission map is black outside the flame's shape, so it
                // glows without the sprite's square (with none, the rasterised
                // translucent pass showed no glow at all: a dim, brown flame)
-               prim.emissive = 2.0f * std::clamp(g_cfg.spriteGlow, 0.0f, 1.0f);
+               prim.emissive = 1.5f * std::clamp(g_cfg.spriteGlow, 0.0f, 1.0f);
                // the light at a flame is a torch's (or a candle's, a brazier's)
                float m[3] = {0, 0, 0};
                for (const RgPrimitiveVertex &d : prim.verts)
@@ -5091,12 +5092,12 @@ void RenderRTLight(uint32_t id, const float pos[3], const float rgb[3], float ra
 
 namespace {
 
-// A light's size. A flame's is a flame's (6 cm): at the 25 cm of the
+// A light's size. A flame's is a flame's (9 cm): at the 25 cm of the
 // rest, bigger than the torch round it, the torch's shadow was washed out to
 // nothing.
 float lightRadius(const PendingLight &L)
 {
-   return g_flameLights.count(L.id) ? std::min(g_cfg.lightSize, 0.06f) : g_cfg.lightSize;
+   return g_flameLights.count(L.id) ? std::min(g_cfg.lightSize, 0.09f) : g_cfg.lightSize;
 }
 
 // smooth noise in -1..1 over time (a flame's flicker): random values a
@@ -5137,9 +5138,15 @@ void upload_light(const PendingLight &L)
       // white in the path tracer), and a flicker of its own -- the game's
       // torches burn steadily (their anim lights stay at full)
       float c[3] = {L.rgb[0] / peak, L.rgb[1] / peak, L.rgb[2] / peak};
-      static const float kFire[3] = {1.0f, 0.58f, 0.26f};
+      // (deep firelight, ~1800 K: Thief's pale torch colour kept only a
+      // little -- mixed half and half, torches still lit walls near white)
+      static const float kFire[3] = {1.0f, 0.50f, 0.17f};
       for (int k = 0; k < 3; ++k)
-         c[k] = c[k] * 0.35f + kFire[k] * 0.65f;
+         c[k] = c[k] * 0.15f + kFire[k] * 0.85f;
+      // and softer than the lamps (Raze RT's rt_torch_light 0.6): a flame
+      // sits close to its wall, and at a flame's small size the wall beside
+      // it burnt out white
+      lumens *= 0.6f;
       color = pack_color(c[0], c[1], c[2], 1);
       if (g_cfg.flicker != 2) {
          // a fire's flicker: slow swells, quicker gusts and now and then a
