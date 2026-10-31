@@ -1719,6 +1719,7 @@ static void portal_rt_submit_world(void)
          if (!r)
             continue;
          first_portal = r->num_polys - r->num_portal_polys;
+         RenderRTWorldCell(c);
          for (p = 0; p < r->num_render_polys; voff += r->poly_list[p].num_vertices, ++p) {
             PortalPolygonCore *pc = &r->poly_list[p];
             PortalPolygonRenderInfo *ri = &r->render_list[p];
@@ -2060,6 +2061,19 @@ static void portal_rt_compute_reach(int start, float limit)
       }
    }
 #undef RT_HD
+}
+
+// A cell's walking distance from the camera (Dark units), 0 if it is drawn on
+// screen, < 0 beyond reach (90 m): the ray tracer leaves far rooms out.
+float portal_rt_cell_walk(int cell)
+{
+   if (cell < 0)
+      return -1.0f;
+   if (cell < portal_rt_drawn_size && portal_rt_drawn[cell] == portal_rt_stamp)
+      return 0.0f;
+   if (!portal_rt_dist_size || cell >= portal_rt_dist_size)
+      return -1.0f;
+   return portal_rt_cell_dist[cell];
 }
 
 // a point's walking distance from the camera (Dark units), < 0 if beyond reach.

@@ -70,6 +70,7 @@
 #include <render_rt.h>
 #include "rt_backend_internal.h"
 #include "rt_font.h"
+extern "C" float portal_rt_cell_walk(int cell);   // portal.c: feet walked, 0 on screen, < 0 out of reach
 
 extern "C" const char *DarkContentFMPath(void);
 extern "C" const char *DarkContentBasePath(void);
@@ -1430,7 +1431,10 @@ void upload_objects()
          // (a bottle or a cabbage out of view shadows nothing seen from more
          // than a few metres: Black Parade's markets kept ~400 such models,
          // 8000 primitives a frame, costing milliseconds of uploading)
-         const float keepBase = std::clamp(5.0f + 14.0f * ext, 5.0f, 40.0f);
+         // (4 m + 8 m per metre of size, at most 25 m: some 280 models were
+         // kept out of view in a fan mission's streets, 5000 primitives
+         // uploaded every frame for shadows mostly nobody saw)
+         const float keepBase = std::clamp(4.0f + 8.0f * ext, 4.0f, 25.0f);
          const float keepAt = keepBase + (c.keptOut ? std::min(8.0f, 0.5f * keepBase) : 0.0f);
          if (dx * dx + dy * dy + dz * dz > std::min(keepAt, kKeepDistance) * std::min(keepAt, kKeepDistance)) {
             if (c.givenFrame + 1 == g_frameNumber && dx * dx + dy * dy + dz * dz < 20.0f * 20.0f)
@@ -1528,12 +1532,23 @@ void log_model_change(uint32_t obj, const char *what, ...)
 
 // ---- world representation -------------------------------------------------
 
+// The world in pieces: one per texture in each 24 m block of the mission, so
+// rooms far from the camera can be left out (Raze RT 0077: the biggest saving
+// on big maps -- every mission's every polygon was traced, every frame).
 struct WorldGroup {
    int textureId;
    int flags;
    std::vector<RgPrimitiveVertex> verts;
    std::vector<uint32_t> indices;
+   std::vector<int> cells;           // the cells its polygons are in
+   float bmin[3] = {1e30f, 1e30f, 1e30f}, bmax[3] = {-1e30f, -1e30f, -1e30f};   // meters
+   bool shown = false;               // given to the path tracer last frame
 };
+constexpr float kWorldChunk = 24.0f;      // meters
+constexpr float kWorldReach = 60.0f;      // meters walked from the camera (as Raze RT)
+constexpr float kWorldNear = 20.0f;       // meters in a straight line: always (shadows, reflections)
+int g_worldCell = -1;
+uint32_t g_worldShownGroups = 0;
 uint32_t g_worldSerial = 0;
 bool g_worldValid = false;
 std::vector<WorldGroup> g_world;
@@ -1552,10 +1567,39 @@ void upload_world()
    }
    static uint32_t s_reported = 0;
    size_t tris = 0, cutTris = 0;
+   g_worldShownGroups = 0;
+   const RgFloat3D cam = to_rt(g_camera.pos);
    for (size_t i = 0; i < g_world.size(); ++i) {
       WorldGroup &g = g_world[i];
       if (g.verts.empty() || (g.flags & kRenderRTWorldSky))
          continue;
+      // a room far from the camera (walking, through the openings) is left
+      // out, unless near in a straight line (its shadows and reflections);
+      // once given, kept a little farther, so pieces do not come and go
+      {
+         const float reachFt = (g.shown ? kWorldReach * 1.25f : kWorldReach) / kMetersPerUnit;
+         bool in = g.cells.empty();
+         for (int c : g.cells) {
+            const float w = portal_rt_cell_walk(c);
+            if (w >= 0.0f && w < reachFt) {
+               in = true;
+               break;
+            }
+         }
+         if (!in) {
+            float d2 = 0;
+            for (int k = 0; k < 3; ++k) {
+               const float d = std::max({g.bmin[k] - cam.data[k], 0.0f, cam.data[k] - g.bmax[k]});
+               d2 += d * d;
+            }
+            const float near = g.shown ? kWorldNear * 1.25f : kWorldNear;
+            in = d2 < near * near;
+         }
+         g.shown = in;
+         if (!in)
+            continue;
+         ++g_worldShownGroups;
+      }
       auto found = g_worldTextures.find(g.textureId);
       RtTexture *tex = found == g_worldTextures.end() ? nullptr : found->second;
       // (as Blood RT: the walls do not move, and each face is shaded flat)
@@ -2561,9 +2605,9 @@ void perf_frame(double t)
          fprintf(f, "%s %s %.2f", shown ? "," : "", c.second.c_str(), c.first);
          ++shown;
       }
-      fprintf(f, "\n  scene per frame: %.0f models (%.0f kept out of view), %.0f primitives, %.0fk model triangles; world %zu groups; %.0f lights traced of %u\n",
+      fprintf(f, "\n  scene per frame: %.0f models (%.0f kept out of view), %.0f primitives, %.0fk model triangles; world %u of %zu pieces traced; %.0f lights traced of %u\n",
               g_perf.models / n, g_perf.kept / n, g_perf.prims / n, g_perf.tris / n / 1000.0,
-              g_world.size(), g_perf.lights / n, g_lightsTotal);
+              g_worldShownGroups, g_world.size(), g_perf.lights / n, g_lightsTotal);
       fclose(f);
    }
    g_perf.frames.clear();
@@ -4246,17 +4290,32 @@ void RenderRTWorldBegin(uint32_t serial)
    g_worldValid = false;
 }
 
+void RenderRTWorldCell(int cell) { g_worldCell = cell; }
+
 void RenderRTWorldPolygon(int textureId, int flags, int count, const float *xyz, const float *uv)
 {
    if (count < 3)
       return;
-   const uint64_t key = (uint64_t(uint32_t(textureId)) << 8) | uint64_t(flags & 0xff);
+   // its block of the mission, by its first corner
+   const RgFloat3D p0 = to_rt(xyz);
+   auto block = [](float v) { return uint64_t(std::clamp(int(std::floor(v / kWorldChunk)) + 4096, 0, 8191)); };
+   const uint64_t chunk = block(p0.data[0]) | (block(p0.data[1]) << 13) | (block(p0.data[2]) << 26);
+   const uint64_t key = (uint64_t(uint32_t(textureId) & 0xffffu) << 48) | (uint64_t(flags & 0xff) << 40) | chunk;
    auto found = g_worldIndex.find(key);
    if (found == g_worldIndex.end()) {
       found = g_worldIndex.emplace(key, g_world.size()).first;
       g_world.push_back(WorldGroup{textureId, flags, {}, {}});
    }
    WorldGroup &g = g_world[found->second];
+   if (g_worldCell >= 0 && (g.cells.empty() || g.cells.back() != g_worldCell))
+      g.cells.push_back(g_worldCell);
+   for (int i = 0; i < count; ++i) {
+      const RgFloat3D q = to_rt(xyz + i * 3);
+      for (int k = 0; k < 3; ++k) {
+         g.bmin[k] = std::min(g.bmin[k], q.data[k]);
+         g.bmax[k] = std::max(g.bmax[k], q.data[k]);
+      }
+   }
    // Newell normal
    float nx = 0, ny = 0, nz = 0;
    for (int i = 0; i < count; ++i) {
@@ -4299,8 +4358,9 @@ void RenderRTWorldEnd(void)
    size_t verts = 0;
    for (const WorldGroup &g : g_world)
       verts += g.verts.size();
-   fprintf(stderr, "RT: world representation: %zu texture groups, %zu vertices\n",
-           g_world.size(), verts);
+   g_worldCell = -1;
+   fprintf(stderr, "RT: world representation: %zu texture groups (by %.0f m blocks), %zu vertices\n",
+           g_world.size(), kWorldChunk, verts);
 }
 
 void RenderRTWorldTexture(int textureId, void *texture)

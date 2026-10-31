@@ -96,6 +96,8 @@ void RenderRTTextureSource(const void *bitmap);
 // (re)submitted between RenderRTWorldBegin and RenderRTWorldEnd.
 int RenderRTWorldWanted(uint32_t serial);
 void RenderRTWorldBegin(uint32_t serial);
+// the cell the following polygons are in (the ray tracer leaves far rooms out)
+void RenderRTWorldCell(int cell);
 void RenderRTWorldPolygon(int textureId, int flags, int count,
                           const float *xyz, const float *uv);
 void RenderRTWorldEnd(void);

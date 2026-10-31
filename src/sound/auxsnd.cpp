@@ -9,6 +9,8 @@
 #include <stdio.h>
 #include <string.h>
 #include <limits.h>
+#include <stdlib.h>
+#include <stdint.h>
 
 #include <lg.h>
 #include <platform_services.h>
@@ -386,6 +388,87 @@ void *DecodeOggToWave(const void *source, uint32 sourceLen,
 #endif
 }
 
+// Decoded Ogg Vorbis sounds, kept: each was decoded again every time it was
+// played (20-35 ms on the main thread, a hitch whenever a fan mission's
+// ambient sound started -- or failed and was tried again, hundreds of times).
+// By the source's length and a hash of its bytes; a copy is handed out
+// (freed by the player as before). Failures are kept too. At most 256 MB.
+struct sDecodedOgg
+{
+   uint8 *wave;      // NULL: it could not be decoded
+   uint32 waveLen;
+   uint32 lastUse;
+};
+
+static uint64_t OggKey(const uint8 *p, uint32 n)
+{
+   uint64_t h = 1469598103934665603ull ^ n;
+   for (uint32 i = 0; i < n; i += (n > 65536 ? 7 : 1))
+      h = (h ^ p[i]) * 1099511628211ull;
+   return h;
+}
+
+static sDecodedOgg *g_pOggCache;
+static int g_nOggCache, g_maxOggCache;
+static size_t g_oggCacheBytes;
+static uint32 g_oggUse;
+
+static sDecodedOgg *FindDecodedOgg(uint64_t key, uint64_t *keys)
+{
+   for (int i = 0; i < g_nOggCache; ++i)
+      if (keys[i] == key)
+         return &g_pOggCache[i];
+   return NULL;
+}
+
+static uint64_t *g_pOggKeys;
+
+static void KeepDecodedOgg(uint64_t key, const uint8 *wave, uint32 waveLen)
+{
+   // room: the least recently used ones go
+   while (g_oggCacheBytes + waveLen > (256u << 20) && g_nOggCache > 0)
+   {
+      int oldest = 0;
+      for (int i = 1; i < g_nOggCache; ++i)
+         if (g_pOggCache[i].lastUse < g_pOggCache[oldest].lastUse)
+            oldest = i;
+      if (g_pOggCache[oldest].wave)
+      {
+         g_oggCacheBytes -= g_pOggCache[oldest].waveLen;
+         free(g_pOggCache[oldest].wave);
+      }
+      g_pOggCache[oldest] = g_pOggCache[g_nOggCache - 1];
+      g_pOggKeys[oldest] = g_pOggKeys[g_nOggCache - 1];
+      --g_nOggCache;
+   }
+   if (g_nOggCache == g_maxOggCache)
+   {
+      const int cap = g_maxOggCache ? g_maxOggCache * 2 : 256;
+      sDecodedOgg *c = (sDecodedOgg *)realloc(g_pOggCache, sizeof(*c) * cap);
+      uint64_t *k = (uint64_t *)realloc(g_pOggKeys, sizeof(*k) * cap);
+      if (c) g_pOggCache = c;
+      if (k) g_pOggKeys = k;
+      if (!c || !k)
+         return;
+      g_maxOggCache = cap;
+   }
+   sDecodedOgg d;
+   d.wave = NULL;
+   d.waveLen = 0;
+   d.lastUse = ++g_oggUse;
+   if (wave)
+   {
+      d.wave = (uint8 *)malloc(waveLen);
+      if (!d.wave)
+         return;
+      memcpy(d.wave, wave, waveLen);
+      d.waveLen = waveLen;
+      g_oggCacheBytes += waveLen;
+   }
+   g_pOggKeys[g_nOggCache] = key;
+   g_pOggCache[g_nOggCache++] = d;
+}
+
 bool PrepareSoundBuffer(void *source, uint32 sourceLen, void **prepared,
                         uint32 *preparedLen, void **owned)
 {
@@ -394,7 +477,22 @@ bool PrepareSoundBuffer(void *source, uint32 sourceLen, void **prepared,
    *owned = NULL;
    if (sourceLen < 4 || memcmp(source, "OggS", 4) != 0)
       return true;
+   const uint64_t key = OggKey(static_cast<const uint8 *>(source), sourceLen);
+   if (sDecodedOgg *d = FindDecodedOgg(key, g_pOggKeys))
+   {
+      d->lastUse = ++g_oggUse;
+      if (!d->wave)
+         return false;
+      *owned = Malloc(d->waveLen);
+      if (!*owned)
+         return false;
+      memcpy(*owned, d->wave, d->waveLen);
+      *preparedLen = d->waveLen;
+      *prepared = *owned;
+      return true;
+   }
    *owned = DecodeOggToWave(source, sourceLen, preparedLen);
+   KeepDecodedOgg(key, static_cast<const uint8 *>(*owned), *owned ? *preparedLen : 0);
    if (!*owned)
       return false;
    *prepared = *owned;
