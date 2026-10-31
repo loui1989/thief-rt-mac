@@ -971,6 +971,9 @@ static void RenderBitmap(ParticleGroup *pg, int *list)
          if (c > 0)
             lgd3d_set_alpha(c);
          
+#ifdef DARK_RT
+         if (!lgd3d_rt_billboard(p, fix_float(dx), fix_float(dy)))
+#endif
          lgd3d_g2trifan(4, vlist);
 
          if (multiframe)

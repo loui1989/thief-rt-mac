@@ -2,6 +2,7 @@
 #include <algorithm>
 #include <atomic>
 #include <chrono>
+#include <condition_variable>
 #include <mutex>
 #include <thread>
 #include <unordered_map>
@@ -11,7 +12,16 @@
 #include <sndplatform.h>
 
 namespace {
-struct Timer { std::atomic<bool> active{true}; std::thread thread; };
+// A periodic timer (the mixer's fades). Stopped at once: the thread used to
+// sleep its whole period before it saw it was stopped, and the game waited
+// for it -- up to 33 ms of the game loop each time a fade ended (the "Sound
+// Client" hitches every few seconds in play).
+struct Timer {
+   std::mutex m;
+   std::condition_variable cv;
+   bool active = true;
+   std::thread thread;
+};
 std::mutex g_mutex;
 std::unordered_map<uint32, Timer *> g_timers;
 std::atomic<uint32> g_nextTimer{1};
@@ -28,9 +38,19 @@ uint32 SndStartPeriodicTimer(uint32 period, SndTimerCallback callback, void *use
    Timer *timer = new Timer;
    uint32 id = g_nextTimer++;
    timer->thread = std::thread([timer, period, callback, user] {
+      const auto step = std::chrono::milliseconds(std::max<uint32>(period, 1));
+      auto next = std::chrono::steady_clock::now() + step;
+      std::unique_lock<std::mutex> lock(timer->m);
       while (timer->active) {
-         std::this_thread::sleep_for(std::chrono::milliseconds(std::max<uint32>(period, 1)));
-         if (timer->active) callback(user);
+         if (timer->cv.wait_until(lock, next, [timer] { return !timer->active; }))
+            break;
+         next += step;
+         const auto now = std::chrono::steady_clock::now();
+         if (next < now)
+            next = now + step;   // (late: no burst of catching up)
+         lock.unlock();
+         callback(user);
+         lock.lock();
       }
    });
    std::lock_guard<std::mutex> lock(g_mutex); g_timers[id] = timer; return id;
@@ -41,10 +61,18 @@ void SndEndPeriodicTimer(uint32 id)
    Timer *timer = nullptr;
    { std::lock_guard<std::mutex> lock(g_mutex); auto it = g_timers.find(id);
      if (it == g_timers.end()) return; timer = it->second; g_timers.erase(it); }
-   timer->active = false;
-   if (timer->thread.joinable() && timer->thread.get_id() != std::this_thread::get_id()) timer->thread.join();
-   else if (timer->thread.joinable()) timer->thread.detach();
-   delete timer;
+   {
+      std::lock_guard<std::mutex> lock(timer->m);
+      timer->active = false;
+   }
+   timer->cv.notify_all();
+   if (timer->thread.joinable() && timer->thread.get_id() != std::this_thread::get_id()) {
+      timer->thread.join();
+      delete timer;
+   } else if (timer->thread.joinable()) {
+      timer->thread.detach();   // (stopped from its own callback: it ends by itself)
+   } else
+      delete timer;
 }
 
 void SndStopPeriodicTimer(uint32 id, uint32) { SndEndPeriodicTimer(id); }

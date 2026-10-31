@@ -49,6 +49,7 @@
 #include <memory>
 #include <mutex>
 #include <thread>
+#include <tuple>
 #include <deque>
 #include <map>
 #include <string>
@@ -123,6 +124,7 @@ struct Settings {
    bool rtDetection = true;   // the light gem and the guards go by the ray-traced light
    bool bloom = true;         // the glow around bright light (~0.8 ms at 4K output)
    bool lightFade = true;     // lights entering or leaving the traced set fade
+   bool torchShadows = true;  // a torch's body casts shadows (only its cup lets the flame's light out)
    bool steadyFaces = true;   // models' faces seen or shadow-only by a fixed rule, not by the view
    bool lightFix = true;      // lights moved out of the walls they sit in
    bool fixturesPass = true;  // a torch or small lamp lets its own light out
@@ -202,6 +204,7 @@ void load_settings()
       else if (k == "bloom") g_cfg.bloom = value != 0;
       else if (k == "light_fade") g_cfg.lightFade = value != 0;
       else if (k == "steady_faces") g_cfg.steadyFaces = value != 0;
+      else if (k == "torch_shadows") g_cfg.torchShadows = value != 0;
       else if (k == "light_fix") g_cfg.lightFix = value != 0;
       else if (k == "fixtures_pass") g_cfg.fixturesPass = value != 0;
       else if (k == "ambient") g_cfg.ambient = std::clamp(value, 0.0f, 20.0f);
@@ -286,6 +289,9 @@ struct RtTexture {
    // a hash of its pixels, for flame_texture (made once, not every frame)
    uint32_t pixelHash = 0;
    bool pixelHashValid = false;
+   // its colour on average where it is not see-through (a flame picture's
+   // orange), with pixelHash
+   float mean[3] = {1, 1, 1};
 };
 
 void settle_job(RtTexture &t);
@@ -694,6 +700,28 @@ const char *texture_name(RtTexture *t)
    return t->provided ? t->name : nullptr;
 }
 
+// a texture's mean colour where it is not see-through (made once a picture)
+void texture_mean(RtTexture &t)
+{
+   if (!t.pixelHashValid) {
+      t.pixelHash = rtmat::fnv(t.rgba.data(), t.rgba.size());
+      t.pixelHashValid = true;
+      double sum[3] = {0, 0, 0}, w = 0;
+      for (size_t i = 0; i + 3 < t.rgba.size(); i += 4) {
+         const double a = t.rgba[i + 3] / 255.0;
+         for (int k = 0; k < 3; ++k)
+            sum[k] += t.rgba[i + k] / 255.0 * a;
+         w += a;
+      }
+      // brought to full brightness: a colour, not how bright
+      double hi = 0;
+      for (int k = 0; k < 3; ++k)
+         hi = std::max(hi, w > 0 ? sum[k] / w : 1.0);
+      for (int k = 0; k < 3; ++k)
+         t.mean[k] = hi > 0.02 ? float(sum[k] / w / hi) : 1.0f;
+   }
+}
+
 // A flame sprite: its alpha texture again under a name of its own, with an
 // emission map of its colour within its soft shape (glowing as a whole, the
 // sprite's square showed). Kept for the session.
@@ -707,10 +735,7 @@ const char *flame_texture(RtTexture *base, float r, float g, float b)
    const int qg = int(std::clamp(g * k, 0.0f, 1.0f) * 15.0f + 0.5f);
    const int qb = int(std::clamp(b * k, 0.0f, 1.0f) * 15.0f + 0.5f);
    char name[200];
-   if (!base->pixelHashValid) {
-      base->pixelHash = rtmat::fnv(base->rgba.data(), base->rgba.size());
-      base->pixelHashValid = true;
-   }
+   texture_mean(*base);
    snprintf(name, sizeof(name), "flame2_%08x_%x%x%x", base->pixelHash, qr, qg, qb);
    static std::unordered_set<std::string> s_made;
    if (!s_made.count(name)) {
@@ -718,7 +743,16 @@ const char *flame_texture(RtTexture *base, float r, float g, float b)
          g_matDir = g_rtDir + "/mat_dev";
          mkdir(g_matDir.c_str(), 0755);
       }
-      std::vector<uint8_t> tinted = base->rgba;
+      // a flame picture drawn added over the scene, on black, with no
+      // see-through of its own: see-through where it is dark, or its black
+      // square showed (RTGL1 blends by alpha)
+      std::vector<uint8_t> pixels = base->rgba;
+      if (!base->hasAlpha)
+         for (size_t i = 0; i + 3 < pixels.size(); i += 4) {
+            const int hi = std::max({pixels[i], pixels[i + 1], pixels[i + 2]});
+            pixels[i + 3] = uint8_t(std::min(255, hi * 3 / 2));
+         }
+      std::vector<uint8_t> tinted = pixels;
       const float tint[3] = {qr / 15.0f, qg / 15.0f, qb / 15.0f};
       for (size_t i = 0; i < tinted.size(); i += 4)
          for (int c = 0; c < 3; ++c)
@@ -733,7 +767,7 @@ const char *flame_texture(RtTexture *base, float r, float g, float b)
          .sType = RG_STRUCTURE_TYPE_ORIGINAL_TEXTURE_INFO,
          .pNext = &details,
          .pTextureName = name,
-         .pPixels = base->rgba.data(),
+         .pPixels = pixels.data(),
          .size = {uint32_t(base->width), uint32_t(base->height)},
          .filter = RG_SAMPLER_FILTER_AUTO,
          .addressModeU = RG_SAMPLER_ADDRESS_MODE_CLAMP,
@@ -836,6 +870,7 @@ int g_drawableW = 1, g_drawableH = 1;
 uint32_t g_framePrims = 0, g_frameDropped = 0, g_frameLights = 0;
 // this frame's light positions (meters), for making light fixtures glow
 std::vector<RgFloat3D> g_lightPositions;
+std::vector<uint32_t> g_lightPositionIds;   // (their lights' ids, in the same order)
 // the level's ambient light (0..1), and the glow it gives surfaces
 float g_levelAmbient = 0.0f;
 // the player's light, by the game and by the path tracer (for the frame counter)
@@ -995,6 +1030,7 @@ void start_frame()
    g_frameLightsShown = g_frameLights;
    g_framePrims = g_frameDropped = g_frameLights = 0;
    g_lightPositions.clear();
+   g_lightPositionIds.clear();
    g_pendingLights.clear();
    g_primitiveCounters.clear();
 }
@@ -1077,6 +1113,19 @@ struct CachedObject {
    // each texture's look as a face turned toward the camera (flags, glow,
    // colour), for its faces captured turned away: kept across frames
    std::unordered_map<std::string, CapturedPrim> looks;
+   // as given to the path tracer last time: this frame's faces are put in
+   // its order, so each vertex is the same vertex as last frame (see
+   // match_previous)
+   std::vector<CapturedPrim> prev;
+   bool fresh = false;      // captured anew this frame (not as it was)
+   bool steadied = false;   // steady_faces done on this frame's capture
+   // a torch round its flame's light: its faces next to the flame let the
+   // light out, the rest cast shadows (split: the near ones first)
+   bool flameInside = false;
+   float flameAt[3] = {};
+   std::vector<CapturedPrim> split;
+   size_t splitNear = 0;
+   bool splitValid = false;
 };
 
 // cached objects farther than this from the camera are not drawn out of view
@@ -1213,6 +1262,11 @@ void steady_faces(CachedObject &c, const float *pose = nullptr)
 {
    for (const CapturedPrim &p : c.prims)
       if (!(p.flags & RG_MESH_PRIMITIVE_SHADOW_ONLY) && !p.sprite) {
+         // (one look a texture, kept: a texture with a glowing part and a
+         // plain one gave its back faces the one or the other by the view)
+         auto f = c.looks.find(p.texture);
+         if (f != c.looks.end() && f->second.flags != p.flags)
+            continue;
          CapturedPrim look = p;
          look.verts.clear();
          c.looks[p.texture] = look;
@@ -1314,7 +1368,11 @@ void steady_faces(CachedObject &c, const float *pose = nullptr)
          else
             look = &f->second;
       }
-      const std::pair<std::string, int> key{src.texture, shadowOnly ? 1 : 0};
+      // (by its look too: two looks of a texture in one primitive took the
+      // first one's, which with the view became the other's)
+      const CapturedPrim &as = shadowOnly ? src : *look;
+      const std::pair<std::string, int> key{
+         src.texture, shadowOnly ? 1 : int(2 + ((as.flags & 0xffffu) << 2) + (as.emissive > 0.0f ? 1 : 0))};
       auto it = out.find(key);
       if (it == out.end()) {
          CapturedPrim p = shadowOnly ? src : *look;
@@ -1370,6 +1428,12 @@ uint64_t hash_prims_unordered(const std::vector<CapturedPrim> &prims)
    return sum ^ (x << 1);
 }
 
+float g_uploadHighlight = 0.0f;   // upload_captured: the model being given is the highlit one
+}   // namespace
+extern "C" int highlit_obj;                 // objlight.c: the object in reach (ObjID)
+extern "C" float objlight_highlight_level;  // how much the game lights it up (highlight_level)
+namespace {
+
 void upload_captured(uint64_t id, const CapturedPrim &p, bool passLight = false)
 {
    // a torch's own model sits around its light: as a shadow caster it put
@@ -1388,7 +1452,11 @@ void upload_captured(uint64_t id, const CapturedPrim &p, bool passLight = false)
    // random bounce rays find is a splotch on every wall around it.
    const bool opaque = !(p.flags & (RG_MESH_PRIMITIVE_TRANSLUCENT | RG_MESH_PRIMITIVE_SHADOW_ONLY)) && !p.sprite;
    const float ambient = opaque ? ambient_emissive() : 0.0f;
-   const bool glows = p.emissive > 0.0f && opaque;
+   // the object the player can pick up or use, lit up as the game lights it
+   // (Dark adds its highlight to the model's lighting, which the path tracer
+   // replaces: nothing showed which object was in reach)
+   const float highlight = opaque ? g_uploadHighlight : 0.0f;
+   const bool glows = (p.emissive > 0.0f || highlight > 0.0f) && opaque;
    const RgMeshPrimitiveFlags glowFlags =
       glows ? RgMeshPrimitiveFlags(RG_MESH_PRIMITIVE_EMISSIVE_OVERRIDE | RG_MESH_PRIMITIVE_EMISSIVE_SCREEN_SCALED) : 0u;
    auto prim = RgMeshPrimitiveInfo{
@@ -1404,7 +1472,7 @@ void upload_captured(uint64_t id, const CapturedPrim &p, bool passLight = false)
       .pTextureName = p.texture.empty() ? nullptr : p.texture.c_str(),
       .textureFrame = 0,
       .color = p.color,
-      .emissive = std::max(p.emissive, ambient),
+      .emissive = std::max({p.emissive, ambient, highlight}),
       .classicLight = 1.0f,
       .emissiveGi = glows ? std::max(p.emissive * 0.06f, ambient) : 0.0f,
    };
@@ -1420,6 +1488,178 @@ size_t g_perfTris = 0;
 // model, not by its place in the list: the list's order changed as faces
 // turned toward or away, and RTGL1 matched the wrong primitives between
 // frames (a walking character smeared).
+// A model captured anew is given to the path tracer with its faces in the
+// order it had last frame, each turned to start at the same corner. The path
+// tracer finds where each vertex was last frame by its place in the
+// primitive (and only if the primitive has as many as before); the game draws
+// a model's faces in an order that changes with the view and as it animates,
+// so given as drawn, a vertex was another vertex last frame, its motion
+// pointed anywhere and the denoiser threw its history away -- the flicker and
+// blotches on characters, a swinging sign, a lamp walked up to (frozen
+// models: steady). A face is found again by its corners where it has not
+// moved, else by where its texture lies on it (the same as it animates),
+// the nearest such face where several are mapped alike (a left and a right
+// arm).
+namespace {
+inline uint64_t corner_hash(int64_t a, int64_t b, int64_t c = 0)
+{
+   uint64_t h = 1469598103934665603ull;
+   for (int64_t v : {a, b, c})
+      h = (h ^ uint64_t(v)) * 1099511628211ull;
+   return h ^ (h >> 31);
+}
+// a face's corners, in any order of the three, with the way it winds
+inline uint64_t face_key(uint64_t k0, uint64_t k1, uint64_t k2, uint64_t salt)
+{
+   const int odd = (int(k0 > k1) + int(k0 > k2) + int(k1 > k2)) & 1;   // its winding
+   uint64_t k[3] = {k0, k1, k2};
+   std::sort(k, k + 3);
+   uint64_t h = salt ^ uint64_t(odd);
+   for (uint64_t v : k)
+      h = (h ^ v) * 0x9E3779B97F4A7C15ull;
+   return h ^ (h >> 29);
+}
+inline uint64_t place_key(const RgPrimitiveVertex *v)
+{
+   uint64_t k[3];
+   for (int i = 0; i < 3; ++i)
+      k[i] = corner_hash(std::llround(v[i].position[0] * 500.0f), std::llround(v[i].position[1] * 500.0f),
+                         std::llround(v[i].position[2] * 500.0f));
+   return face_key(k[0], k[1], k[2], 0x51ull);
+}
+inline uint64_t map_key(const RgPrimitiveVertex *v)
+{
+   uint64_t k[3];
+   for (int i = 0; i < 3; ++i)
+      k[i] = corner_hash(std::llround(v[i].texCoord[0] * 4096.0f), std::llround(v[i].texCoord[1] * 4096.0f));
+   return face_key(k[0], k[1], k[2], 0xA3ull);
+}
+}   // namespace
+
+void match_faces(CapturedPrim &p, const CapturedPrim &q)
+{
+   const size_t np = p.verts.size() / 3, nq = q.verts.size() / 3;
+   if (!np || !nq)
+      return;
+   std::unordered_map<uint64_t, std::vector<uint32_t>> byPlace, byMap;
+   byPlace.reserve(nq * 2);
+   byMap.reserve(nq * 2);
+   std::vector<std::array<float, 3>> qMid(nq);
+   for (size_t j = 0; j < nq; ++j) {
+      const RgPrimitiveVertex *v = &q.verts[j * 3];
+      byPlace[place_key(v)].push_back(uint32_t(j));
+      byMap[map_key(v)].push_back(uint32_t(j));
+      for (int k = 0; k < 3; ++k)
+         qMid[j][k] = (v[0].position[k] + v[1].position[k] + v[2].position[k]) / 3.0f;
+   }
+   std::vector<int32_t> slot(np, -1);
+   std::vector<char> taken(nq, 0);
+   size_t matched = 0;
+   for (size_t i = 0; i < np; ++i) {
+      auto f = byPlace.find(place_key(&p.verts[i * 3]));
+      if (f == byPlace.end())
+         continue;
+      for (uint32_t j : f->second)
+         if (!taken[j]) {
+            taken[j] = 1;
+            slot[i] = int32_t(j);
+            ++matched;
+            break;
+         }
+   }
+   if (matched < np)
+      for (size_t i = 0; i < np; ++i) {
+         if (slot[i] >= 0)
+            continue;
+         const RgPrimitiveVertex *v = &p.verts[i * 3];
+         auto f = byMap.find(map_key(v));
+         if (f == byMap.end())
+            continue;
+         float m[3];
+         for (int k = 0; k < 3; ++k)
+            m[k] = (v[0].position[k] + v[1].position[k] + v[2].position[k]) / 3.0f;
+         int32_t best = -1;
+         float bestD = 1e30f;
+         int looked = 0;
+         for (uint32_t j : f->second) {
+            if (taken[j])
+               continue;
+            const float dx = qMid[j][0] - m[0], dy = qMid[j][1] - m[1], dz = qMid[j][2] - m[2];
+            const float d = dx * dx + dy * dy + dz * dz;
+            if (d < bestD) {
+               bestD = d;
+               best = int32_t(j);
+            }
+            if (++looked >= 64)
+               break;   // (an untextured model: every face mapped alike)
+         }
+         if (best >= 0) {
+            taken[size_t(best)] = 1;
+            slot[i] = best;
+         }
+      }
+   std::vector<int32_t> from(nq, -1);
+   for (size_t i = 0; i < np; ++i)
+      if (slot[i] >= 0)
+         from[size_t(slot[i])] = int32_t(i);
+   std::vector<RgPrimitiveVertex> out;
+   out.reserve(p.verts.size());
+   auto put = [&](size_t i, const RgPrimitiveVertex *was) {
+      const RgPrimitiveVertex *v = &p.verts[i * 3];
+      int turn = 0;
+      if (was) {
+         // the turn of its corners that puts each where it was (a turn only:
+         // the face keeps its winding)
+         float best = 1e30f;
+         for (int r = 0; r < 3; ++r) {
+            float d = 0;
+            for (int k = 0; k < 3; ++k) {
+               const RgPrimitiveVertex &a = v[(k + r) % 3], &b = was[k];
+               for (int j = 0; j < 2; ++j)
+                  d += (a.texCoord[j] - b.texCoord[j]) * (a.texCoord[j] - b.texCoord[j]);
+               for (int j = 0; j < 3; ++j)
+                  d += (a.position[j] - b.position[j]) * (a.position[j] - b.position[j]);
+            }
+            if (d < best) {
+               best = d;
+               turn = r;
+            }
+         }
+      }
+      for (int k = 0; k < 3; ++k)
+         out.push_back(v[(k + turn) % 3]);
+   };
+   for (size_t j = 0; j < nq; ++j)
+      if (from[j] >= 0)
+         put(size_t(from[j]), &q.verts[j * 3]);
+   for (size_t i = 0; i < np; ++i)
+      if (slot[i] < 0)
+         put(i, nullptr);   // new this frame: after the rest
+   p.verts.swap(out);
+}
+
+void match_previous(CachedObject &c)
+{
+   if (!c.prev.empty()) {
+      // the same primitive as last frame: by texture and flags, in turn (as
+      // object_prim_ids names them)
+      std::map<std::tuple<std::string, uint32_t, int>, size_t> was;
+      std::map<std::pair<std::string, uint32_t>, int> seen;
+      for (size_t i = 0; i < c.prev.size(); ++i) {
+         const CapturedPrim &q = c.prev[i];
+         was[{q.texture, uint32_t(q.flags), seen[{q.texture, uint32_t(q.flags)}]++}] = i;
+      }
+      seen.clear();
+      for (CapturedPrim &p : c.prims) {
+         const int nth = seen[{p.texture, uint32_t(p.flags)}]++;
+         auto f = was.find({p.texture, uint32_t(p.flags), nth});
+         if (f != was.end())
+            match_faces(p, c.prev[f->second]);
+      }
+   }
+   c.prev = c.prims;
+}
+
 std::vector<uint64_t> object_prim_ids(uint32_t obj, const std::vector<CapturedPrim> &prims)
 {
    std::vector<uint64_t> ids(prims.size());
@@ -1515,19 +1755,38 @@ void upload_objects()
       const bool givenLast = c.givenFrame + 1 == g_frameNumber;
       c.givenFrame = g_frameNumber;
       c.passLight = false;
+      bool flameInside = false;
+      float flameAt[3] = {};
       if (g_cfg.fixturesPass) {
          const float ext = std::max({c.bmax[0] - c.bmin[0], c.bmax[1] - c.bmin[1], c.bmax[2] - c.bmin[2]});
          if (ext < 1.0f)
-            for (const RgFloat3D &l : g_lightPositions) {
+            for (size_t li = 0; li < g_lightPositions.size(); ++li) {
+               const RgFloat3D &l = g_lightPositions[li];
                bool in = true;
                for (int k = 0; k < 3 && in; ++k)
                   in = l.data[k] > c.bmin[k] - 0.15f && l.data[k] < c.bmax[k] + 0.15f;
                if (in) {
                   c.passLight = true;
+                  // a flame's (a torch's): only what is next to the flame
+                  // lets it out; the torch's body shadows the wall below
+                  // as a real one does
+                  if (li < g_lightPositionIds.size() && g_flameLights.count(g_lightPositionIds[li])) {
+                     flameInside = true;
+                     for (int k = 0; k < 3; ++k)
+                        flameAt[k] = l.data[k];
+                  }
                   break;
                }
             }
       }
+      if (flameInside != c.flameInside ||
+          (flameInside && (std::fabs(flameAt[0] - c.flameAt[0]) > 0.02f ||
+                           std::fabs(flameAt[1] - c.flameAt[1]) > 0.02f ||
+                           std::fabs(flameAt[2] - c.flameAt[2]) > 0.02f)))
+         c.splitValid = false;
+      c.flameInside = flameInside;
+      for (int k = 0; k < 3; ++k)
+         c.flameAt[k] = flameAt[k];
       size_t tris = 0;
       for (const CapturedPrim &p : c.prims)
          if (!(p.flags & RG_MESH_PRIMITIVE_SHADOW_ONLY))
@@ -1546,9 +1805,57 @@ void upload_objects()
       g_perfPrims += uint32_t(c.prims.size());
       for (const CapturedPrim &p : c.prims)
          g_perfTris += p.verts.size() / 3;
-      const std::vector<uint64_t> ids = object_prim_ids(obj, c.prims);
-      for (size_t i = 0; i < c.prims.size(); ++i)
-         upload_captured(ids[i], c.prims[i], c.passLight);
+      if (c.fresh) {
+         // (a model drawn in pieces: its faces made steady once it is all in)
+         if (g_cfg.steadyFaces && !c.steadied)
+            steady_faces(c);
+         if (g_cfg.steadyFaces)
+            match_previous(c);
+         c.fresh = c.steadied = false;
+         c.splitValid = false;
+      }
+      g_uploadHighlight = (highlit_obj != 0 && uint32_t(highlit_obj) == obj)
+                             ? std::clamp(objlight_highlight_level, 0.0f, 1.0f) * 0.7f
+                             : 0.0f;
+      if (c.passLight && c.flameInside && g_cfg.torchShadows) {
+         if (!c.splitValid) {
+            // the faces within 12 cm of the flame (the cup it burns in) let
+            // its light out; the rest cast shadows
+            std::vector<CapturedPrim> nearPrims, farPrims;
+            for (const CapturedPrim &p : c.prims) {
+               CapturedPrim n = p, f = p;
+               n.verts.clear();
+               f.verts.clear();
+               for (size_t t = 0; t + 2 < p.verts.size(); t += 3) {
+                  bool close = false;
+                  for (int k = 0; k < 3 && !close; ++k) {
+                     const float *v = p.verts[t + k].position;
+                     const float dx = v[0] - c.flameAt[0], dy = v[1] - c.flameAt[1], dz = v[2] - c.flameAt[2];
+                     close = dx * dx + dy * dy + dz * dz < 0.12f * 0.12f;
+                  }
+                  CapturedPrim &to = (close || p.sprite) ? n : f;
+                  to.verts.insert(to.verts.end(), p.verts.begin() + t, p.verts.begin() + t + 3);
+               }
+               if (!n.verts.empty())
+                  nearPrims.push_back(std::move(n));
+               if (!f.verts.empty() && !(f.flags & RG_MESH_PRIMITIVE_SHADOW_ONLY))
+                  farPrims.push_back(std::move(f));
+            }
+            c.splitNear = nearPrims.size();
+            c.split = std::move(nearPrims);
+            for (CapturedPrim &p : farPrims)
+               c.split.push_back(std::move(p));
+            c.splitValid = true;
+         }
+         const std::vector<uint64_t> ids = object_prim_ids(obj, c.split);
+         for (size_t i = 0; i < c.split.size(); ++i)
+            upload_captured(ids[i], c.split[i], i < c.splitNear);
+      } else {
+         const std::vector<uint64_t> ids = object_prim_ids(obj, c.prims);
+         for (size_t i = 0; i < c.prims.size(); ++i)
+            upload_captured(ids[i], c.prims[i], c.passLight);
+      }
+      g_uploadHighlight = 0.0f;
       ++it;
    }
 }
@@ -2538,6 +2845,9 @@ void perf_client_time(const char *client, unsigned, double seconds)
 } // namespace
 extern "C" void (*g_LoopClientTimeHook)(const char *client, unsigned message, double seconds);
 extern "C" double g_ResImageReadSeconds;   // (namedres: reading PNG and DDS images)
+extern "C" double g_SoundPartMs[6];   // (sound: where the sound client's time went this frame)
+extern "C" char g_SoundSlowStart[64];
+extern "C" double g_SoundSlowStartMs;
 namespace {
 
 void perf_frame(double t)
@@ -2585,10 +2895,21 @@ void perf_frame(double t)
                    [](const auto &a, const auto &b) { return a.second > b.second; });
          for (size_t i = 0; i < g_frameClients.size() && i < 4; ++i)
             fprintf(f, " %s %.1f", g_frameClients[i].first, g_frameClients[i].second * 1000.0);
+         double sound = 0;
+         for (double ms : g_SoundPartMs)
+            sound += ms;
+         if (sound > 5.0)
+            fprintf(f, "; sound: ambient %.1f, mixer %.1f, sounds %.1f, schemas %.1f, starts %.1f (slowest \"%s\" %.1f), frame end %.1f",
+                    g_SoundPartMs[0], g_SoundPartMs[1], g_SoundPartMs[2], g_SoundPartMs[3], g_SoundPartMs[4],
+                    g_SoundSlowStart, g_SoundSlowStartMs, g_SoundPartMs[5]);
          fprintf(f, "\n");
          fclose(f);
       }
    g_frameClients.clear();
+   for (double &ms : g_SoundPartMs)
+      ms = 0;
+   g_SoundSlowStartMs = 0;
+   g_SoundSlowStart[0] = 0;
    g_ResImageReadSeconds = 0;
    g_frameTexSeconds = 0;
    g_frameTexGiven = g_frameMapsInline = 0;
@@ -3979,9 +4300,14 @@ void RenderRTDrawWorld(int primitive, const sRenderBackendVertex *v, const float
             c[1] += v[i].g / count;
             c[2] += v[i].b / count;
          }
-         const float hi = std::max({c[0], c[1], c[2]}), lo = std::min({c[0], c[1], c[2]});
-         if (hi > 0.2f && c[0] >= c[1] && c[1] >= c[2] * 0.9f && (hi - lo) > 0.25f * hi)
-            if (const char *flame = flame_texture(tex, c[0] / hi, c[1] / hi, c[2] / hi)) {
+         // its colour as seen: the tint times the picture's own (a white
+         // tint over an orange flame picture -- the HD torches' -- is orange)
+         texture_mean(*tex);
+         const float m[3] = {c[0] * tex->mean[0], c[1] * tex->mean[1], c[2] * tex->mean[2]};
+         const float hi = std::max({m[0], m[1], m[2]}), lo = std::min({m[0], m[1], m[2]});
+         const float hc = std::max({c[0], c[1], c[2], 0.01f});
+         if (hi > 0.2f && m[0] >= m[1] && m[1] >= m[2] * 0.9f && (hi - lo) > 0.25f * hi)
+            if (const char *flame = flame_texture(tex, c[0] / hc, c[1] / hc, c[2] / hc)) {
                prim.texture = flame;
                // its emission map is black outside the flame's shape, so it
                // glows without the sprite's square (with none, the rasterised
@@ -4212,10 +4538,14 @@ void RenderRTObjectEnd(void)
          c.prims = std::move(g_currentCapture);
          c.whole = true;
          c.hash = hash_prims_unordered(c.prims);
+         c.fresh = true;
+         c.steadied = false;
       } else if (!c.whole) {
          for (CapturedPrim &p : g_currentCapture)
             c.prims.push_back(std::move(p));
          c.hash = hash_prims_unordered(c.prims);
+         c.fresh = true;
+         c.steadied = false;
       }
    } else {
       c.whole = g_currentWhole;
@@ -4242,6 +4572,8 @@ void RenderRTObjectEnd(void)
       c.unchanged = (h == c.hash) ? c.unchanged + 1 : 0;
       c.hash = h;
       c.prims = std::move(g_currentCapture);
+      c.fresh = true;
+      c.steadied = false;
       c.frame = g_frameNumber;
       c.posed = RenderRTGameObjectPose(obj, c.pose) != 0;
       size_t n = 0;
@@ -4287,11 +4619,13 @@ void RenderRTObjectEnd(void)
    bool hasSprites = false;
    for (const CapturedPrim &p : c.prims)
       hasSprites = hasSprites || p.sprite;
-   if (g_cfg.steadyFaces && c.whole && c.unchanged >= 1 && !hasSprites) {
+   // (a moving one too, now: match_previous puts its faces back in last
+   // frame's order as it is given to the path tracer)
+   if (g_cfg.steadyFaces && c.whole && !c.steadied) {
       steady_faces(c);
-      c.settled = true;
-   } else if (g_cfg.steadyFaces && c.whole && !hasSprites && c.posed) {
-      steady_faces(c, c.pose);   // moving: ordered by what does not move
+      c.steadied = true;
+      if (c.unchanged >= 1 && !hasSprites)
+         c.settled = true;
    }
    const uint64_t shapeHash = hash_prims(c.prims);
    // the normals are recomputed only when the shape changed
@@ -4450,6 +4784,7 @@ void RenderRTLight(uint32_t id, const float pos[3], const float rgb[3], float ra
       return;
    }
    g_lightPositions.push_back(to_rt(pos));
+   g_lightPositionIds.push_back(id);
    PendingLight l;
    l.id = id;
    memcpy(l.pos, pos, sizeof(l.pos));
@@ -4468,6 +4803,24 @@ void RenderRTLight(uint32_t id, const float pos[3], const float rgb[3], float ra
 
 namespace {
 
+// smooth noise in -1..1 over time (a flame's flicker): random values a
+// unit of time apart, eased between
+float flame_noise(double t, uint32_t seed)
+{
+   const double f = std::floor(t);
+   auto at = [seed](int64_t k) {
+      uint32_t h = uint32_t(k) * 2654435761u ^ seed * 0x9E3779B9u;
+      h ^= h >> 15;
+      h *= 0x2c1b3c6du;
+      h ^= h >> 12;
+      h *= 0x297a2d39u;
+      h ^= h >> 15;
+      return float(h & 0xffffu) / 32767.5f - 1.0f;
+   };
+   const float u = float(t - f), w = u * u * (3.0f - 2.0f * u);
+   return at(int64_t(f)) * (1.0f - w) + at(int64_t(f) + 1) * w;
+}
+
 void upload_light(const PendingLight &L)
 {
    const float peak = L.peak;
@@ -4482,6 +4835,7 @@ void upload_light(const PendingLight &L)
    const bool fixture = g_fixtureLights.count(L.id) != 0;
    float lumens = peak * 4.0f * g_cfg.light * (fixture ? g_cfg.fixtureLight : 1.0f);
    uint32_t color = pack_color(L.rgb[0] / peak, L.rgb[1] / peak, L.rgb[2] / peak, 1);
+   float flamePos[3] = {L.pos[0], L.pos[1], L.pos[2]};
    if (g_flameLights.count(L.id)) {
       // a flame's light: firelight orange (Thief's torches are a pale 88 73 62,
       // white in the path tracer), and a flicker of its own -- the game's
@@ -4492,11 +4846,20 @@ void upload_light(const PendingLight &L)
          c[k] = c[k] * 0.35f + kFire[k] * 0.65f;
       color = pack_color(c[0], c[1], c[2], 1);
       if (g_cfg.flicker != 2) {
-         const double t = now_seconds();
-         const float ph = float(L.id % 97) * 0.71f;
-         const float n = 0.5f * std::sin(float(t) * 7.3f + ph) + 0.3f * std::sin(float(t) * 13.1f + ph * 2.3f) +
-                         0.2f * std::sin(float(t) * 23.7f + ph * 3.7f);
-         lumens *= 1.0f + 0.12f * n;
+         // a fire's flicker: slow swells, quicker gusts and now and then a
+         // dip as the flame gutters (smooth noise, not a sine: no rhythm),
+         // and the flame -- the light -- swaying a few centimetres, so the
+         // shadows round a torch move as a real one's do
+         const double t = now_seconds() + double(L.id % 97) * 3.17;
+         const float slow = flame_noise(t * 1.3, L.id), mid = flame_noise(t * 4.1, L.id + 17u),
+                     fast = flame_noise(t * 11.0, L.id + 53u);
+         float n = 0.45f * slow + 0.35f * mid + 0.20f * fast;   // -1..1
+         const float gutter = std::max(0.0f, flame_noise(t * 0.9, L.id + 101u) - 0.55f) * 1.6f;
+         lumens *= std::max(0.35f, 1.0f + 0.30f * n - 0.45f * gutter);
+         // (Dark units: feet; ~3 cm sideways, ~4 cm up and down)
+         flamePos[0] += 0.10f * flame_noise(t * 3.3, L.id + 7u);
+         flamePos[1] += 0.10f * flame_noise(t * 3.1, L.id + 11u);
+         flamePos[2] += 0.13f * flame_noise(t * 2.7, L.id + 13u);
       }
    }
    const float *dir = L.dir;
@@ -4522,7 +4885,7 @@ void upload_light(const PendingLight &L)
          .pNext = nullptr,
          .color = color,
          .intensity = lumens,
-         .position = to_rt(L.pos),
+         .position = to_rt(flamePos),
          .direction = {{dir[0] / l, dir[1] / l, dir[2] / l}},
          .radius = g_cfg.lightSize,
          // Dark stores the cone as cosines
@@ -4536,7 +4899,7 @@ void upload_light(const PendingLight &L)
          .pNext = nullptr,
          .color = color,
          .intensity = lumens,
-         .position = to_rt(L.pos),
+         .position = to_rt(flamePos),
          .radius = g_cfg.lightSize,
       };
       ext = &sphere;
@@ -4720,6 +5083,13 @@ void flush_lights()
       const RgFloat3D c = to_rt(g_camera.pos);
       const float reach = float(g_cfg.reach);
       std::vector<PendingLight> kept;
+      static std::unordered_map<uint32_t, std::pair<float, uint32_t>> s_reach;   // eased reach, frame
+      static uint32_t s_reachFrame = 0;
+      static auto s_reachT = std::chrono::steady_clock::now();
+      const auto reachNow = std::chrono::steady_clock::now();
+      const float dt = std::clamp(std::chrono::duration<float>(reachNow - s_reachT).count(), 0.0f, 0.1f);
+      s_reachT = reachNow;
+      ++s_reachFrame;
       for (PendingLight L : g_pendingLights) {
          float d = L.walk;
          const RgFloat3D p = to_rt(L.pos);
@@ -4735,10 +5105,30 @@ void flush_lights()
          // came on one by one as you walked toward them.
          if (L.reaches && L.id < 0x10000u)
             d = d < 0.0f ? straight / 2.5f : std::min(d, straight / 2.5f);
+         // and one near in a straight line is as near as that (a little
+         // more), however far the way round: the light round a corner was
+         // far by the walk, then near the moment its room came into view
+         // -- it popped in as you turned
+         if (L.id < 0x10000u)
+            d = d < 0.0f ? straight * 1.3f : std::min(d, straight * 1.3f);
          if (d < 0.0f)
             continue;
          float t = std::clamp((reach - d) / (reach * 0.33f), 0.0f, 1.0f);
          t = t * t * (3.0f - 2.0f * t);
+         // eased over time (up in half a second, down in a little more):
+         // what is left of a jump comes on gently
+         {
+            auto r = s_reach.find(L.id);
+            if (r == s_reach.end() || r->second.second + 2 < s_reachFrame)
+               s_reach[L.id] = {t, s_reachFrame};
+            else {
+               float &was = r->second.first;
+               const float rate = t > was ? dt / 0.5f : dt / 0.8f;
+               was = t > was ? std::min(t, was + rate) : std::max(t, was - rate);
+               r->second.second = s_reachFrame;
+               t = was;
+            }
+         }
          if (t <= 0.002f)
             continue;
          for (float &x : L.rgb)

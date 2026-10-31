@@ -1250,6 +1250,49 @@ void lgd3d_hack_light(r3s_point *p, float r)
    }
 }
 
+#ifdef DARK_RT
+// A particle with a picture (an animated torch flame in the HD mod, a
+// spark): the game draws it as a 2D square on the screen, which has no place
+// in the world, so the ray tracer never had it -- the torches burnt without
+// a flame. Placed as do_quad_light places a light's glow.
+int lgd3d_rt_billboard(r3s_point *p, float h, float v)
+{
+   static const float qx[4] = {-1, 1, 1, -1}, qy[4] = {-1, -1, 1, 1};
+   sLgd3dVertex *vl;
+   float x, y, k;
+   uint32 c;
+   int i;
+   if (!(g_RenderRTCaptureVertices && r3d_rt_project_space))
+      return 0;
+   if (p->p.z <= 0.0f)
+      return 1;
+   k = 65536.0f * (float)p->p.z;
+   x = fix_float(p->grp.sx) + x_offset;
+   y = fix_float(p->grp.sy) + y_offset;
+   c = ((uint32)lgd3d_alpha << 24) + 0xffffff;
+   vl = PolyMalloc(4);
+   for (i = 0; i < 4; ++i) {
+      mxs_vector c3;
+      vl[i].tu = qx[i] < 0 ? 0.0f : 1.0f;
+      vl[i].tv = qy[i] < 0 ? 0.0f : 1.0f;
+      vl[i].sx = x + qx[i] * h;
+      vl[i].sy = y + qy[i] * v;
+      vl[i].color = c;
+      vl[i].specular = fog_specular;
+      setz(&vl[i], p->p.z, p->grp.w);
+      c3.x = p->p.x + qx[i] * h * k;
+      c3.y = p->p.y + qy[i] * v * k;
+      c3.z = p->p.z;
+      rt_set_world(&vl[i], &c3);
+   }
+   g_RenderRTEmissiveSprite = 1;
+   PolyFree(4, vl);
+   flush_polys();
+   g_RenderRTEmissiveSprite = 0;
+   return 1;
+}
+#endif
+
 void lgd3d_hack_light_extra(r3s_point *p, float r, grs_bitmap *bm)
 {
    if (r <= 1.0) {

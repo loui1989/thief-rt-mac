@@ -1,6 +1,7 @@
 #pragma pack(push, 8)
 #include <algorithm>
 #include <chrono>
+#include <cstdio>
 #include <deque>
 #include <mutex>
 #include <vector>
@@ -32,7 +33,8 @@ ulong *g_ticks;
 struct Callback { int id; mouse_callfunc fn; void *data; };
 std::vector<Callback> g_callbacks;
 int g_nextCallback = 1;
-constexpr size_t kMaxInputEvents = 32;
+// (32 dropped the oldest: a key's release, in a long stall -- a stuck key)
+constexpr size_t kMaxInputEvents = 512;
 
 ulong now_ms()
 {
@@ -67,7 +69,10 @@ void kb_generate(kbs_event event)
 {
    std::lock_guard<std::mutex> lock(g_mutex);
    g_keyState[event.code] = event.state == KBS_DOWN;
-   if (g_keys.size() == kMaxInputEvents) g_keys.pop_front();
+   if (g_keys.size() == kMaxInputEvents) {
+      g_keys.pop_front();
+      fprintf(stderr, "input: key queue full, oldest key event dropped\n");
+   }
    g_keys.push_back(event);
 }
 kbs_event kb_next(void)

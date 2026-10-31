@@ -34,7 +34,7 @@
 namespace rtmat {
 
 // part of every material name: a new version makes every map again
-constexpr uint32_t kMapsVersion = 3;
+constexpr uint32_t kMapsVersion = 4;
 constexpr int kMapMax = 512;
 constexpr int kGlowMax = 1024;
 
@@ -487,11 +487,16 @@ inline std::vector<float> heights(const uint8_t *rgba, int w, int h)
       }
       return out;
    };
+   // (the fine scale no finer than a few texels of a big texture: grain at
+   // the texel made a normal that changed from one pixel to the next, which
+   // sparkled and crawled as the path tracer's samples moved over it -- a
+   // grey stone wall's sheen shimmered standing still)
    const int big = std::clamp(std::min(w, h) / 24, 1, 6);
-   const auto fine = blur(l, 1);
+   const int small = std::clamp(std::min(w, h) / 192, 1, 3);
+   const auto fine = blur(blur(l, small), small);
    const auto broad = blur(blur(l, big), big);
    for (size_t i = 0; i < o.size(); ++i)
-      o[i] = 0.45f * fine[i] + 0.55f * broad[i] * 1.6f;
+      o[i] = 0.35f * fine[i] + 0.65f * broad[i] * 1.6f;
    return o;
 }
 
@@ -671,7 +676,7 @@ inline Result prepare(const std::string &dir, const std::string &name, const Cla
          const auto &hg = H();
          std::vector<uint8_t> n(N * 3);
          // a bigger texture has more texels to the same stone: smaller steps
-         const float k = 14.0f * c.bump * std::sqrt(std::clamp(float(std::min(w, h)) / 64.0f, 0.5f, 4.0f));
+         const float k = 17.0f * c.bump * std::sqrt(std::clamp(float(std::min(w, h)) / 64.0f, 0.5f, 4.0f));
          for (int y = 0; y < h; ++y)
             for (int x = 0; x < w; ++x) {
                auto at = [&](int xx, int yy) { return hg[size_t(((yy + h) % h) * w + (xx + w) % w)]; };

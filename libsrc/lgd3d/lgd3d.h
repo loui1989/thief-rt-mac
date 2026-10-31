@@ -318,6 +318,11 @@ do if (g_tmgr) g_tmgr->unload_texture(bm); while (0)
     extern int lgd3d_g2poly(int n, g2s_point** vpl);
     extern int lgd3d_g2utrifan(int n, g2s_point** vpl);
     extern int lgd3d_g2trifan(int n, g2s_point** vpl);
+#ifdef DARK_RT
+    // a camera-facing bitmap of h by v pixels each side of the point, for the
+    // ray tracer (0: not capturing -- draw it as usual)
+    extern int lgd3d_rt_billboard(r3s_point *p, float h, float v);
+#endif
 
 
     // r3d interface

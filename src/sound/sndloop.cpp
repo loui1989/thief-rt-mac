@@ -140,6 +140,9 @@ static void db_message(DispatchData * msg)
 // Frame update
 //
 
+extern "C" double g_SoundPartMs[6];
+double SfxNowMs(void);
+
 static void do_frame(void)
 {
    mxs_vector pos;
@@ -160,7 +163,9 @@ static void do_frame(void)
      }
    else
      CameraGetLocation(PlayerCamera(), &pos, &ang);
+   const double t0 = SfxNowMs();
    AmbientRunFrame(&pos);
+   g_SoundPartMs[0] += SfxNowMs() - t0;
    if (SimStateCheckFlags(kSimSound))
       SFX_Frame(&pos,&ang);
 }
@@ -243,14 +248,19 @@ static eLoopMessageResult LGAPI _LoopFunc(void* data, eLoopMessage msg, tLoopMes
             do_frame();
             // the schema frame needs to be here in order to make the
             // recording of callbacks work properly
+            const double t0 = SfxNowMs();
             SchemaFrame();
+            g_SoundPartMs[3] += SfxNowMs() - t0;
          }
          break;
          
       case kMsgEndFrame:
       {
-         if (SimStateCheckFlags(kSimSound)) 
+         if (SimStateCheckFlags(kSimSound)) {
+            const double t0 = SfxNowMs();
             SNDFrameNextFrame();
+            g_SoundPartMs[5] += SfxNowMs() - t0;
+         }
          break;
       }
 

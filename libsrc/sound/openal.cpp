@@ -1,6 +1,9 @@
 #include <algorithm>
+#include <chrono>
 #include <cmath>
+#include <cstdio>
 #include <cstring>
+#include <unordered_map>
 #include <vector>
 
 #include <algsndi.h>
@@ -22,6 +25,18 @@ float MillibelsToGain(int32 millibels)
       return 0.0f;
    return std::pow(10.0f, static_cast<float>(millibels) / 2000.0f);
 }
+
+double NowMs(void)
+{
+   using namespace std::chrono;
+   return duration<double, std::milli>(steady_clock::now().time_since_epoch()).count();
+}
+
+// when streams were last refilled (any of them), for the log of a stream
+// that ran dry: was it not refilled for a while (the game loop stalled), or
+// refilled and still empty
+std::unordered_map<const void *, double> g_lastStreamCheckMs;   // by sample
+int g_streamDryLogs = 0;
 
 template <class T>
 bool LoadExtension(T &target, sOpenALApi &al, const char *name)
@@ -108,6 +123,25 @@ STDMETHODIMP_(eSndError) cALSndMixer::Init(sSndSetup *, uint32 channels,
       return kSndCantSetupDevice;
    }
    mprintf("OpenAL: playback context initialized\n");
+   {
+      // which OpenAL and which output, at what rate and period (logs/thief.log)
+      typedef const ALCchar *(*GetStringFn)(ALCdevice *, ALCenum);
+      typedef void (*GetIntegervFn)(ALCdevice *, ALCenum, ALCsizei, ALCint *);
+      typedef const ALchar *(*AlGetStringFn)(ALenum);
+      GetStringFn getString = reinterpret_cast<GetStringFn>(mAL.alcGetProcAddress(NULL, "alcGetString"));
+      GetIntegervFn getInt = reinterpret_cast<GetIntegervFn>(mAL.alcGetProcAddress(NULL, "alcGetIntegerv"));
+      AlGetStringFn alString = reinterpret_cast<AlGetStringFn>(mAL.alGetProcAddress("alGetString"));
+      ALCint freq = 0, refresh = 0;
+      if (getInt) {
+         getInt(mDevice, 0x1007 /* ALC_FREQUENCY */, 1, &freq);
+         getInt(mDevice, 0x1008 /* ALC_REFRESH */, 1, &refresh);
+      }
+      const char *dev = getString ? getString(mDevice, 0x1005 /* ALC_DEVICE_SPECIFIER */) : NULL;
+      const char *ver = alString ? alString(0xB002 /* AL_VERSION */) : NULL;
+      const char *ren = alString ? alString(0xB003 /* AL_RENDERER */) : NULL;
+      fprintf(stderr, "OpenAL: %s %s, output \"%s\", %d Hz, %d updates a second\n",
+              ren ? ren : "?", ver ? ver : "?", dev ? dev : "?", freq, refresh);
+   }
 
    mNumMixerChans = static_cast<int32>(channels);
    mNumFreeMixerChans = static_cast<int32>(channels);
@@ -382,6 +416,7 @@ cALSndSample::cALSndSample(cALSndMixer *mixer, eSndSampleCreateFlagSet flags)
 cALSndSample::~cALSndSample()
 {
    MIXER_MUTEX;
+   g_lastStreamCheckMs.erase(this);
    if (mSource != 0)
    {
       mpMixer->DoTrace(reinterpret_cast<void *>(static_cast<uintptr_t>(mBufferLen)),
@@ -657,6 +692,13 @@ STDMETHODIMP_(void) cALSndSample::CheckStream(void)
       DeferredStop();
       return;
    }
+   const double now = NowMs();
+   double &last = g_lastStreamCheckMs[this];
+   const double since = last > 0 ? now - last : 0;
+   last = now;
+   const uint32 queuedBefore = mQueuedBytes;
+   ALint stateBefore = AL_STOPPED;
+   mALMixer->AL().alGetSourcei(mSource, AL_SOURCE_STATE, &stateBefore);
    const uint32 available = AvailToWrite();
    if (!(mStateFlags & kSndFlagEndOfData) && fnFillCB != NULL && available != 0)
       fnFillCB(this, mpFillCBData, available);
@@ -667,7 +709,19 @@ STDMETHODIMP_(void) cALSndSample::CheckStream(void)
    // OpenAL's AL_PAUSED state for an underrun and restart it behind a menu.
    if (mState == kSndStatePlaying && !(mStateFlags & kSndFlagPaused) &&
        state != AL_PLAYING && !mQueuedBuffers.empty())
+   {
+      // ran dry: a gap in the sound (logs/thief.log, the first few hundred)
+      if (stateBefore == AL_STOPPED && g_streamDryLogs < 300)
+      {
+         ++g_streamDryLogs;
+         const char *name = GetName();
+         fprintf(stderr, "OpenAL: stream \"%s\" ran dry (%.0f ms since streams were last refilled; "
+                 "%u bytes were queued, %u now, buffer %u, %u bytes a second)\n",
+                 name ? name : "?", since, queuedBefore, mQueuedBytes, mBufferLen,
+                 mAttribs.sampleRate * (mBytesPerSample ? mBytesPerSample : 1));
+      }
       mALMixer->AL().alSourcePlay(mSource);
+   }
 }
 
 BOOL cALSndSample::IsPlaying(void)

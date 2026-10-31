@@ -2,6 +2,7 @@
 // remedial sound system for DromEd/Dark/AIR/So on
 
 #include <string.h>
+#include <chrono>
 
 #include <dynarray.h>
 #include <math.h>
@@ -760,9 +761,42 @@ static void _sfx_free(_sfx *fx, BOOL makeCallback)
       _sfx_cleanup_fx(fx, makeCallback);
 }
 
+// Where the sound client's time goes, for the performance log's slow
+// frames (logs/perf.log): 0 ambient, 1 mixer update (streams refilled,
+// fades), 2 sounds updated, 3 schemas, 4 sounds started, 5 end of frame
+extern "C" {
+double g_SoundPartMs[6];
+char g_SoundSlowStart[64];
+double g_SoundSlowStartMs;
+}
+double SfxNowMs(void)
+{
+   return std::chrono::duration<double, std::milli>(
+      std::chrono::steady_clock::now().time_since_epoch()).count();
+}
+
+static bool _sfx_start_play_impl(_sfx *fx, BOOL after_delay);
+
+static bool _sfx_start_play(_sfx *fx, BOOL after_delay)
+{
+   const double t0 = SfxNowMs();
+   const char *name = fx->name ? fx->name : "?";
+   char was[64];
+   strncpy(was, name, sizeof(was) - 1);
+   was[sizeof(was) - 1] = 0;
+   const bool r = _sfx_start_play_impl(fx, after_delay);
+   const double ms = SfxNowMs() - t0;
+   g_SoundPartMs[4] += ms;
+   if (ms > g_SoundSlowStartMs) {
+      g_SoundSlowStartMs = ms;
+      strcpy(g_SoundSlowStart, was);
+   }
+   return r;
+}
+
 // actually goes and gets the ISndSample, fills in the real data
 // for now, it also looks up the resource, cause why not
-static bool _sfx_start_play(_sfx *fx, BOOL after_delay)
+static bool _sfx_start_play_impl(_sfx *fx, BOOL after_delay)
 {
    AutoAppIPtr(ResMan);
    AUTO_TIMER(StartPlayTimer);
@@ -1293,10 +1327,15 @@ void SFX_Frame(mxs_vector *pos, mxs_angvec *ang)
       pSndMixer->Set3DOrientation(  (sSndVector *) &(orient.vec[0]), (sSndVector *) &(orient.vec[2]) );
    }
 
-   pSndMixer->Update();
+   {
+      const double t0 = SfxNowMs();
+      pSndMixer->Update();
+      g_SoundPartMs[1] += SfxNowMs() - t0;
+   }
    TIMER_MarkStop(SndMixerTimer);
 
    TIMER_Start(SfxUpdateTimer);
+   const double tUpdates = SfxNowMs();
    // go through all of our modes SFX's and update them
    for (i = 0; i < SFX_MAX_MODE_COUNT; ++i)   
       if (fxlist[i+base_index].type!=SFX_NONE)
@@ -1322,6 +1361,7 @@ void SFX_Frame(mxs_vector *pos, mxs_angvec *ang)
 
    // Don't constantly adjust 2d/3d volume.
    sgVolsChanged = FALSE;
+   g_SoundPartMs[2] += SfxNowMs() - tUpdates;
 
    TIMER_MarkStop(SfxUpdateTimer);
 }

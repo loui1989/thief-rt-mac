@@ -72,6 +72,7 @@ unsigned g_sceneGeneration, g_presentedGeneration, g_hardwareFrameCount;
 Uint64 g_lastPresentTicks;
 bool g_captureComplete;
 bool g_relativeMouse, g_relativeActive, g_focused;
+bool g_keysDown[SDL_NUM_SCANCODES];   // keys the game was told are down
 bool g_wslPointerWorkaround;
 bool g_pointerWarpWarningPrinted;
 int g_swapInterval = -1;
@@ -829,8 +830,10 @@ bool DarkRenderPumpEvents(void)
             g_resizePending = true;
          } else if (event.window.event == SDL_WINDOWEVENT_FOCUS_GAINED) {
             g_focused = true; update_relative_mouse();
+            fprintf(stderr, "SDL: window focus gained (%.1f s)\n", SDL_GetTicks() / 1000.0);
          } else if (event.window.event == SDL_WINDOWEVENT_FOCUS_LOST) {
             g_focused = false; update_relative_mouse();
+            fprintf(stderr, "SDL: window focus lost (%.1f s)\n", SDL_GetTicks() / 1000.0);
          }
       } else if (event.type == SDL_KEYDOWN || event.type == SDL_KEYUP) {
 #if defined(DARK_RT)
@@ -839,8 +842,11 @@ bool DarkRenderPumpEvents(void)
             continue;
 #endif
          uchar scan = key_scan(event.key.keysym.scancode);
-         if (scan != KBC_NONE && !event.key.repeat)
+         if (scan != KBC_NONE && !event.key.repeat) {
             DarkInputKey(scan, event.type == SDL_KEYDOWN);
+            if (event.key.keysym.scancode < SDL_NUM_SCANCODES)
+               g_keysDown[event.key.keysym.scancode] = event.type == SDL_KEYDOWN;
+         }
       } else if (event.type == SDL_MOUSEBUTTONDOWN || event.type == SDL_MOUSEBUTTONUP) {
          int logical = event.button.button == SDL_BUTTON_LEFT ? 0 :
             event.button.button == SDL_BUTTON_RIGHT ? 1 :
@@ -868,6 +874,19 @@ bool DarkRenderPumpEvents(void)
       }
    }
    flushMotion();
+   // A key the game still holds down that is up: its release never reached
+   // the game (lost in a stall, or to the window losing focus) -- the
+   // character walked on by itself and the keys seemed not to answer.
+   if (const Uint8 *state = SDL_GetKeyboardState(nullptr))
+      for (int sc = 0; sc < SDL_NUM_SCANCODES; ++sc)
+         if (g_keysDown[sc] && !state[sc]) {
+            g_keysDown[sc] = false;
+            const uchar scan = key_scan(static_cast<SDL_Scancode>(sc));
+            if (scan != KBC_NONE)
+               DarkInputKey(scan, 0);
+            fprintf(stderr, "SDL: key %s held by the game but up: released (%.1f s)\n",
+                    SDL_GetScancodeName(static_cast<SDL_Scancode>(sc)), SDL_GetTicks() / 1000.0);
+         }
    if (g_relativeActive && (relativeX || relativeY)) {
       DarkInputMouseRelative(relativeX, relativeY, g_buttons);
    }
