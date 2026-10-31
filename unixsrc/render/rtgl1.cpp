@@ -124,7 +124,10 @@ struct Settings {
    bool rtDetection = true;   // the light gem and the guards go by the ray-traced light
    bool bloom = true;         // the glow around bright light (~0.8 ms at 4K output)
    bool lightFade = true;     // lights entering or leaving the traced set fade
-   bool torchShadows = true;  // a torch's body casts shadows (only its cup lets the flame's light out)
+   bool torchShadows = true;
+   bool wallOffset = true;    // flat things flush on walls moved off them a little (no speckle)
+   float heatHaze = 1.0f;     // the air over torches and fires shimmers (0 off)
+   float lightSoft = 1.0f;    // a strong lamp's light is a bigger source: no white spot on the wall next to it (0 off)  // a torch's body casts shadows (only its cup lets the flame's light out)
    bool steadyFaces = true;   // models' faces seen or shadow-only by a fixed rule, not by the view
    bool lightFix = true;      // lights moved out of the walls they sit in
    bool fixturesPass = true;  // a torch or small lamp lets its own light out
@@ -205,6 +208,9 @@ void load_settings()
       else if (k == "light_fade") g_cfg.lightFade = value != 0;
       else if (k == "steady_faces") g_cfg.steadyFaces = value != 0;
       else if (k == "torch_shadows") g_cfg.torchShadows = value != 0;
+      else if (k == "wall_offset") g_cfg.wallOffset = value != 0;
+      else if (k == "heat_haze") g_cfg.heatHaze = std::clamp(value, 0.0f, 3.0f);
+      else if (k == "light_soft") g_cfg.lightSoft = std::clamp(value, 0.0f, 4.0f);
       else if (k == "light_fix") g_cfg.lightFix = value != 0;
       else if (k == "fixtures_pass") g_cfg.fixturesPass = value != 0;
       else if (k == "ambient") g_cfg.ambient = std::clamp(value, 0.0f, 20.0f);
@@ -875,8 +881,9 @@ int g_drawableW = 1, g_drawableH = 1;
 uint32_t g_framePrims = 0, g_frameDropped = 0, g_frameLights = 0;
 // this frame's light positions (meters), for making light fixtures glow
 std::vector<RgFloat3D> g_lightPositions;
-std::vector<uint32_t> g_lightPositionIds;
-std::unordered_map<uint32_t, int> g_lightOwnerKind;   // light id -> 0 plain, 1 a lamp's, 2 a flame's (by its object)   // (their lights' ids, in the same order)
+std::vector<uint32_t> g_lightPositionIds;   // (their lights' ids, in the same order)
+// light id -> 0 plain, 1 a lamp's, 2 a flame's, 3 a candle's (by its object)
+std::unordered_map<uint32_t, int> g_lightOwnerKind;
 // the level's ambient light (0..1), and the glow it gives surfaces
 float g_levelAmbient = 0.0f;
 // the player's light, by the game and by the path tracer (for the frame counter)
@@ -1129,6 +1136,12 @@ struct CachedObject {
    // light out, the rest cast shadows (split: the near ones first)
    bool flameInside = false;
    float flameAt[3] = {};
+   // a flat thing flush on a wall (a plaque, a poster): moved off it a little
+   // (wall_offset), found again only when it moves
+   bool wallChecked = false;
+   float wallPose[6] = {};
+   float wallOffset[3] = {};
+   bool wallApplied = false;   // to this capture
    std::vector<CapturedPrim> split;
    size_t splitNear = 0;
    bool splitValid = false;
@@ -3246,9 +3259,66 @@ void draw_frame(bool sceneDrawn)
       for (int i = 0; i < 3; ++i)
          volAmbient.data[i] = lin(g_fogRgb[i]) * g_cfg.sky;
    }
+   // Heat haze (Raze RT 0172, shader 0018): the air over a torch, a brazier,
+   // a fire shimmers. The shimmer is the screen's waves effect, turned to
+   // this by the shared shaders; where the heat is goes with the smoke puffs,
+   // at the end of their list, each marked by a density of -1e6: its middle,
+   // and its radius, the height of its column of hot air and its strength in
+   // the albedo's place. The fires: the flames' lights (not a candle's).
+   static RgFloat4D s_heatPos[12], s_heatAlb[12], s_heatShape[12];
+   uint32_t heatCount = 0;
+   if (sceneDrawn && g_cfg.heatHaze > 0.0f) {
+      const RgFloat3D cam = to_rt(g_camera.pos);
+      std::vector<std::pair<float, const PendingLight *>> fires;
+      for (const PendingLight &L : g_lastLights) {
+         if (!g_flameLights.count(L.id) || L.peak < 20.0f)
+            continue;
+         auto k = g_lightOwnerKind.find(L.id);
+         if (k != g_lightOwnerKind.end() && k->second == 3)
+            continue;   // a candle
+         const RgFloat3D p = to_rt(L.pos);
+         const float dx = p.data[0] - cam.data[0], dy = p.data[1] - cam.data[1], dz = p.data[2] - cam.data[2];
+         const float d2 = dx * dx + dy * dy + dz * dz;
+         if (d2 < 25.0f * 25.0f)
+            fires.push_back({d2, &L});
+      }
+      std::sort(fires.begin(), fires.end(), [](const auto &a, const auto &b) { return a.first < b.first; });
+      for (const auto &f : fires) {
+         if (heatCount >= 12)
+            break;
+         const PendingLight &L = *f.second;
+         const RgFloat3D p = to_rt(L.pos);
+         // (a little below the light: from the flame's middle)
+         s_heatPos[heatCount] = RgFloat4D{{p.data[0], p.data[1], p.data[2] - 0.05f, 0.0f}};
+         s_heatAlb[heatCount] = RgFloat4D{{0.16f, 0.9f, std::clamp(L.peak / 90.0f, 0.5f, 1.3f), -1e6f}};
+         s_heatShape[heatCount] = RgFloat4D{{0, 0, 0, 0}};
+         ++heatCount;
+      }
+   }
+   auto smoke = RgDrawFrameSmokeParams{
+      .sType = RG_STRUCTURE_TYPE_DRAW_FRAME_SMOKE_PARAMS,
+      .pNext = &refl,
+      .puffCount = heatCount,
+      .pPuffs = s_heatPos,
+      .pAlbedoDensity = s_heatAlb,
+      .pShape = s_heatShape,
+      .lightNearFade = 0.0f,
+      .illumBlend = 0.05f,
+      .allLights = false,
+      .lightFarFade = 0.0f,
+      .samplesPerCell = 1,
+      .maxLight = 0.0f,
+      .debugMode = 0,
+      .stylize = 0.0f,
+      .stylizeSteps = 4,
+      .stylizeGrid = 0.0f,
+      .selfAmbient = 0.0f,
+      .tintBias = 0.0f,
+      .absorb = 0.0f,
+   };
    auto volumetric = RgDrawFrameVolumetricParams{
       .sType = RG_STRUCTURE_TYPE_DRAW_FRAME_VOLUMETRIC_PARAMS,
-      .pNext = &refl,
+      .pNext = &smoke,
       // RTGL1's default is on, with a bright ambient haze: costly, and it
       // greyed Thief's darkness. Optional, lit by the lamps when on.
       .enable = g_cfg.volumetric || fogOn,
@@ -3405,9 +3475,21 @@ void draw_frame(bool sceneDrawn)
       .sunSkyProbeMaxDist = 10000.0f,
       .sunSplit = 0.0f,
    };
+   // the heat haze's shimmer (on while there are fires to shimmer over)
+   RgPostEffectWaves heatHaze{};
+   heatHaze.isActive = heatCount > 0;
+   heatHaze.transitionDurationIn = 0.3f;
+   heatHaze.transitionDurationOut = 0.3f;
+   heatHaze.amplitude = std::clamp(g_cfg.heatHaze, 0.0f, 3.0f);
+   heatHaze.speed = 1.0f;
+   heatHaze.xMultiplier = 1.0f;
+   RgDrawFramePostEffectsParams post{};
+   post.sType = RG_STRUCTURE_TYPE_DRAW_FRAME_POST_EFFECTS_PARAMS;
+   post.pNext = &sky;
+   post.pWaves = heatHaze.amplitude > 0.0f ? &heatHaze : nullptr;
    auto info = RgDrawFrameInfo{
       .sType = RG_STRUCTURE_TYPE_DRAW_FRAME_INFO,
-      .pNext = &sky,
+      .pNext = &post,
       .rayLength = 2000.0f,
       .disableRayTracedGeometry = sceneDrawn ? 0u : 1u,
       .disableRasterization = false,
@@ -4520,6 +4602,136 @@ void RenderRTFog(const float rgb[3], float distFeet)
    g_fogDistFt = distFeet > 0 ? distFeet : 0;
 }
 
+// A flat thing lying on a wall or a floor (a plaque, a poster, a scorch
+// mark): in the same plane as the wall, the path tracer's rays hit the one or
+// the other at random -- a grainy speckle the denoiser cannot clear (Raze RT
+// 0008, with 0178/0180/0182: only what really is flush with a surface, moved
+// toward the room's side). Moved 1.5 cm off it.
+void wall_offset(CachedObject &c)
+{
+   bool same = c.wallChecked;
+   for (int k = 0; k < 6 && same; ++k)
+      same = c.wallPose[k] == c.pose[k];
+   if (!same) {
+      c.wallChecked = true;
+      for (int k = 0; k < 6; ++k)
+         c.wallPose[k] = c.pose[k];
+      c.wallOffset[0] = c.wallOffset[1] = c.wallOffset[2] = 0.0f;
+      // all of its faces in one plane?
+      double sum[3] = {0, 0, 0}, mid[3] = {0, 0, 0}, area = 0;
+      float lo[3] = {1e30f, 1e30f, 1e30f}, hi[3] = {-1e30f, -1e30f, -1e30f};
+      std::vector<std::array<float, 3>> normals;
+      for (const CapturedPrim &p : c.prims) {
+         if (p.sprite || (p.flags & RG_MESH_PRIMITIVE_SHADOW_ONLY))
+            continue;
+         for (size_t t = 0; t + 2 < p.verts.size(); t += 3) {
+            const float *a = p.verts[t].position, *b = p.verts[t + 1].position, *e = p.verts[t + 2].position;
+            const float e1[3] = {b[0] - a[0], b[1] - a[1], b[2] - a[2]};
+            const float e2[3] = {e[0] - a[0], e[1] - a[1], e[2] - a[2]};
+            std::array<float, 3> n = {e1[1] * e2[2] - e1[2] * e2[1], e1[2] * e2[0] - e1[0] * e2[2],
+                                      e1[0] * e2[1] - e1[1] * e2[0]};
+            const float len = std::sqrt(n[0] * n[0] + n[1] * n[1] + n[2] * n[2]);
+            if (len < 1e-8f)
+               continue;
+            if (!normals.empty() && n[0] * normals[0][0] + n[1] * normals[0][1] + n[2] * normals[0][2] < 0)
+               for (float &x : n)
+                  x = -x;
+            for (int k = 0; k < 3; ++k) {
+               sum[k] += n[k];
+               mid[k] += (a[k] + b[k] + e[k]) / 3.0 * len;
+            }
+            area += len;
+            for (float &x : n)
+               x /= len;
+            normals.push_back(n);
+            for (const float *v : {a, b, e})
+               for (int k = 0; k < 3; ++k) {
+                  lo[k] = std::min(lo[k], v[k]);
+                  hi[k] = std::max(hi[k], v[k]);
+               }
+         }
+      }
+      const double sl = std::sqrt(sum[0] * sum[0] + sum[1] * sum[1] + sum[2] * sum[2]);
+      if (normals.empty() || normals.size() > 400 || sl <= 0 || area <= 0)
+         return;
+      const float n[3] = {float(sum[0] / sl), float(sum[1] / sl), float(sum[2] / sl)};
+      for (const auto &m : normals)
+         if (std::fabs(m[0] * n[0] + m[1] * n[1] + m[2] * n[2]) < 0.97f)
+            return;   // not flat
+      const float m0[3] = {float(mid[0] / area), float(mid[1] / area), float(mid[2] / area)};
+      // and thin: within a centimetre and a half across its plane
+      float dlo = 1e30f, dhi = -1e30f;
+      for (const CapturedPrim &p : c.prims)
+         if (!p.sprite && !(p.flags & RG_MESH_PRIMITIVE_SHADOW_ONLY))
+            for (const RgPrimitiveVertex &v : p.verts) {
+               const float d = (v.position[0] - m0[0]) * n[0] + (v.position[1] - m0[1]) * n[1] +
+                               (v.position[2] - m0[2]) * n[2];
+               dlo = std::min(dlo, d);
+               dhi = std::max(dhi, d);
+            }
+      if (dhi - dlo > 0.015f)
+         return;
+      // a wall in its plane, under it
+      const RgFloat3D cam = to_rt(g_camera.pos);
+      for (const WorldGroup &g : g_world) {
+         bool near = true;
+         for (int k = 0; k < 3 && near; ++k)
+            near = g.bmax[k] >= lo[k] - 0.05f && g.bmin[k] <= hi[k] + 0.05f;
+         if (!near)
+            continue;
+         for (size_t k = 0; k + 2 < g.indices.size(); k += 3) {
+            const float *a = g.verts[g.indices[k]].position, *b = g.verts[g.indices[k + 1]].position,
+                        *e = g.verts[g.indices[k + 2]].position;
+            const float e1[3] = {b[0] - a[0], b[1] - a[1], b[2] - a[2]};
+            const float e2[3] = {e[0] - a[0], e[1] - a[1], e[2] - a[2]};
+            float w[3] = {e1[1] * e2[2] - e1[2] * e2[1], e1[2] * e2[0] - e1[0] * e2[2], e1[0] * e2[1] - e1[1] * e2[0]};
+            const float wl = std::sqrt(w[0] * w[0] + w[1] * w[1] + w[2] * w[2]);
+            if (wl < 1e-8f)
+               continue;
+            for (float &x : w)
+               x /= wl;
+            if (std::fabs(w[0] * n[0] + w[1] * n[1] + w[2] * n[2]) < 0.97f)
+               continue;
+            const float d = (m0[0] - a[0]) * w[0] + (m0[1] - a[1]) * w[1] + (m0[2] - a[2]) * w[2];
+            if (std::fabs(d) > 0.015f)
+               continue;
+            // its middle over this triangle (a little slack)
+            const float pp[3] = {m0[0] - d * w[0], m0[1] - d * w[1], m0[2] - d * w[2]};
+            auto side = [&](const float *p0, const float *p1) {
+               const float u[3] = {p1[0] - p0[0], p1[1] - p0[1], p1[2] - p0[2]};
+               const float q[3] = {pp[0] - p0[0], pp[1] - p0[1], pp[2] - p0[2]};
+               const float x[3] = {u[1] * q[2] - u[2] * q[1], u[2] * q[0] - u[0] * q[2], u[0] * q[1] - u[1] * q[0]};
+               const float ul = std::sqrt(u[0] * u[0] + u[1] * u[1] + u[2] * u[2]);
+               return (x[0] * w[0] + x[1] * w[1] + x[2] * w[2]) / std::max(ul, 1e-6f);   // signed distance
+            };
+            const float s0 = side(a, b), s1 = side(b, e), s2 = side(e, a);
+            const bool inside = (s0 >= -0.05f && s1 >= -0.05f && s2 >= -0.05f) ||
+                                (s0 <= 0.05f && s1 <= 0.05f && s2 <= 0.05f);
+            if (!inside)
+               continue;
+            // toward the room: the side it stands on, else the camera's
+            float sign = d;
+            if (std::fabs(sign) < 0.001f)
+               sign = (cam.data[0] - a[0]) * w[0] + (cam.data[1] - a[1]) * w[1] + (cam.data[2] - a[2]) * w[2];
+            sign = sign < 0 ? -1.0f : 1.0f;
+            const float by = 0.015f - std::fabs(d);
+            if (by > 0.0f)
+               for (int q = 0; q < 3; ++q)
+                  c.wallOffset[q] = w[q] * sign * by;
+            break;
+         }
+         if (c.wallOffset[0] != 0 || c.wallOffset[1] != 0 || c.wallOffset[2] != 0)
+            break;
+      }
+   }
+   if (c.wallOffset[0] == 0 && c.wallOffset[1] == 0 && c.wallOffset[2] == 0)
+      return;
+   for (CapturedPrim &p : c.prims)
+      for (RgPrimitiveVertex &v : p.verts)
+         for (int k = 0; k < 3; ++k)
+            v.position[k] += c.wallOffset[k];
+}
+
 void RenderRTObjectEnd(void)
 {
    CaptureTimer timer;
@@ -4581,12 +4793,14 @@ void RenderRTObjectEnd(void)
          c.hash = hash_prims_unordered(c.prims);
          c.fresh = true;
          c.steadied = false;
+         c.wallApplied = false;
       } else if (!c.whole) {
          for (CapturedPrim &p : g_currentCapture)
             c.prims.push_back(std::move(p));
          c.hash = hash_prims_unordered(c.prims);
          c.fresh = true;
          c.steadied = false;
+         c.wallApplied = false;
       }
    } else {
       c.whole = g_currentWhole;
@@ -4615,6 +4829,7 @@ void RenderRTObjectEnd(void)
       c.prims = std::move(g_currentCapture);
       c.fresh = true;
       c.steadied = false;
+      c.wallApplied = false;
       c.frame = g_frameNumber;
       c.posed = RenderRTGameObjectPose(obj, c.pose) != 0;
       size_t n = 0;
@@ -4685,6 +4900,10 @@ void RenderRTObjectEnd(void)
          for (const RgPrimitiveVertex &v : p.verts)
             c.normals.push_back(v.normalPacked);
       c.normalsHash = shapeHash;
+   }
+   if (c.fresh && !c.wallApplied && c.whole && c.posed && g_cfg.wallOffset) {
+      wall_offset(c);
+      c.wallApplied = true;
    }
    g_currentCapture.clear();
 }
@@ -4814,7 +5033,9 @@ void RenderRTLight(uint32_t id, const float pos[3], const float rgb[3], float ra
          for (char &ch : n)
             ch = char(tolower((unsigned char)ch));
          auto has = [&n](const char *w) { return n.find(w) != std::string::npos; };
-         if (has("torch") || has("candle") || has("brazier") || has("flame") || has("fire"))
+         if (has("candle"))
+            kind = 3;   // a flame, but small (no heat haze over it)
+         else if (has("torch") || has("brazier") || has("flame") || has("fire"))
             kind = 2;
          else if (has("lamp") || has("lantern") || has("lantrn") || has("light") || has("chandelier") ||
                   has("sconce"))
@@ -4823,7 +5044,7 @@ void RenderRTLight(uint32_t id, const float pos[3], const float rgb[3], float ra
       g_lightOwnerKind[id] = kind;
       if (kind >= 1)
          g_fixtureLights.insert(id);
-      if (kind == 2)
+      if (kind >= 2)
          g_flameLights.insert(id);
    }
    const float peak = std::max({rgb[0], rgb[1], rgb[2]});
@@ -4953,6 +5174,15 @@ void upload_light(const PendingLight &L)
                          dl > 0.0f && dir[2] / dl < -0.7f;
    if (lampSpot)
       lumens *= 0.6f;
+   // Raze RT's rt_light_soft: a strong light is a bigger source, its size
+   // growing with the square root of its strength -- the same light in the
+   // room, but no white glare burnt into the wall right next to a bright
+   // lamp (a source's radiance is its power over its area). Not a flame's:
+   // a softened fire's sphere swallowed its own torch (and the torch's
+   // shadow went soft again).
+   float radius = lightRadius(L);
+   if (!g_flameLights.count(L.id) && g_cfg.lightSoft > 0.0f)
+      radius = std::max(radius, std::min(1.2f, 0.012f * g_cfg.lightSoft * std::sqrt(std::max(lumens, 0.0f))));
    if (!lampSpot && L.inner >= 0.0f && (dir[0] != 0 || dir[1] != 0 || dir[2] != 0)) {
       const float l = std::sqrt(dir[0] * dir[0] + dir[1] * dir[1] + dir[2] * dir[2]);
       spot = RgLightSpotEXT{
@@ -4962,7 +5192,7 @@ void upload_light(const PendingLight &L)
          .intensity = lumens,
          .position = to_rt(flamePos),
          .direction = {{dir[0] / l, dir[1] / l, dir[2] / l}},
-         .radius = lightRadius(L),
+         .radius = radius,
          // Dark stores the cone as cosines
          .angleOuter = std::acos(std::clamp(L.outer, -1.0f, 1.0f)),
          .angleInner = std::acos(std::clamp(L.inner, -1.0f, 1.0f)),
@@ -4975,7 +5205,7 @@ void upload_light(const PendingLight &L)
          .color = color,
          .intensity = lumens,
          .position = to_rt(flamePos),
-         .radius = lightRadius(L),
+         .radius = radius,
       };
       ext = &sphere;
    }
