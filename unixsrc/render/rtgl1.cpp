@@ -852,6 +852,7 @@ struct LightFix {
    float offset[3];   // meters
    float before;      // clearance found, meters
    bool done;
+   bool asFlame;      // fixed as a flame's (its room: a flame's size)
 };
 std::unordered_map<uint64_t, LightFix> g_lightFixes;
 uint32_t g_lightsTotal = 0, g_frameLightsShown = 0, g_lightsReaching = 0;
@@ -3690,7 +3691,10 @@ void inspect_view()
          out("  object %u \"%s\": %zu triangles (%zu shadow-only) in %zu primitives, whole %d, "
              "drawn frame %u (now %u), posed %d, flags 0x%x%s\n",
              e.first, name, tris, shadowTris, c.prims.size(), int(c.whole), c.frame, g_frameNumber,
-             int(c.posed), allFlags, c.passLight ? ", lets its light out" : "");
+             int(c.posed), allFlags,
+             c.passLight ? (c.flameInside && g_cfg.torchShadows ? ", lets its flame's light out round it (the rest casts shadows)"
+                                                                : ", lets its light out")
+                         : "");
       }
    };
    if (best < 1e29f) {
@@ -4803,6 +4807,14 @@ void RenderRTLight(uint32_t id, const float pos[3], const float rgb[3], float ra
 
 namespace {
 
+// A light's size. A flame's is a flame's (6 cm): at the 25 cm of the
+// rest, bigger than the torch round it, the torch's shadow was washed out to
+// nothing.
+float lightRadius(const PendingLight &L)
+{
+   return g_flameLights.count(L.id) ? std::min(g_cfg.lightSize, 0.06f) : g_cfg.lightSize;
+}
+
 // smooth noise in -1..1 over time (a flame's flicker): random values a
 // unit of time apart, eased between
 float flame_noise(double t, uint32_t seed)
@@ -4887,7 +4899,7 @@ void upload_light(const PendingLight &L)
          .intensity = lumens,
          .position = to_rt(flamePos),
          .direction = {{dir[0] / l, dir[1] / l, dir[2] / l}},
-         .radius = g_cfg.lightSize,
+         .radius = lightRadius(L),
          // Dark stores the cone as cosines
          .angleOuter = std::acos(std::clamp(L.outer, -1.0f, 1.0f)),
          .angleInner = std::acos(std::clamp(L.inner, -1.0f, 1.0f)),
@@ -4900,7 +4912,7 @@ void upload_light(const PendingLight &L)
          .color = color,
          .intensity = lumens,
          .position = to_rt(flamePos),
-         .radius = g_cfg.lightSize,
+         .radius = lightRadius(L),
       };
       ext = &sphere;
    }
@@ -4990,7 +5002,10 @@ void fix_light_position(const PendingLight &L, LightFix &fix)
    }
    if (tris.empty())
       return;
-   const float want = std::min(g_cfg.lightSize + 0.05f, 0.5f);
+   // (a flame's: room for its own small size, a torch's cup's distance
+   // from the wall -- not pushed out in front of the torch)
+   const float want = g_flameLights.count(L.id) ? std::min(lightRadius(L) + 0.10f, 0.5f)
+                                                : std::min(g_cfg.lightSize + 0.05f, 0.5f);
    float p[3] = {c.data[0], c.data[1], c.data[2]}, open[3];
    float clear = world_clearance(p, tris, open);
    fix.before = clear;
@@ -5208,8 +5223,15 @@ void flush_lights()
    for (PendingLight &L : g_pendingLights) {
       if (g_cfg.lightFix && L.id < 0x10000u) {
          LightFix &fix = g_lightFixes[light_fix_key(L)];
-         if (!fix.done && fixesLeft-- > 0)
+         // (again once it is known to be a flame's: found before its flame
+         // was seen, a torch's light was pushed out in front of the torch)
+         const bool flame = g_flameLights.count(L.id) != 0;
+         if (fix.done && fix.asFlame != flame)
+            fix = LightFix{};
+         if (!fix.done && fixesLeft-- > 0) {
             fix_light_position(L, fix);
+            fix.asFlame = flame;
+         }
          if (fix.done)
             for (int k = 0; k < 3; ++k)
                L.pos[k] += fix.offset[k] / kMetersPerUnit;
