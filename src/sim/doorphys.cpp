@@ -463,6 +463,9 @@ struct sDoorTrace
    int obj;
    float age, sinceLog;
    BOOL offHinge;
+   mxs_angvec lastFac;
+   mxs_vector lastAt;
+   int stuckFrames;
 };
 static cDynArray<sDoorTrace> g_DoorTraces;
 
@@ -474,7 +477,7 @@ static void DoorTraceStart(int o_id)
          g_DoorTraces[i].age = 0;
          return;
       }
-   sDoorTrace t = { o_id, 0.0f, 0.0f, FALSE };
+   sDoorTrace t = { o_id, 0.0f, 0.0f, FALSE, ObjPosGet(o_id)->fac, ObjPosGet(o_id)->loc.vec, 0 };
    g_DoorTraces.Append(t);
 }
 
@@ -514,6 +517,36 @@ void DoorTraceFrame(float dt)
       }
       if (fromBase > most)
          t.offHinge = TRUE;
+
+      // A rotating door whose turn stopped while it still moves: it slid
+      // off its hinge. Its end of travel is found by the sign of its axis
+      // against the end's plane; a door set at an angle in the level (Black
+      // Parade's diagonal metal doors) could sit exactly on the plane, the
+      // limit then held it there every frame -- its turn undone, its place
+      // still moved by the turn about its centre of mass -- and it slid on
+      // away for good. Such a door is put where it was going.
+      if (p->type == ROTATING_DOOR && (p->status == kDoorOpening || p->status == kDoorClosing))
+      {
+         // (not turning, yet moving: a door held against the player stops
+         // altogether, and is left to the game)
+         const BOOL turning = mx_mag_vec(&w) > 0.1f;
+         const BOOL same = fac.tx == t.lastFac.tx && fac.ty == t.lastFac.ty && fac.tz == t.lastFac.tz;
+         const BOOL moved = mx_dist_vec(&at, &t.lastAt) > 0.005f;
+         t.stuckFrames = (turning && same && moved) ? t.stuckFrames + 1 : 0;
+         t.lastFac = fac;
+         t.lastAt = at;
+         if (t.offHinge || t.stuckFrames >= 6)
+         {
+            fprintf(stderr, "Door %d stuck in its turn (%s): put %s\n", t.obj,
+                    t.offHinge ? "off its hinge" : "not turning", p->status == kDoorOpening ? "open" : "closed");
+            if (p->status == kDoorOpening)
+               RotDoorOpenCallback(t.obj);
+            else
+               RotDoorCloseCallback(t.obj);
+            g_DoorTraces.DeleteItem(i);
+            continue;
+         }
+      }
       ++i;
    }
 }
