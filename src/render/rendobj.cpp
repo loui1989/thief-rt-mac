@@ -2450,8 +2450,12 @@ BOOL rendobj_core_render_object(ObjID obj, int fragment, int idx, uchar *clut,
    // what is off screen still shadows what is on it.
    const BOOL rt_object = g_lgd3d && RenderRTCaptureDraws();
    int rt_type = rt_object ? rendobj_type(obj) : OM_TYPE_DEFAULT;
-   const BOOL rt_whole = rt_object && fragment == OBJ_NO_SPLIT &&
-                         (rt_type == OM_TYPE_MD || rt_type == OM_TYPE_MESH);
+   // Every model is captured unclipped: a model the view draws in pieces,
+   // one per cell, clipped to each cell's part of the screen, came in
+   // nothing at all whenever the clipping cut it (a water stream partly
+   // above the screen stopped, frozen on its last capture). Unclipped, the
+   // first piece is all of it and the rest add nothing.
+   const BOOL rt_whole = rt_object;
    if (rt_object)
    {
       lgd3d_render_flush();
