@@ -2742,3 +2742,36 @@ STDMETHODIMP_(BOOL) cAI::PostLoad()
 }
 
 ///////////////////////////////////////////////////////////////////////////////
+
+///////////////////////////////////////////////////////////////////////////////
+
+void cAI::DescribeForDebug(char * buf, int size)
+{
+   cStr goal, act;
+   if (m_pCurGoal)
+      m_pCurGoal->Describe(&goal);
+   for (int i = 0; i < m_CurActions.Size(); i++)
+   {
+      cStr one;
+      m_CurActions[i]->Describe(&one);
+      if (i)
+         act += "; ";
+      act += one;
+   }
+   snprintf(buf, size, "mode %s, goal: %s, doing: %s",
+            AIGetModeName(GetState()->GetMode()),
+            m_pCurGoal ? (const char *)goal : "none",
+            m_CurActions.Size() ? (const char *)act : "nothing");
+}
+
+// The AI of an object, described (0 if it has none): for the inspector.
+EXTERN int AIDescribeForDebug(ObjID obj, char * buf, int size)
+{
+   if (!g_pAIManager)
+      return 0;
+   cAI * pAI = g_pAIManager->AccessAI(obj);
+   if (!pAI)
+      return 0;
+   pAI->DescribeForDebug(buf, size);
+   return 1;
+}

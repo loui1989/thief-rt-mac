@@ -110,11 +110,18 @@ void MotionManagerLoad()
    // fallback below.
    char fullname[256];
    ITagFile *pFile = NULL;
+   const char *source = "motiondb.bin";
    if (find_file_in_config_path_only(fullname,"motiondb.bin","resname_base"))
+   {
       pFile=TagFileOpen(fullname,kTagOpenRead);
+      source = fullname;
+   }
 
    if(!pFile)
+   {
       pFile=TagFileOpen("motiondb.bin",kTagOpenRead);
+      source = "motiondb.bin (the game folder)";
+   }
 
    if(!pFile) // try resname path
    {
@@ -137,6 +144,10 @@ void MotionManagerLoad()
    TagVersion FoundVersion = g_MotDBVersion;
    HRESULT result = ITagFile_OpenBlock(pFile,&g_MotDBTag,&FoundVersion);
 
+   mprintf("Motion database: %s, version %d.%d%s\n", pFile ? source : "none",
+           FoundVersion.major, FoundVersion.minor,
+           result == S_OK && FoundVersion.major == g_MotDBVersion.major &&
+              FoundVersion.minor == g_MotDBVersion.minor ? "" : " -- NOT LOADED");
    if (result == S_OK
     && FoundVersion.major == g_MotDBVersion.major
     && FoundVersion.minor == g_MotDBVersion.minor) {

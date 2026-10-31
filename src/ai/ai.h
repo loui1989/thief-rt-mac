@@ -202,6 +202,10 @@ public:
    STDMETHOD_(BOOL, PostLoad)();
 
 public:
+   // What the AI is about, in words: its mode, goal and actions (for the
+   // ray tracer's inspector).
+   void DescribeForDebug(char * buf, int size);
+
    /////////////////////////////////////////////////////////////
    //
    // State accessors

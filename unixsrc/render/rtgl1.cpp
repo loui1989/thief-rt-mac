@@ -1020,7 +1020,9 @@ void upload_objects()
       for (const CapturedPrim &p : c.prims)
          if (!(p.flags & RG_MESH_PRIMITIVE_SHADOW_ONLY))
             tris += p.verts.size() / 3;
-      if (givenLast && c.givenTris > 0 && tris * 10 < c.givenTris * 7) {
+      // (off: a model's faces turning between seen and shadow-only made most
+      // of these; the pop-in they were for is found)
+      if (false && givenLast && c.givenTris > 0 && tris * 10 < c.givenTris * 7) {
          const RgFloat3D cam = to_rt(g_camera.pos);
          const float dx = c.center[0] - cam.data[0], dy = c.center[1] - cam.data[1], dz = c.center[2] - cam.data[2];
          if (dx * dx + dy * dy + dz * dz < 20.0f * 20.0f)
@@ -3380,8 +3382,15 @@ void RenderRTObjectEnd(void)
    // while the game still drew them.
    if (g_currentCapture.empty()) {
       ++g_emptyCaptures;
-      static std::unordered_set<uint32_t> s_emptyLogged;
-      if (s_emptyLogged.size() < 40 && s_emptyLogged.insert(obj).second)
+      // logged once a model: first those never captured at all, then (the
+      // interesting ones) models captured before that now come empty
+      static std::unordered_set<uint32_t> s_emptyLogged, s_lostLogged;
+      auto known = g_objects.find(obj);
+      if (known != g_objects.end() && !known->second.prims.empty()) {
+         if (s_lostLogged.size() < 100 && s_lostLogged.insert(obj).second)
+            log_model_change(obj, "drawn by the game with nothing captured, though captured before (%s)",
+                             g_currentWhole ? "whole" : "in pieces");
+      } else if (s_emptyLogged.size() < 40 && s_emptyLogged.insert(obj).second)
          log_model_change(obj, "drawn by the game with nothing captured (%s)",
                           g_currentWhole ? "whole" : "in pieces");
       return;

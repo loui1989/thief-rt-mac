@@ -3145,6 +3145,7 @@ extern "C" void RenderRTGameDrawExtraObjects(void)
 // frame, its model and whether it is a creature.
 EXTERN BOOL ObjGetModelName(ObjID obj, char *name);
 EXTERN BOOL CreatureExists(const ObjID objID);
+EXTERN int AIDescribeForDebug(ObjID obj, char * buf, int size);
 extern "C" void RenderRTGameDescribeNearby(const float at[3], float radius,
                                            void (*line)(const char *text, void *ctx), void *ctx)
 {
@@ -3172,6 +3173,13 @@ extern "C" void RenderRTGameDescribeNearby(const float at[3], float radius,
                CreatureExists(obj) ? ", a creature" : "",
                ObjHasRefs(obj) ? "" : ", no place in the world");
       line(text, ctx);
+      char ai[400];
+      if (AIDescribeForDebug(obj, ai, sizeof(ai)))
+      {
+         char text2[460];
+         snprintf(text2, sizeof(text2), "      AI: %s\n", ai);
+         line(text2, ctx);
+      }
    }
 }
 
