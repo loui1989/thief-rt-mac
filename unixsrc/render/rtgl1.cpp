@@ -1949,10 +1949,10 @@ void perf_frame(double t)
       int rw, rh;
       render_size(rw, rh);
       static const char *kGi[] = {"2 half rate", "1", "2", "1 half rate"};
-      fprintf(f, "[%7.1f s] camera (%.1f %.1f %.1f) m  traced %dx%d -> output %dx%d  %s%s  bounces %s  reach %d m  lights tried %d  bloom %d  vsync %d\n",
+      fprintf(f, "[%7.1f s] camera (%.1f %.1f %.1f) m  traced %dx%d -> output %dx%d  %s%s  bounces %s  reach %d m  lights tried %d  bloom %d  vsync %d  limit %d fps\n",
               t - g_perf.start, cam.data[0], cam.data[1], cam.data[2], rw, rh, g_drawableW, g_drawableH,
               kUpscaleNames[std::clamp(g_cfg.upscale, 0, 5)], g_cfg.dynres > 0 ? " (dynamic)" : "",
-              kGi[std::clamp(g_cfg.gi, 0, 3)], g_cfg.reach, g_cfg.candidates, int(g_cfg.bloom), int(g_vsync));
+              kGi[std::clamp(g_cfg.gi, 0, 3)], g_cfg.reach, g_cfg.candidates, int(g_cfg.bloom), int(g_vsync), g_cfg.frameCap);
       fprintf(f, "  %.1f fps  frame avg %.1f ms  median %.1f  95%% %.1f  worst %.1f\n", n / (t - g_perf.windowStart),
               avg, pct(0.5), pct(0.95), sorted.back());
       fprintf(f, "  per frame: game %.1f ms (of it: rt capture+upload %.1f, rt prep %.1f)  rt submit %.1f  gpu wait %.1f\n",

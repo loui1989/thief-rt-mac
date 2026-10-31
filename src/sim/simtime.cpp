@@ -384,6 +384,16 @@ static eLoopMessageResult LGAPI _LoopFunc(void* data, eLoopMessage msg, tLoopMes
             }
          }
 #endif
+         {
+            // (the frame limit in use, in the log when it changes)
+            static int s_reported = -1;
+            if (nSlowFrameTime != s_reported)
+            {
+               s_reported = nSlowFrameTime;
+               mprintf("Frame limit: frames take at least %d ms, the least simulated step %d\n",
+                       nSlowFrameTime, (int)gParams.minFrameTime);
+            }
+         }
          if (nSlowFrameTime > 0)
          {
 //            nCurrentRealFrameTime = tm_get_millisec_unrecorded();
