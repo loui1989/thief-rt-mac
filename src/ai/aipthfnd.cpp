@@ -1022,12 +1022,15 @@ BOOL g_fAIPDB_UseDoubleFind = TRUE;
 #endif
 
 
+void AIPathEnsureCellDoors();
+
 // First try non-stressed path, then if it fails, do stressed.
 IAIPath * AIPathfind(const mxs_vector & fromLocation, tAIPathCellID startCell,
                      const mxs_vector & toLocation,   tAIPathCellID endCell,
                      tAIPathOkBits OkBits,
                      IAIPathfindControl * pControl)
 {
+   AIPathEnsureCellDoors();
    IAIPath *pPath = AIPathfindInternal(fromLocation, startCell,
                                        toLocation, endCell,
                                        OkBits,
@@ -1059,6 +1062,7 @@ IAIPath * AIPathfindNear(const mxs_vector & fromLocation, tAIPathCellID startCel
                      tAIPathOkBits OkBits,
                      IAIPathfindControl * pControl)
 {
+   AIPathEnsureCellDoors();
    IAIPath *pPath = AIPathfindNearInternal(fromLocation, startCell,
                                        toLocation, fDist, endCell,
                                        OkBits,

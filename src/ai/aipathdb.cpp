@@ -4375,6 +4375,92 @@ void SortLinksByDistance()
 #endif // EDITOR
 
 ///////////////////////////////////////////////////////////////////////////////
+//
+// NewDark's AIPATH 3.4 (every fan mission built with its DromEd) keeps the
+// table of which cells lie under a door in the part of the database that is
+// not read. Without it no AI knew where doors were: one that cannot use doors
+// (a horse) was routed straight through them and stood against the closed
+// door, and door-using AIs planned as if there were none. Rebuilt here the
+// way the editor builds it, from the doors' closed floor boxes.
+//
+
+static BOOL g_AIPathCellDoorsPending = FALSE;
+
+static BOOL CellDoorInXYBox(const mxs_vector & p, const mxs_vector * box)
+{
+   for (int i = 0; i < 4; i++)
+   {
+      const mxs_vector & p1 = box[i];
+      const mxs_vector & p2 = box[(i + 1) % 4];
+      if ((p2.y - p1.y) * (p.x - p1.x) - (p2.x - p1.x) * (p.y - p1.y) < -kAIEpsilon)
+         return FALSE;
+   }
+   return TRUE;
+}
+
+static int AIPathRebuildCellDoors()
+{
+   cDynArray<sAIDoorBBox> doorBBoxes;
+   AIGetDoorFloorBBoxes(&doorBBoxes);
+   if (!doorBBoxes.Size() || !g_AIPathDB.m_nCells)
+      return 0;
+
+   g_AIPathDB.m_CellToDoorsTable.SetEmpty();
+   g_AIPathDB.m_CellDoors.SetSize(0);
+
+   cMxsVector center;
+   for (int i = 1; i <= (int)g_AIPathDB.m_nCells; i++)
+   {
+      // the cell's centre: the mean of its corners
+      const sAIPathCell & cell = g_AIPathDB.m_Cells[i];
+      if (!cell.vertexCount)
+         continue;
+      center.Set(0, 0, 0);
+      for (unsigned v = cell.firstVertex; v < (unsigned)cell.firstVertex + cell.vertexCount; v++)
+      {
+         const mxs_vector & pt = g_AIPathDB.m_Vertices[g_AIPathDB.m_CellVertices[v].id].pt;
+         center.x += pt.x; center.y += pt.y; center.z += pt.z;
+      }
+      center.x /= cell.vertexCount; center.y /= cell.vertexCount; center.z /= cell.vertexCount;
+      for (int j = 0; j < doorBBoxes.Size(); j++)
+      {
+         ObjPos * pPos = ObjPosGet(doorBBoxes[j].object);
+         if (pPos == NULL)
+            continue;
+         if (CellDoorInXYBox(center, doorBBoxes[j].bbox))
+         {
+            const float height = pPos->loc.vec.z - center.z;
+            if (height > -0.01 && height < 7.0f)
+            {
+               g_AIPathDB.m_Cells[i].pathFlags |= kAIPF_BelowDoor;
+               sAICellDoor * pCellDoor = &(g_AIPathDB.m_CellDoors[g_AIPathDB.m_CellDoors.Grow()]);
+               pCellDoor->cell = i;
+               pCellDoor->door = doorBBoxes[j].object;
+               break;
+            }
+         }
+      }
+   }
+   // the table points into the array: filled once the array stops growing
+   for (int i = 0; i < g_AIPathDB.m_CellDoors.Size(); i++)
+      g_AIPathDB.m_CellToDoorsTable.Insert(&g_AIPathDB.m_CellDoors[i]);
+
+   mprintf("AI pathfinding: %d cells under %d doors found (not stored by this database version)\n",
+           g_AIPathDB.m_CellDoors.Size(), doorBBoxes.Size());
+   return g_AIPathDB.m_CellDoors.Size() ? g_AIPathDB.m_CellDoors.Size() : -1;
+}
+
+// Called before pathfinding: the doors may not have been loaded yet when the
+// database was.
+void AIPathEnsureCellDoors()
+{
+   if (g_AIPathCellDoorsPending && g_fAIPathFindInited)
+      if (AIPathRebuildCellDoors() != 0)
+         g_AIPathCellDoorsPending = FALSE;
+}
+
+
+///////////////////////////////////////////////////////////////////////////////
 
 void AIPathHintObjects()
 {
@@ -5741,6 +5827,7 @@ void AIPathFindRead(ITagFile * pTagFile)
          DeterminePathfindZones();
          LinkPathfindZones();
          g_AIPathDB.m_nNumFleeRegions = 0;
+         g_AIPathCellDoorsPending = TRUE;
       }
       else
       {
@@ -5869,6 +5956,9 @@ void AIPathFindRead(ITagFile * pTagFile)
 #endif
    pTagFile->CloseBlock();
    
+   g_AIPathCellDoorsPending = g_AIPathCellDoorsPending && g_fAIPathFindInited;
+   AIPathEnsureCellDoors();
+
    if (rehint)
    {
 #ifndef SHIP
