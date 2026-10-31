@@ -8,6 +8,7 @@
 #include <cstring>
 #include <limits>
 #include <vector>
+#include <chrono>
 
 #ifndef NO_DB_MEM
 // Must be last header
@@ -245,7 +246,7 @@ uint16 Pack4444(const RgbaPixel& pixel)
 }
 }
 
-grs_bitmap* ResDdsReadImage(IStoreStream* pStream,
+static grs_bitmap* ResDdsReadImageImpl(IStoreStream* pStream,
                             IResMemOverride* pResMem)
 {
    if (!pStream || !pResMem || pStream->GetSize() < 128)
@@ -364,4 +365,18 @@ uint8* ResDdsReadPalette(IStoreStream*, IResMemOverride* pResMem)
       palette[i * 3 + 2] = static_cast<uint8>((i & 3) * 255 / 3);
    }
    return palette;
+}
+
+extern "C" { double g_ResImageReadSeconds = 0; }
+
+
+// (the time images take to read, for the ray tracer's slow-frame log)
+extern "C" double g_ResImageReadSeconds;
+grs_bitmap* ResDdsReadImage(IStoreStream* pStream,
+                            IResMemOverride* pResMem)
+{
+   const auto t0 = std::chrono::steady_clock::now();
+   grs_bitmap* bm = ResDdsReadImageImpl(pStream, pResMem);
+   g_ResImageReadSeconds += std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
+   return bm;
 }

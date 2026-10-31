@@ -280,6 +280,9 @@ struct RtTexture {
    // its material maps being made (off the main thread), until they are done
    // it is given to RTGL1 as it is, under its plain name
    std::shared_ptr<MatJob> job;
+   // a hash of its pixels, for flame_texture (made once, not every frame)
+   uint32_t pixelHash = 0;
+   bool pixelHashValid = false;
 };
 
 void settle_job(RtTexture &t);
@@ -294,6 +297,7 @@ bool g_alphaTest = false;
 void copy_pixels(RtTexture &t, int width, int height, const void *rgba, int rowBytes)
 {
    settle_job(t);   // (a job reads the pixels)
+   t.pixelHashValid = false;
    t.width = width;
    t.height = height;
    t.rgba.resize(size_t(width) * height * 4);
@@ -372,6 +376,12 @@ std::vector<uint8_t> *illum_image(const std::string &path, int &w, int &h)
 // crevices from the frame after they are done. A small texture whose maps
 // are made already is done at once (no frame without its bumps).
 
+// this frame's texture work on the main thread (perf.log's slow frames)
+double g_frameTexSeconds = 0;
+int g_frameTexGiven = 0, g_frameMapsInline = 0;
+
+constexpr int kAlbedoMax = 1024;
+
 struct MatJob {
    // what it is made from: the texture's pixels stay as they are while the job
    // lives (settle_job before they change)
@@ -385,7 +395,8 @@ struct MatJob {
    // what it makes
    char name[160] = {};
    rtmat::Result result;
-   std::vector<uint8_t> creviced;
+   std::vector<uint8_t> creviced;   // its picture as given to RTGL1 (empty: the texture's own)
+   int cw = 0, ch = 0;
    // 0 waiting, 1 being made, 2 done, 3 given up
    std::atomic<int> state{0};
 };
@@ -408,6 +419,17 @@ void run_job(MatJob &j)
    if (j.crevice > 0.0f && !j.result.none && j.cls->bump > 0) {
       j.creviced.assign(j.rgba, j.rgba + size_t(j.w) * j.h * 4);
       rtmat::crevice_albedo(j.creviced, j.w, j.h, *j.cls, j.crevice);
+   }
+   j.cw = j.w;
+   j.ch = j.h;
+   // at most kAlbedoMax across: the path tracer traces some 1000 pixels
+   // across, and an HD pack's 2048 textures cost their upload (a hitch) and
+   // 16 MB each for detail it never shows
+   if (std::max(j.w, j.h) > kAlbedoMax) {
+      std::vector<uint8_t> small;
+      const uint8_t *src = j.creviced.empty() ? j.rgba : j.creviced.data();
+      const uint8_t *out = rtmat::shrink(src, j.w, j.h, kAlbedoMax, small, j.cw, j.ch);
+      j.creviced.assign(out, out + size_t(j.cw) * j.ch * 4);
    }
 }
 
@@ -491,9 +513,13 @@ const rtmat::Class *material_class(const RtTexture *t)
 }
 
 // gives RTGL1 the picture under this name (or shares the one it has)
-bool provide_texture(RtTexture *t, const char *name, const uint8_t *pixels)
+bool provide_texture(RtTexture *t, const char *name, const uint8_t *pixels, int w, int h)
 {
    snprintf(t->name, sizeof(t->name), "%s", name);
+   struct Timer {
+      std::chrono::steady_clock::time_point t0 = std::chrono::steady_clock::now();
+      ~Timer() { g_frameTexSeconds += std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count(); }
+   } timer;
    auto ref = g_nameRefs.find(t->name);
    if (ref != g_nameRefs.end()) {
       ++ref->second;   // the same picture, already given to RTGL1
@@ -510,12 +536,13 @@ bool provide_texture(RtTexture *t, const char *name, const uint8_t *pixels)
       .pNext = &details,
       .pTextureName = t->name,
       .pPixels = pixels,
-      .size = {uint32_t(t->width), uint32_t(t->height)},
+      .size = {uint32_t(w), uint32_t(h)},
       .filter = RG_SAMPLER_FILTER_AUTO,
       .addressModeU = RG_SAMPLER_ADDRESS_MODE_REPEAT,
       .addressModeV = RG_SAMPLER_ADDRESS_MODE_REPEAT,
    };
    t->provided = rt.rgProvideOriginalTexture(&info) == RG_RESULT_SUCCESS;
+   ++g_frameTexGiven;
    if (t->provided)
       g_nameRefs[t->name] = 1;
    return t->provided;
@@ -533,7 +560,10 @@ void adopt_job(RtTexture *t)
    t->glows = j->result.glows;
    t->glow = j->result.glow;
    t->mapsNone = j->result.none;
-   provide_texture(t, j->name, j->creviced.empty() ? t->rgba.data() : j->creviced.data());
+   if (j->creviced.empty())
+      provide_texture(t, j->name, t->rgba.data(), t->width, t->height);
+   else
+      provide_texture(t, j->name, j->creviced.data(), j->cw, j->ch);
 }
 
 // The RTGL1 name for a texture, uploading its pixels first if they changed:
@@ -568,7 +598,10 @@ const char *texture_name(RtTexture *t)
          if (size_t(t->width) * t->height <= 256 * 256) {
             // small: at once
             j->state.store(1);
+            const auto t0 = std::chrono::steady_clock::now();
             run_job(*j);
+            g_frameTexSeconds += std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
+            ++g_frameMapsInline;
             j->state.store(2);
             adopt_job(t);
             return t->provided ? t->name : nullptr;
@@ -577,7 +610,25 @@ const char *texture_name(RtTexture *t)
       }
       char plain[32];
       snprintf(plain, sizeof(plain), "dark.t%u", t->serial);
-      provide_texture(t, plain, t->rgba.data());
+      if (t->job && std::max(t->width, t->height) > 256) {
+         // a quick stand-in (every few texels) until its maps are made: a
+         // big texture in full costs a hitch, and is soon given again
+         int sw = t->width, sh = t->height, step = 1;
+         while (std::max(sw, sh) > 256) {
+            sw = std::max(1, sw / 2);
+            sh = std::max(1, sh / 2);
+            step *= 2;
+         }
+         std::vector<uint8_t> small(size_t(sw) * sh * 4);
+         for (int y = 0; y < sh; ++y)
+            for (int x = 0; x < sw; ++x)
+               memcpy(&small[(size_t(y) * sw + x) * 4],
+                      &t->rgba[(size_t(std::min(y * step, t->height - 1)) * t->width +
+                                std::min(x * step, t->width - 1)) * 4], 4);
+         provide_texture(t, plain, small.data(), sw, sh);
+      } else {
+         provide_texture(t, plain, t->rgba.data(), t->width, t->height);
+      }
    }
    if (t->job && t->job->state.load() == 2)
       adopt_job(t);
@@ -597,8 +648,11 @@ const char *flame_texture(RtTexture *base, float r, float g, float b)
    const int qg = int(std::clamp(g * k, 0.0f, 1.0f) * 15.0f + 0.5f);
    const int qb = int(std::clamp(b * k, 0.0f, 1.0f) * 15.0f + 0.5f);
    char name[200];
-   snprintf(name, sizeof(name), "flame_%08x_%x%x%x",
-            rtmat::fnv(base->rgba.data(), base->rgba.size()), qr, qg, qb);
+   if (!base->pixelHashValid) {
+      base->pixelHash = rtmat::fnv(base->rgba.data(), base->rgba.size());
+      base->pixelHashValid = true;
+   }
+   snprintf(name, sizeof(name), "flame2_%08x_%x%x%x", base->pixelHash, qr, qg, qb);
    static std::unordered_set<std::string> s_made;
    if (!s_made.count(name)) {
       if (g_matDir.empty()) {
@@ -2117,6 +2171,7 @@ float step_mul(float v, int dir, float lo, float hi)
    return std::clamp(steps[std::clamp(i, 0, n - 1)], lo, hi);
 }
 
+extern "C" int ObjAnimLightDescribe(int light_index, char *buf, int n);
 void inspect_view();
 
 void change_row(int row, int dir)
@@ -2293,16 +2348,28 @@ struct Perf {
    double lastWait = 0, lastDraw = 0, lastCapture = 0, lastPrep = 0;
 } g_perf;
 
+// this frame's engine loop clients (for a slow frame's line in perf.log)
+std::vector<std::pair<const char *, double>> g_frameClients;
+
 void perf_client_time(const char *client, unsigned, double seconds)
 {
    auto it = g_perf.names.find(client);
    if (it == g_perf.names.end())
       it = g_perf.names.emplace(client, client ? client : "?").first;
    g_perf.clients[it->second] += seconds;
+   bool found = false;
+   for (auto &c : g_frameClients)
+      if (c.first == it->second.c_str()) {
+         c.second += seconds;
+         found = true;
+      }
+   if (!found)
+      g_frameClients.emplace_back(it->second.c_str(), seconds);
 }
 
 } // namespace
 extern "C" void (*g_LoopClientTimeHook)(const char *client, unsigned message, double seconds);
+extern "C" double g_ResImageReadSeconds;   // (namedres: reading PNG and DDS images)
 namespace {
 
 void perf_frame(double t)
@@ -2337,8 +2404,26 @@ void perf_frame(double t)
       last = now;
       return d;
    };
-   g_perf.frames.push_back((t - g_perf.last) * 1000.0);
+   const double frameMs = (t - g_perf.last) * 1000.0;
+   g_perf.frames.push_back(frameMs);
    g_perf.last = t;
+   // a hitch: where its time went (in play, not loading: under 2 s)
+   if (frameMs > 35.0 && frameMs < 2000.0)
+      if (FILE *f = fopen((logs_dir() + "/perf.log").c_str(), "a")) {
+         fprintf(f, "  slow frame at %.1f s: %.0f ms; images read %.1f ms; ray tracer's textures: %d given, %d mapped at once, %.1f ms; clients:",
+                 t - g_perf.start, frameMs, g_ResImageReadSeconds * 1000.0, g_frameTexGiven, g_frameMapsInline,
+                 g_frameTexSeconds * 1000.0);
+         std::sort(g_frameClients.begin(), g_frameClients.end(),
+                   [](const auto &a, const auto &b) { return a.second > b.second; });
+         for (size_t i = 0; i < g_frameClients.size() && i < 4; ++i)
+            fprintf(f, " %s %.1f", g_frameClients[i].first, g_frameClients[i].second * 1000.0);
+         fprintf(f, "\n");
+         fclose(f);
+      }
+   g_frameClients.clear();
+   g_ResImageReadSeconds = 0;
+   g_frameTexSeconds = 0;
+   g_frameTexGiven = g_frameMapsInline = 0;
    g_perf.wait += delta(g_ui.waitSum, g_perf.lastWait);
    g_perf.draw += delta(g_ui.drawSum, g_perf.lastDraw);
    g_perf.capture += delta(g_ui.captureSum, g_perf.lastCapture);
@@ -3144,6 +3229,11 @@ void inspect_view()
              "%s inner %.3f outer %.3f dir (%.2f %.2f %.2f)%s\n",
              L.id, p.data[0], p.data[1], p.data[2], dist, L.rgb[0], L.rgb[1], L.rgb[2], L.radius,
              L.inner >= 0 ? "spot" : "point", L.inner, L.outer, L.dir[0], L.dir[1], L.dir[2], fixed);
+         char anim[256];
+         if (L.id < 0x10000u && ObjAnimLightDescribe(int(L.id), anim, sizeof(anim)))
+            out("    %s\n", anim);
+         else if (L.id < 0x10000u)
+            out("    (no anim light drives it: a static light)\n");
       }
       // and the ones near it that were NOT traced, with why
       for (const PendingLight &L : g_lastOffered) {
@@ -3719,7 +3809,7 @@ void RenderRTDrawWorld(int primitive, const sRenderBackendVertex *v, const float
             c[2] += v[i].b / count;
          }
          const float hi = std::max({c[0], c[1], c[2]}), lo = std::min({c[0], c[1], c[2]});
-         if (hi > 0.35f && c[0] >= c[1] && c[1] >= c[2] * 0.9f && (hi - lo) > 0.25f * hi)
+         if (hi > 0.2f && c[0] >= c[1] && c[1] >= c[2] * 0.9f && (hi - lo) > 0.25f * hi)
             if (const char *flame = flame_texture(tex, c[0] / hi, c[1] / hi, c[2] / hi))
                prim.texture = flame;
       }

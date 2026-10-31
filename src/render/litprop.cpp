@@ -1066,6 +1066,38 @@ void ObjAnimLightFrameUpdate(long time_change)
    pObjectSystem->Unlock();
 }
 
+// For the ray tracer's inspector: the animated light (if any) that drives
+// this entry of the object-light table, and its state.
+extern "C" int ObjAnimLightDescribe(int light_index, char *buf, int n)
+{
+   sPropertyObjIter iter;
+   ObjID obj;
+   sAnimLightProp *anim_light;
+   int found = 0;
+   if (!g_AnimLightProp || n <= 0)
+      return 0;
+   buf[0] = '\0';
+   g_AnimLightProp->IterStart(&iter);
+   while (g_AnimLightProp->IterNext(&iter, &obj))
+   {
+      if (OBJ_IS_ABSTRACT(obj))
+         continue;
+      g_AnimLightProp->Get(obj, &anim_light);
+      if (anim_light->animation.light_data_index != light_index)
+         continue;
+      snprintf(buf + strlen(buf), n - strlen(buf),
+               "%sanim light of object %d: mode %d, brightness %.0f (min %.0f max %.0f)%s%s",
+               found ? "; " : "", obj, anim_light->animation.mode,
+               anim_light->animation.brightness, anim_light->animation.min_brightness,
+               anim_light->animation.max_brightness,
+               anim_light->animation.inactive ? ", inactive" : "",
+               anim_light->animation.refresh ? ", refresh pending" : "");
+      ++found;
+   }
+   g_AnimLightProp->IterStop(&iter);
+   return found;
+}
+
 // go through and reset all the anim lights to their current states
 void ObjAnimLightReset(void)
 {

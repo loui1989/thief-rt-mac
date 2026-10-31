@@ -1,3 +1,4 @@
+#include <chrono>
 #include <png.h>
 
 #include <allocapi.h>
@@ -67,7 +68,7 @@ uint16 Pack1555(const uint8* pixel)
 }
 }
 
-grs_bitmap* ResPngReadImage(IStoreStream* pStream,
+static grs_bitmap* ResPngReadImageImpl(IStoreStream* pStream,
                             IResMemOverride* pResMem)
 {
    if (!pStream || !pResMem)
@@ -329,4 +330,16 @@ uint8* ResPngReadPalette(IStoreStream*, IResMemOverride* pResMem)
       palette[i * 3 + 2] = static_cast<uint8>((i & 3) * 255 / 3);
    }
    return palette;
+}
+
+
+// (the time images take to read, for the ray tracer's slow-frame log)
+extern "C" double g_ResImageReadSeconds;
+grs_bitmap* ResPngReadImage(IStoreStream* pStream,
+                            IResMemOverride* pResMem)
+{
+   const auto t0 = std::chrono::steady_clock::now();
+   grs_bitmap* bm = ResPngReadImageImpl(pStream, pResMem);
+   g_ResImageReadSeconds += std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
+   return bm;
 }

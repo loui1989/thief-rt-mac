@@ -217,8 +217,8 @@ autobump 0.6
 class none        1.00 0.00 0.00 0.00
 class marble      0.35 0.00 0.30 0.90
 class tile        0.55 0.00 0.50 0.35
-class glass       0.30 0.00 0.00 1.00
-class window      0.55 0.00 0.30 0.40 2.0
+class glass       0.30 0.00 0.00 1.50
+class window      0.55 0.00 0.30 1.20 2.0
 class metal       0.45 0.80 0.50 0.35
 class rust        0.85 0.45 0.90 0.00
 class wood        0.75 0.00 0.60 0.00
@@ -637,8 +637,11 @@ inline Result prepare(const std::string &dir, const std::string &name, const Cla
       for (size_t i = 0; i < N; ++i) {
          const float rel = std::clamp(float(hg[i] / std::max(avg, 0.02)), 0.0f, 2.0f);
          float r;
-         if (c.polish > 0)
-            r = 0.7f - std::clamp(c.polish * (0.85f + 0.15f * rel), 0.0f, 3.0f) / 4.5f;
+         // a window's lit pane keeps its glow (a mirror over it would dim it);
+         // its dark panes reflect the street
+         const float polish = (c.window && lit_pane(&rgba[i * 4])) ? std::min(c.polish, 0.15f) : c.polish;
+         if (polish > 0)
+            r = 0.7f - std::clamp(polish * (0.85f + 0.15f * rel), 0.0f, 3.0f) / 4.5f;
          else
             r = std::max(c.rough + (1.0f - rel) * 0.1f, 0.71f);
          const float depthRel = std::clamp(1.0f - rel, 0.0f, 1.0f);
@@ -697,10 +700,20 @@ inline bool prepare_flame(const std::string &dir, const std::string &name, const
    const std::string pE = dir + "/" + name + "_e.png";
    if (exists(pE))
       return true;
-   std::vector<uint8_t> e(size_t(w) * h * 3);
+   // its colour within its soft shape, brought up to full brightness at its
+   // brightest texel (up to 4x): an HD pack's dim, thin particle frames
+   // otherwise glowed hardly at all
+   std::vector<float> f(size_t(w) * h * 3);
+   float peak = 0.0f;
    for (size_t i = 0; i < size_t(w) * h; ++i)
-      for (int k = 0; k < 3; ++k)
-         e[i * 3 + k] = uint8_t(rgba[i * 4 + k] * rgba[i * 4 + 3] / 255);
+      for (int k = 0; k < 3; ++k) {
+         f[i * 3 + k] = rgba[i * 4 + k] * (rgba[i * 4 + 3] / 255.0f);
+         peak = std::max(peak, f[i * 3 + k]);
+      }
+   const float gain = peak > 0.0f ? std::clamp(255.0f / peak, 1.0f, 4.0f) : 1.0f;
+   std::vector<uint8_t> e(f.size());
+   for (size_t i = 0; i < f.size(); ++i)
+      e[i] = uint8_t(std::min(255.0f, f[i] * gain + 0.5f));
    return write_png(pE, e.data(), w, h, 3);
 }
 
