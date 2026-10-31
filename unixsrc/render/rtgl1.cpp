@@ -2715,6 +2715,18 @@ void inspect_view()
       const RgFloat3D cam = to_rt(g_camera.pos);
       list_models(cam.data, 8.0f, "models within 8 m of the camera");
    }
+   {
+      // the game's own view of what is near: objects the ray tracer may not
+      // have (a creature never drawn, an object not loaded)
+      out("the game's objects within 8 m of the camera:\n");
+      struct Sink { FILE *log; };
+      Sink sink{log};
+      RenderRTGameDescribeNearby(g_camera.pos, 8.0f / 0.3048f, [](const char *text, void *ctx) {
+         fputs(text, stderr);
+         if (FILE *f = static_cast<Sink *>(ctx)->log)
+            fputs(text, f);
+      }, &sink);
+   }
    out("model draws so far that captured nothing: %u; drawn only in pieces (the whole model kept): %u\n",
        g_emptyCaptures, g_pieceCaptures);
    // the models hit by earlier inspections: where they are now, if anywhere

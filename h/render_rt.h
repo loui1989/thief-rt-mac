@@ -79,6 +79,10 @@ int RenderRTGameObjectPose(uint32_t obj, float pose[6]);
 void RenderRTGameDrawExtraObjects(void);
 // Implemented by the game: the object's name, for the inspector.
 void RenderRTGameObjectName(uint32_t obj, char *buf, int size);
+// The game's objects within radius (feet) of a point (Dark units), one line
+// each, for the inspector.
+void RenderRTGameDescribeNearby(const float at[3], float radius,
+                                void (*line)(const char *text, void *ctx), void *ctx);
 
 // Nonzero while the camera is under water.
 void RenderRTCameraMedium(int underwater);

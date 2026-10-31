@@ -3140,6 +3140,41 @@ extern "C" void RenderRTGameDrawExtraObjects(void)
    }
 }
 
+// Every object within radius (feet) of a point, as the game sees it, for the
+// ray tracer's inspector: what it is, where, whether the view drew it last
+// frame, its model and whether it is a creature.
+EXTERN BOOL ObjGetModelName(ObjID obj, char *name);
+EXTERN BOOL CreatureExists(const ObjID objID);
+extern "C" void RenderRTGameDescribeNearby(const float at[3], float radius,
+                                           void (*line)(const char *text, void *ctx), void *ctx)
+{
+   mxs_vector p = { at[0], at[1], at[2] };
+   for (ObjID obj = 1; obj < gMaxObjID; ++obj)
+   {
+      if (!ObjectExists(obj))
+         continue;
+      Position *pos = ObjPosGet(obj);
+      if (!pos || mx_dist2_vec(&pos->loc.vec, &p) > radius * radius)
+         continue;
+      char model[64] = "";
+      ObjGetModelName(obj, model);
+      int idx = -1;
+      const BOOL hasModel = ObjGetModelNumber(obj, &idx);
+      const char *name = ObjEditName(obj);
+      char text[320];
+      snprintf(text, sizeof(text),
+               "  object %d \"%s\": at (%.2f %.2f %.2f) m, %.1f m away, model \"%s\"%s, type %d, render %d, "
+               "%s%s%s\n",
+               obj, name ? name : "?", pos->loc.vec.x * 0.3048f, pos->loc.vec.y * 0.3048f,
+               pos->loc.vec.z * 0.3048f, sqrtf(mx_dist2_vec(&pos->loc.vec, &p)) * 0.3048f, model,
+               hasModel ? "" : " (not loaded)", hasModel ? rendobj_type(obj) : -1, (int)ObjRenderType(obj),
+               rendobj_object_visible(obj) ? "drawn by the view" : "not drawn by the view",
+               CreatureExists(obj) ? ", a creature" : "",
+               ObjHasRefs(obj) ? "" : ", no place in the world");
+      line(text, ctx);
+   }
+}
+
 extern "C" void RenderRTGameObjectName(uint32_t obj, char *buf, int size)
 {
    const char *name = ObjEditName((ObjID)obj);

@@ -72,6 +72,109 @@ static sStructDesc sAttachRelStructDesc = StructDescBuild(sCreatureAttachInfo, k
 
 IRelation *g_pCreatureAttachRelation = NULL;
 
+////////////////////////////////////////
+// NewDark's detail attachments: an object (the source) shown fixed to
+// another (the destination) -- to one of a creature's joints, or to the
+// object itself -- and following it as it moves: a pack horse's load, the
+// lamp a guard carries. The link data, as NewDark's missions store it
+// (32 bytes): the kind, the joint, the position and rotation relative to it.
+
+struct sDetailAttachData
+{
+   uchar type;         // 0 object, 1 vhot, 2 joint, 3 subobject
+   uchar joint;        // a creature joint (crjoint.h), for type 2
+   ushort pad0;
+   mxs_vector relPos;
+   mxs_angvec relRot;
+   ushort pad1;
+   int vhotSub;
+   int flags;
+};
+static_assert(sizeof(sDetailAttachData) == 32, "NewDark's DetailAttachement link data is 32 bytes");
+
+static sRelationDesc sDetailAttachRelDesc =
+{
+   "DetailAttachement",
+   0,
+};
+
+static sRelationDataDesc sDetailAttachRelDataDesc = LINK_DATA_DESC(sDetailAttachData);
+
+static const char *g_pDetailAttachTypes[] = { "Object", "VHot", "Joint", "Subobject" };
+
+static sFieldDesc sDetailAttachFields[] =
+{
+   { "Type",       kFieldTypeEnum,   FieldLocation(sDetailAttachData, type),    kFieldFlagNone, 0, 4, 4, g_pDetailAttachTypes },
+   { "vhot/sub #", kFieldTypeInt,    FieldLocation(sDetailAttachData, vhotSub), kFieldFlagNone },
+   { "joint",      kFieldTypeEnum,   FieldLocation(sDetailAttachData, joint),   kFieldFlagNone, 0, 22, 22, g_pJointNames },
+   { "Flags",      kFieldTypeInt,    FieldLocation(sDetailAttachData, flags),   kFieldFlagNone },
+   { "rel pos",    kFieldTypeVector, FieldLocation(sDetailAttachData, relPos),  kFieldFlagNone },
+   { "rel rot",    kFieldTypeAngVec, FieldLocation(sDetailAttachData, relRot),  kFieldFlagNone },
+};
+
+static sStructDesc sDetailAttachStructDesc = StructDescBuild(sDetailAttachData, kStructFlagNone, sDetailAttachFields);
+
+static IRelation *g_pDetailAttachRelation = NULL;
+
+// Every attached object placed where its link puts it. Once a frame, before
+// the scene is drawn.
+EXTERN void DetailAttachmentsUpdate(void)
+{
+   if (g_pDetailAttachRelation == NULL)
+      return;
+   ILinkQuery *query = g_pDetailAttachRelation->Query(LINKOBJ_WILDCARD, LINKOBJ_WILDCARD);
+   for (; !query->Done(); query->Next())
+   {
+      sLink link;
+      query->Link(&link);
+      const sDetailAttachData *data = (const sDetailAttachData *)g_pDetailAttachRelation->GetData(query->ID());
+      ObjPos *parent = ObjPosGet(link.dest);
+      if (parent == NULL || link.source == link.dest)
+         continue;
+
+      mxs_vector loc;
+      mxs_matrix orient;
+      if (data != NULL && data->type == 2 && data->joint > kCJ_Invalid &&
+          data->joint < kCJ_NumCreatureJoints && CreatureGetMeshInterface(link.dest) != NULL)
+      {
+         loc = GetCreatureJointPos(link.dest, data->joint);
+         orient = GetCreatureJointOrient(link.dest, data->joint);
+      }
+      else
+      {
+         loc = parent->loc.vec;
+         mx_ang2mat(&orient, &parent->fac);
+      }
+
+      mxs_matrix rel, world;
+      mxs_vector offset, where;
+      mxs_angvec fac;
+      if (data != NULL)
+      {
+         mx_ang2mat(&rel, &data->relRot);
+         mx_mat_mul_vec(&offset, &orient, &data->relPos);
+      }
+      else
+      {
+         mx_identity_mat(&rel);
+         mx_zero_vec(&offset);
+      }
+      mx_add_vec(&where, &loc, &offset);
+      mx_mul_mat(&world, &orient, &rel);
+      mx_mat2ang(&fac, &world);
+
+      // moved only when it has to be: each move relinks it to the cells
+      ObjPos *own = ObjPosGet(link.source);
+      if (own != NULL && mx_dist2_vec(&own->loc.vec, &where) < 0.0001f &&
+          own->fac.tx == fac.tx && own->fac.ty == fac.ty && own->fac.tz == fac.tz)
+         continue;
+      PosPropLock++;
+      ObjPosUpdate(link.source, &where, &fac);
+      PosPropLock--;
+   }
+   SafeRelease(query);
+}
+
 void LGAPI CreatureAttachRelationListener(sRelationListenMsg *msg, RelationListenerData data)
 {
    if (msg->type & kListenLinkBirth)
@@ -106,6 +209,10 @@ void InitCreatureAttachments()
    g_pCreatureAttachRelation->Listen(kListenLinkBirth, CreatureAttachRelationListener, NULL);
 
    StructDescRegister(&sAttachRelStructDesc);
+
+   // (before any mission's relations are read, so its link data is kept)
+   g_pDetailAttachRelation = CreateStandardRelation(&sDetailAttachRelDesc, &sDetailAttachRelDataDesc, kQCaseSetAll);
+   StructDescRegister(&sDetailAttachStructDesc);
 }
 
 void TermCreatureAttachments()
@@ -113,6 +220,7 @@ void TermCreatureAttachments()
    Assert_(g_pCreatureAttachRelation != NULL);
 
    SafeRelease(g_pCreatureAttachRelation);
+   SafeRelease(g_pDetailAttachRelation);
 }
 
 // weapon gets attached.  Is left non-physical by default

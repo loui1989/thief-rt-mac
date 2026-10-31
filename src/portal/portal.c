@@ -2092,10 +2092,16 @@ static void portal_rt_begin(float zoom, int cell)
 }
 #endif
 
+extern void DetailAttachmentsUpdate(void);
+
 void portal_render_scene(Position *pos, float zoom)
 {  PROF
-   Location *loc = &pos->loc;
-   int cell = CellFromLoc(loc), i;
+   Location *loc;
+   int cell, i;
+   // objects attached to others (NewDark detail attachments) follow them
+   DetailAttachmentsUpdate();
+   loc = &pos->loc;
+   cell = CellFromLoc(loc);
 #ifdef STATS_ON
    zero_stats();
 #endif

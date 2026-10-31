@@ -44,6 +44,9 @@ EXTERN BOOL CreatureMakeWeaponPhysical(ObjID creature, ObjID weapon, int weaponT
 EXTERN void CreatureMakeWeaponNonPhysical(ObjID creature, ObjID weapon);
 EXTERN void CreatureAttachmentModify(ObjID creature, ObjID weapon, sCreatureAttachInfo *pAttachInfo);
 EXTERN sCreatureAttachInfo* CreatureAttachmentGet(ObjID creature, ObjID item, const int& inIndex);
+// NewDark's DetailAttachement links: attached objects follow what they are
+// attached to (once a frame, before the scene is drawn)
+EXTERN void DetailAttachmentsUpdate(void);
 ////////////////////////////////////////
 
 #endif
