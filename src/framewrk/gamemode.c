@@ -107,6 +107,16 @@ static SimState gameSimState =
    0xFFFFFFFF,  // All flags set
 };
 
+// While a panel (the Esc menu, the map, objectives, a save or load screen)
+// is over the game: no flags, so nothing simulates. The base mode's clients
+// (AI, physics, sound, time) run under every mode, and only these flags stop
+// them -- with the game's state left in place, guards walked on and could
+// kill the player while the menu was open.
+static SimState pausedSimState =
+{
+   0,
+};
+
 #ifdef EDITOR
 static BOOL gExitGameModeToEditor = FALSE;
 
@@ -729,6 +739,8 @@ static eLoopMessageResult LGAPI _LoopFunc(void* data, eLoopMessage msg, tLoopMes
       }
          // fall through 
       case kMsgSuspendMode:
+         if (msg == kMsgSuspendMode)
+            SimStateSet(&pausedSimState);   // (put back on resume)
          mouse_set_relative_mode(FALSE);
          RemoveIBHandler ();
          suspend_mode();
