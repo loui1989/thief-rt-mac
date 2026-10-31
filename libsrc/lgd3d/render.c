@@ -565,15 +565,24 @@ void lgd3d_modern_reset_texture_state(void)
    modern_next_id1=modern_tex_id1=TDRV_ID_INVALID;
 }
 
+// the bound texture's tile_factor (its .mtl): its UVs scaled
+extern float g_ModernUvScale[][2];
+static float modern_uv_scale[2] = { 1.0f, 1.0f };
+
 static void doPolySetup(int n)
 {
    int trans = 0;
    Flush();
+   modern_uv_scale[0] = modern_uv_scale[1] = 1.0f;
    if (n == TDRV_ID_SOLID) {
       RenderBackendBindTexture(0, g_ModernWhiteTexture);
    } else {
       AssertMsg1((n>=0)&&(n<LGD3D_MAX_TEXTURES), "Invalid texture id: %i", n);
       RenderBackendBindTexture(0, g_ModernTextures[n]);
+      if (g_ModernUvScale[n][0] > 0.0f && g_ModernUvScale[n][1] > 0.0f) {
+         modern_uv_scale[0] = g_ModernUvScale[n][0];
+         modern_uv_scale[1] = g_ModernUvScale[n][1];
+      }
       if (g_ModernBitmaps[n] != NULL)
          trans = g_ModernBitmaps[n]->flags & (BMF_TRANS|BMF_TLUC);
    }
@@ -636,7 +645,7 @@ static void ModernConvertVertex(sRenderBackendVertex *d, const sLgd3dVertex *s)
    d->b=(s->color&255)/255.0f;
    d->a=((s->color>>24)&255)/255.0f;
    d->fog=((s->specular>>24)&255)/255.0f;
-   d->u0=s->tu; d->v0=s->tv; d->u1=d->v1=0.0f;
+   d->u0=s->tu*modern_uv_scale[0]; d->v0=s->tv*modern_uv_scale[1]; d->u1=d->v1=0.0f;
 }
 
 #ifdef DARK_RT

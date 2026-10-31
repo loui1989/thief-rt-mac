@@ -499,6 +499,8 @@ if(DARK_BUILD_ENGINE)
     target_link_libraries(dark_unix_providers PUBLIC SDL2::SDL2)
     if(DARK_RT)
       target_sources(dark_unix_providers PRIVATE unixsrc/render/rtgl1.cpp)
+      # (the material maps' PNGs: rt_materials.h)
+      target_link_libraries(dark_unix_providers PUBLIC z)
       target_include_directories(dark_unix_providers PRIVATE "${DARK_RTGL1_INCLUDE}")
       set_source_files_properties(unixsrc/render/rtgl1.cpp PROPERTIES
         COMPILE_OPTIONS "-std=c++20")

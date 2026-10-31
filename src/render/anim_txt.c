@@ -143,7 +143,9 @@ IRes *ectsAnimSearchForFrame(char *name, int idx, char *path, BOOL portal_tmap)
    strcpy(buf,name);
    s=extension_p(buf);
    if ((s!=NULL)&&(s!=buf)) *(s-1)='\0';
-   if (strlen(buf)>=7) return NULL;   // too long a name for a frame add on
+   // (the 8.3 names of the original allowed 7 characters before the frame
+   // number; NewDark's long names animate too: LROC2lava, walleye_1...)
+   if (strlen(buf)>=sizeof(buf)-8) return NULL;
    sprintf(buf+strlen(buf),"_%d",idx);
    return texmemLoadSingleRes(path, buf, portal_tmap);
 }
@@ -151,11 +153,32 @@ IRes *ectsAnimSearchForFrame(char *name, int idx, char *path, BOOL portal_tmap)
 static IAnimTexProperty* gpAnimProp = NULL;
 
 // do initial setup and configure for an anim texture from properties
+// NewDark's material file (.mtl): ani_rate / ani_mode, the defaults of a
+// texture without a "Texture Anim Data" property (or over it, with
+// force_ani_settings)
+extern int ResImageMaterialAnim(const void *bitmap, int *rate, int *flags, int *force);
+
 static void ectsAnimConfigure(ectsAnimInfo *us)
 {
    static sAnimTexProp defprop = { DEF_RATE, DEF_FLAG }; 
    sAnimTexProp* prop = &defprop;
-   PROPERTY_GET(gpAnimProp,GetResTextureObj(us->frame_hnd[0]),&prop);
+   sAnimTexProp fromMaterial;
+   int mrate = 0, mflags = -1, mforce = 0;
+   const BOOL hasProp = PROPERTY_GET(gpAnimProp,GetResTextureObj(us->frame_hnd[0]),&prop);
+   {
+      void *bm = IRes_DataPeek(us->frame_hnd[0]);
+      if (bm && ResImageMaterialAnim(bm, &mrate, &mflags, &mforce) &&
+          (!hasProp || mforce))
+      {
+         fromMaterial = *prop;
+         if (mrate > 0)
+            fromMaterial.rate = mrate;
+         if (mflags >= 0)
+            fromMaterial.flags = (uchar)(((mflags & 4) ? 0 : FLAG_WRAP) |
+                                         ((mflags & 2) ? FLAG_REVERSE : 0));
+         prop = &fromMaterial;
+      }
+   }
    us->rate=prop->rate;
    us->flags &= FLAGS_RUNTIME; 
    us->flags|=prop->flags;

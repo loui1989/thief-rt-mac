@@ -3,6 +3,7 @@
 #include <allocapi.h>
 #include <bitmap.h>
 #include <resbastm.h>
+#include <restruecolor.h>
 
 #ifdef _WIN32
 #pragma pack(push, 8)
@@ -16,6 +17,7 @@
 #endif
 
 #include <cstdlib>
+#include <cstring>
 #include <limits>
 
 #ifdef _WIN32
@@ -270,8 +272,9 @@ cleanup:
       return nullptr;
    }
 
+   // the 16-bit pixels, then the image's own RGBA (restruecolor.h)
    const size_t allocationSize = sizeof(grs_bitmap) +
-                                 pixelCount * sizeof(uint16);
+                                 pixelCount * sizeof(uint16) + pixelCount * 4;
    if (allocationSize > std::numeric_limits<ulong>::max())
    {
       std::free(rgba);
@@ -293,12 +296,15 @@ cleanup:
       output[i] = useBinaryAlpha ? Pack1555(&rgba[i * 4]) :
                   hasAlpha ? Pack4444(&rgba[i * 4]) :
                              Pack565(&rgba[i * 4]);
+   auto* trueColor = reinterpret_cast<uint8*>(output + pixelCount);
+   std::memcpy(trueColor, rgba, pixelCount * 4);
    std::free(rgba);
 
    gr_init_bitmap(bitmap, reinterpret_cast<uint8*>(output), BMT_FLAT16,
                   useBinaryAlpha ? BMF_RGB_1555 :
                   hasAlpha ? BMF_RGB_4444 : BMF_RGB_565,
                   static_cast<int>(width), static_cast<int>(height));
+   ResTrueColorRegister(bitmap, trueColor);
    return bitmap;
 #endif
 }

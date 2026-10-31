@@ -54,6 +54,8 @@
 #include <limits.h>
 #include <sys/stat.h>
 #include <unistd.h>
+#include <zlib.h>
+#include <resimginfo.h>
 #if defined(__APPLE__)
 #include <mach-o/dyld.h>
 #endif
@@ -64,6 +66,8 @@
 #include "rt_backend_internal.h"
 #include "rt_font.h"
 
+extern "C" const char *DarkContentFMPath(void);
+extern "C" const char *DarkContentBasePath(void);
 extern "C" int g_RenderRTCaptureVertices = 0;
 extern "C" int g_RenderRTEmissiveSprite = 0;
 extern "C" int g_RenderRTCaptureCalls = 0, g_RenderRTCaptureDropped = 0;
@@ -86,7 +90,11 @@ struct Settings {
    float light = 1.0f;
    float sky = 1.0f;
    float glow = 1.0f;         // light fixtures
-   float spriteGlow = 0.35f;  // glow and particle sprites
+   float spriteGlow = 1.0f;   // flame sprites' glow (their emission maps)
+   bool materials = true;     // material maps made from the textures (rt_materials.h)
+   float bump = 1.0f;         // their bumps' strength
+   float parallax = 0.03f;    // parallax depth, in texture widths (0 off)
+   bool polish = true;        // polished surfaces mirror the room
    int water = 0;             // 0 translucent (as the game), 1 RTGL1 water, 2 opaque
    int gi = 0;                // bounce light: 0 two bounces at half rate (as Blood RT),
                               // 1 one bounce, 2 two bounces, 3 one bounce at half rate
@@ -142,6 +150,8 @@ std::string settings_path()
 #endif
 }
 
+constexpr float kDefaultsSpriteGlow = 1.0f;
+
 void load_settings()
 {
    FILE *f = fopen(settings_path().c_str(), "r");
@@ -149,6 +159,7 @@ void load_settings()
       return;
    char key[64];
    float value;
+   int version = 1;
    while (fscanf(f, " %63[a-z_] = %f", key, &value) == 2) {
       const std::string k = key;
       if (k == "upscale") g_cfg.upscale = std::clamp(int(value), 0, 5);
@@ -164,6 +175,11 @@ void load_settings()
       else if (k == "gi") g_cfg.gi = std::clamp(int(value), 0, 3);
       else if (k == "volumetric") g_cfg.volumetric = value != 0;
       else if (k == "fog") g_cfg.fog = std::clamp(int(value), 0, 3);
+      else if (k == "materials") g_cfg.materials = value != 0;
+      else if (k == "bump") g_cfg.bump = std::clamp(value, 0.0f, 4.0f);
+      else if (k == "parallax") g_cfg.parallax = std::clamp(value, 0.0f, 0.1f);
+      else if (k == "polish") g_cfg.polish = value != 0;
+      else if (k == "settings_version") version = int(value);
       else if (k == "dynres") g_cfg.dynres = std::clamp(int(value), 0, 240);
       else if (k == "reach") g_cfg.reach = std::clamp(int(value), 0, 90);
       else if (k == "max_lights") g_cfg.maxLights = std::clamp(int(value), 0, 4096);
@@ -186,6 +202,9 @@ void load_settings()
       else if (k == "frame_cap") g_cfg.frameCap = std::clamp(int(value), 30, 240);
    }
    fclose(f);
+   // settings saved before version 2: the flame glow was unused (0.35)
+   if (version < 2)
+      g_cfg.spriteGlow = kDefaultsSpriteGlow;
 }
 
 void save_settings()
@@ -199,13 +218,13 @@ void save_settings()
       return;
    fprintf(f, "upscale = %d\nscale = %.2f\nfps = %d\nvsync = %d\nlight = %.3f\nsky = %.3f\n"
               "light_size = %.3f\nglow = %.3f\nwater = %d\nsprite_glow = %.3f\ngi = %d\n"
-              "volumetric = %d\ndynres = %d\nmax_lights = %d\nmin_roughness = %.2f\nlight_cull = %d\nflicker = %d\nambient = %.3f\nsmooth_models = %d\nfixtures_pass = %d\nlight_fix = %d\nlight_response = %d\nev_min = %d\nlight_candidates = %d\nsteady_faces = %d\nlight_fade = %d\nbloom = %d\nrt_detection = %d\nreach = %d\noutput_height = %d\nperf_log = %d\nframe_cap = %d\nfog = %d\n",
+              "volumetric = %d\ndynres = %d\nmax_lights = %d\nmin_roughness = %.2f\nlight_cull = %d\nflicker = %d\nambient = %.3f\nsmooth_models = %d\nfixtures_pass = %d\nlight_fix = %d\nlight_response = %d\nev_min = %d\nlight_candidates = %d\nsteady_faces = %d\nlight_fade = %d\nbloom = %d\nrt_detection = %d\nreach = %d\noutput_height = %d\nperf_log = %d\nframe_cap = %d\nfog = %d\nmaterials = %d\nbump = %.2f\nparallax = %.3f\npolish = %d\nsettings_version = 2\n",
            g_cfg.upscale, g_cfg.scale, int(g_cfg.fps), int(g_cfg.vsync), g_cfg.light, g_cfg.sky,
            g_cfg.lightSize, g_cfg.glow, g_cfg.water, g_cfg.spriteGlow, g_cfg.gi,
            int(g_cfg.volumetric), g_cfg.dynres, g_cfg.maxLights, g_cfg.minRoughness,
            int(g_cfg.lightCull), g_cfg.flicker, g_cfg.ambient, int(g_cfg.smoothModels),
            int(g_cfg.fixturesPass), int(g_cfg.lightFix), g_cfg.response, g_cfg.evMin,
-           g_cfg.candidates, int(g_cfg.steadyFaces), int(g_cfg.lightFade), int(g_cfg.bloom), int(g_cfg.rtDetection), g_cfg.reach, g_cfg.outputHeight, int(g_cfg.perfLog), g_cfg.frameCap, g_cfg.fog);
+           g_cfg.candidates, int(g_cfg.steadyFaces), int(g_cfg.lightFade), int(g_cfg.bloom), int(g_cfg.rtDetection), g_cfg.reach, g_cfg.outputHeight, int(g_cfg.perfLog), g_cfg.frameCap, g_cfg.fog, int(g_cfg.materials), g_cfg.bump, g_cfg.parallax, int(g_cfg.polish));
    fclose(f);
 }
 
@@ -231,7 +250,14 @@ struct Ui {
 
 struct RtTexture {
    uint32_t serial = 0;
-   char name[24] = {};
+   char name[160] = {};
+   // the image it was made from (resimginfo.h): its path and material file
+   std::string source;
+   float illumStrength = 0.0f;
+   std::string illumMap;
+   // what its material maps make it (rt_materials.h)
+   bool polished = false, glows = false, mapsNone = false;
+   float glow = 0.0f;
    int width = 0, height = 0;
    std::vector<uint8_t> rgba;
    bool dirty = true;      // pixels changed since RTGL1 got them
@@ -272,6 +298,88 @@ void copy_pixels(RtTexture &t, int width, int height, const void *rgba, int rowB
    t.dirty = true;
 }
 
+#include "rt_materials.h"
+
+// RTGL1 names in use, and by how many textures: the same picture (named by
+// its file and pixels) loaded twice shares one, and is taken back from RTGL1
+// when the last of them goes
+std::unordered_map<std::string, int> g_nameRefs;
+
+void release_name(const char *name)
+{
+   auto it = g_nameRefs.find(name);
+   if (it == g_nameRefs.end())
+      return;
+   if (--it->second <= 0) {
+      if (g_active)
+         rt.rgMarkOriginalTextureAsDeleted(name);
+      g_nameRefs.erase(it);
+   }
+}
+
+std::string g_matDir;
+
+// a NewDark illum_map, by its resource path: in the fan mission, then the game
+std::vector<uint8_t> *illum_image(const std::string &path, int &w, int &h)
+{
+   static std::unordered_map<std::string, std::pair<std::vector<uint8_t>, std::pair<int, int>>> s_cache;
+   auto it = s_cache.find(path);
+   if (it == s_cache.end()) {
+      std::vector<uint8_t> px;
+      int iw = 0, ih = 0;
+      const char *roots[] = {DarkContentFMPath(), DarkContentBasePath()};
+      bool ok = false;
+      for (const char *root : roots) {
+         if (!root || !*root)
+            continue;
+         ok = rtmat::read_png(std::string(root) + "/" + path + ".png", px, iw, ih);
+         if (ok)
+            break;
+      }
+      if (!ok)
+         fprintf(stderr, "RT: material glow map %s.png not found\n", path.c_str());
+      it = s_cache.emplace(path, std::make_pair(std::move(px), std::make_pair(iw, ih))).first;
+   }
+   w = it->second.second.first;
+   h = it->second.second.second;
+   return it->second.first.empty() ? nullptr : &it->second.first;
+}
+
+// The texture's RTGL1 name: its material name (its file, its pixels, its
+// class) when it came from an image file, and its maps made; else dark.t<n>.
+void name_texture(RtTexture *t)
+{
+   t->polished = t->glows = t->mapsNone = false;
+   t->glow = 0.0f;
+   if (g_cfg.materials && !t->source.empty() && !g_rtDir.empty()) {
+      if (g_matDir.empty()) {
+         g_matDir = g_rtDir + "/mat_dev";
+         mkdir(g_matDir.c_str(), 0755);
+      }
+      rtmat::load_table(g_rtDir);
+      const rtmat::Class *c = rtmat::class_of(t->source);
+      if (c) {
+         uint32_t h = rtmat::fnv(t->rgba.data(), t->rgba.size());
+         h = rtmat::fnv(&t->width, sizeof(t->width), h);
+         h ^= c->hash * 0x9e3779b1u;
+         if (t->illumStrength > 0)
+            h = rtmat::fnv(t->illumMap.data(), t->illumMap.size(), h ^ uint32_t(t->illumStrength * 1000.0f));
+         snprintf(t->name, sizeof(t->name), "m.%s.%08x", rtmat::file_safe(t->source).c_str(), h);
+         int gw = 0, gh = 0;
+         std::vector<uint8_t> *glowMap = t->illumStrength > 0 && !t->illumMap.empty()
+                                            ? illum_image(t->illumMap, gw, gh) : nullptr;
+         const rtmat::Result r = rtmat::prepare(g_matDir, t->name, *c, t->rgba.data(), t->width, t->height,
+                                                glowMap, gw, gh, t->illumStrength);
+         t->polished = r.polished;
+         t->glows = r.glows;
+         t->glow = r.glow;
+         t->mapsNone = r.none;
+         return;
+      }
+   }
+   snprintf(t->name, sizeof(t->name), "dark.t%u", t->serial);
+}
+
 // The RTGL1 name for a texture, uploading its pixels first if they changed.
 const char *texture_name(RtTexture *t)
 {
@@ -279,27 +387,86 @@ const char *texture_name(RtTexture *t)
       return nullptr;
    if (t->dirty) {
       if (t->provided)
-         rt.rgMarkOriginalTextureAsDeleted(t->name);
+         release_name(t->name);
+      t->provided = false;
+      name_texture(t);
+      auto ref = g_nameRefs.find(t->name);
+      if (ref != g_nameRefs.end()) {
+         ++ref->second;   // the same picture, already given to RTGL1
+         t->provided = true;
+      } else {
+         auto details = RgOriginalTextureDetailsEXT{
+            .sType = RG_STRUCTURE_TYPE_ORIGINAL_TEXTURE_DETAILS_EXT,
+            .pNext = nullptr,
+            .flags = 0,
+            .format = RG_FORMAT_R8G8B8A8_SRGB,
+         };
+         auto info = RgOriginalTextureInfo{
+            .sType = RG_STRUCTURE_TYPE_ORIGINAL_TEXTURE_INFO,
+            .pNext = &details,
+            .pTextureName = t->name,
+            .pPixels = t->rgba.data(),
+            .size = {uint32_t(t->width), uint32_t(t->height)},
+            .filter = RG_SAMPLER_FILTER_AUTO,
+            .addressModeU = RG_SAMPLER_ADDRESS_MODE_REPEAT,
+            .addressModeV = RG_SAMPLER_ADDRESS_MODE_REPEAT,
+         };
+         t->provided = rt.rgProvideOriginalTexture(&info) == RG_RESULT_SUCCESS;
+         if (t->provided)
+            g_nameRefs[t->name] = 1;
+      }
+      t->dirty = false;
+   }
+   return t->provided ? t->name : nullptr;
+}
+
+// A flame sprite: its alpha texture again under a name of its own, with an
+// emission map of its colour within its soft shape (glowing as a whole, the
+// sprite's square showed). Kept for the session.
+const char *flame_texture(RtTexture *base, float r, float g, float b)
+{
+   const char *baseName = texture_name(base);
+   if (!baseName || g_rtDir.empty() || !g_cfg.materials || g_cfg.spriteGlow <= 0.0f)
+      return nullptr;
+   const float k = std::clamp(g_cfg.spriteGlow, 0.0f, 1.0f);
+   const int qr = int(std::clamp(r * k, 0.0f, 1.0f) * 15.0f + 0.5f);
+   const int qg = int(std::clamp(g * k, 0.0f, 1.0f) * 15.0f + 0.5f);
+   const int qb = int(std::clamp(b * k, 0.0f, 1.0f) * 15.0f + 0.5f);
+   char name[200];
+   snprintf(name, sizeof(name), "flame.%08x.%x%x%x",
+            rtmat::fnv(base->rgba.data(), base->rgba.size()), qr, qg, qb);
+   static std::unordered_set<std::string> s_made;
+   if (!s_made.count(name)) {
+      if (g_matDir.empty()) {
+         g_matDir = g_rtDir + "/mat_dev";
+         mkdir(g_matDir.c_str(), 0755);
+      }
+      std::vector<uint8_t> tinted = base->rgba;
+      const float tint[3] = {qr / 15.0f, qg / 15.0f, qb / 15.0f};
+      for (size_t i = 0; i < tinted.size(); i += 4)
+         for (int c = 0; c < 3; ++c)
+            tinted[i + c] = uint8_t(std::clamp(tinted[i + c] * tint[c], 0.0f, 255.0f));
+      if (!rtmat::prepare_flame(g_matDir, name, tinted.data(), base->width, base->height))
+         return nullptr;
       auto details = RgOriginalTextureDetailsEXT{
          .sType = RG_STRUCTURE_TYPE_ORIGINAL_TEXTURE_DETAILS_EXT,
-         .pNext = nullptr,
-         .flags = 0,
-         .format = RG_FORMAT_R8G8B8A8_SRGB,
+         .pNext = nullptr, .flags = 0, .format = RG_FORMAT_R8G8B8A8_SRGB,
       };
       auto info = RgOriginalTextureInfo{
          .sType = RG_STRUCTURE_TYPE_ORIGINAL_TEXTURE_INFO,
          .pNext = &details,
-         .pTextureName = t->name,
-         .pPixels = t->rgba.data(),
-         .size = {uint32_t(t->width), uint32_t(t->height)},
+         .pTextureName = name,
+         .pPixels = base->rgba.data(),
+         .size = {uint32_t(base->width), uint32_t(base->height)},
          .filter = RG_SAMPLER_FILTER_AUTO,
-         .addressModeU = RG_SAMPLER_ADDRESS_MODE_REPEAT,
-         .addressModeV = RG_SAMPLER_ADDRESS_MODE_REPEAT,
+         .addressModeU = RG_SAMPLER_ADDRESS_MODE_CLAMP,
+         .addressModeV = RG_SAMPLER_ADDRESS_MODE_CLAMP,
       };
-      t->provided = rt.rgProvideOriginalTexture(&info) == RG_RESULT_SUCCESS;
-      t->dirty = false;
+      if (rt.rgProvideOriginalTexture(&info) != RG_RESULT_SUCCESS)
+         return nullptr;
+      s_made.insert(name);
    }
-   return t->provided ? t->name : nullptr;
+   return s_made.find(name)->c_str();
 }
 
 // A texture RTGL1 should see in full every frame (canvas, movie).
@@ -1116,6 +1283,12 @@ void upload_world()
                alpha = g_cfg.waterAlpha;
          }
       }
+      const char *texName = texture_name(tex);
+      // smooth, polished surfaces (marble, glazed tile, metal): sharp traced
+      // mirror reflections over their texture (the material table)
+      if (tex && tex->polished && g_cfg.polish && g_cfg.materials &&
+          !(flags & (RG_MESH_PRIMITIVE_WATER | RG_MESH_PRIMITIVE_TRANSLUCENT | RG_MESH_PRIMITIVE_ALPHA_TESTED)))
+         flags |= RG_MESH_PRIMITIVE_POLISHED;
       auto prim = RgMeshPrimitiveInfo{
          .sType = RG_STRUCTURE_TYPE_MESH_PRIMITIVE_INFO,
          .pNext = nullptr,
@@ -1125,12 +1298,14 @@ void upload_world()
          .vertexCount = uint32_t(g.verts.size()),
          .pIndices = g.indices.data(),
          .indexCount = uint32_t(g.indices.size()),
-         .pTextureName = texture_name(tex),
+         .pTextureName = texName,
          .textureFrame = 0,
          .color = pack_color(1, 1, 1, alpha),
+         // (a glowing texture -- a lit window -- also lights its surroundings)
          .emissive = (g.flags & kRenderRTWorldFullbright) ? 0.25f
                      : (flags & (RG_MESH_PRIMITIVE_TRANSLUCENT | RG_MESH_PRIMITIVE_SKY)) ? 0.0f
-                                                                                      : ambient_emissive(),
+                     : (tex && tex->glows) ? std::max(ambient_emissive(), tex->glow)
+                                           : ambient_emissive(),
          .classicLight = 1.0f,
          .emissiveGi = 0.0f,
       };
@@ -1294,6 +1469,25 @@ void Close()
 
 bool Active() { return g_active; }
 
+// the image the next texture is made from (lgd3d says, before it makes it)
+const void *g_pendingSource = nullptr;
+
+void take_source(RtTexture *t)
+{
+   t->source.clear();
+   t->illumMap.clear();
+   t->illumStrength = 0.0f;
+   sResImageInfo info;
+   if (g_pendingSource && ResImageInfoFind(g_pendingSource, &info) && info.name[0]) {
+      t->source = info.name;
+      if (info.illumStrength > 0 && info.illumMap[0]) {
+         t->illumStrength = info.illumStrength;
+         t->illumMap = info.illumMap;
+      }
+   }
+   g_pendingSource = nullptr;
+}
+
 void *CreateTexture(int width, int height, const void *rgba, int rowBytes)
 {
    if (width <= 0 || height <= 0 || !rgba || rowBytes < width * 4)
@@ -1312,6 +1506,7 @@ void *CreateTexture(int width, int height, const void *rgba, int rowBytes)
    t->serial = ++g_textureSerial;
    snprintf(t->name, sizeof(t->name), "dark.t%u", t->serial);
    t->provided = false;
+   take_source(t);
    copy_pixels(*t, width, height, rgba, rowBytes);
    return t;
 }
@@ -1321,6 +1516,8 @@ int UpdateTexture(void *handle, int width, int height, const void *rgba, int row
    RtTexture *t = static_cast<RtTexture *>(handle);
    if (!t || width <= 0 || height <= 0 || !rgba || rowBytes < width * 4)
       return 0;
+   if (g_pendingSource)
+      take_source(t);
    copy_pixels(*t, width, height, rgba, rowBytes);
    return 1;
 }
@@ -1336,8 +1533,8 @@ void DestroyTexture(void *handle)
    for (auto &w : g_worldTextures)
       if (w.second == t)
          w.second = nullptr;
-   if (t->provided && g_active)
-      rt.rgMarkOriginalTextureAsDeleted(t->name);
+   if (t->provided)
+      release_name(t->name);
    t->provided = false;
    t->rgba.clear();
    t->rgba.shrink_to_fit();
@@ -1615,7 +1812,7 @@ const char *kUpscaleNames[] = {"Off",
 
 enum UiRow {
    kRowUpscale, kRowScale, kRowOutput, kRowDynres, kRowBounces, kRowReach, kRowLights, kRowLightFade, kRowCandidates, kRowLightCull, kRowResponse, kRowFlicker, kRowVolumetric, kRowFog, kRowBloom, kRowVsync, kRowFrameCap,
-   kRowFps, kRowDetection, kRowLight, kRowExposure, kRowAmbient, kRowSky, kRowLightSize, kRowRough, kRowSmooth, kRowSteady, kRowFixtures, kRowLightFix, kRowGlow, kRowWater,
+   kRowFps, kRowDetection, kRowLight, kRowExposure, kRowAmbient, kRowSky, kRowLightSize, kRowRough, kRowSmooth, kRowSteady, kRowFixtures, kRowLightFix, kRowGlow, kRowFlameGlow, kRowMaterials, kRowBump, kRowParallax, kRowPolish, kRowWater,
    kRowDebug, kRowFreeze, kRowBackFaces, kRowReuse, kRowBlink, kRowPerf, kRowInspect, kRowReset, kRowCount
 };
 
@@ -1623,7 +1820,7 @@ const char *kRowLabels[kRowCount] = {
    "Upscaler", "Render resolution", "Output resolution", "Dynamic resolution", "Bounce light", "Light reach", "Lights traced",
    "Lights coming into range", "Lights tried per pixel", "Lights behind walls", "Light changes", "Light flicker",
    "Volumetric light", "Mission fog", "Bloom", "VSync", "Frame rate limit", "FPS counter", "Light gem and guards", "Light brightness", "Darkest exposure", "Ambient light", "Sky brightness",
-   "Light size (soft shadows)", "Surface roughness", "Model shading", "Model faces", "Torches and lamps", "Lights in walls", "Lamp glow", "Water",
+   "Light size (soft shadows)", "Surface roughness", "Model shading", "Model faces", "Torches and lamps", "Lights in walls", "Lamp glow", "Flame glow", "Materials", "Bumps", "Parallax depth", "Polished reflections", "Water",
    "Debug view", "Freeze scene (test)", "Back faces (test)", "Light sampling (test)", "Blink nearest light (test)", "Performance log", "Inspect centre of view", "Reset to defaults",
 };
 
@@ -1716,6 +1913,20 @@ std::string row_value(int row)
       if (g_cfg.glow <= 0.0f) return "Off";
       snprintf(buf, sizeof(buf), "%.2f", g_cfg.glow);
       return buf;
+   case kRowFlameGlow:
+      if (g_cfg.spriteGlow <= 0.0f) return "Off";
+      snprintf(buf, sizeof(buf), "%.2f", g_cfg.spriteGlow);
+      return buf;
+   case kRowMaterials: return g_cfg.materials ? "Made from the textures" : "Off (flat)";
+   case kRowBump:
+      if (g_cfg.bump <= 0.0f) return "Off";
+      snprintf(buf, sizeof(buf), "%.2fx", g_cfg.bump);
+      return buf;
+   case kRowParallax:
+      if (g_cfg.parallax <= 0.0f) return "Off";
+      snprintf(buf, sizeof(buf), "%.3f", g_cfg.parallax);
+      return buf;
+   case kRowPolish: return g_cfg.polish ? "Mirror (sharp)" : "Off";
    case kRowWater:
       return g_cfg.water == 1 ? "Reflective (RTGL1)" : g_cfg.water == 2 ? "Opaque" : "Translucent";
    default: return "";
@@ -1857,6 +2068,23 @@ void change_row(int row, int dir)
    case kRowGlow:
       g_cfg.glow = std::clamp(std::round(g_cfg.glow * 4.0f) / 4.0f + 0.25f * dir, 0.0f, 5.0f);
       break;
+   case kRowFlameGlow:
+      g_cfg.spriteGlow = std::clamp(std::round(g_cfg.spriteGlow * 4.0f) / 4.0f + 0.25f * dir, 0.0f, 1.0f);
+      break;
+   case kRowMaterials:
+      g_cfg.materials = !g_cfg.materials;
+      // every texture named again (with or without its maps)
+      for (RtTexture &t : g_textures)
+         if (!t.rgba.empty())
+            t.dirty = true;
+      break;
+   case kRowBump:
+      g_cfg.bump = std::clamp(std::round(g_cfg.bump * 4.0f) / 4.0f + 0.25f * dir, 0.0f, 3.0f);
+      break;
+   case kRowParallax:
+      g_cfg.parallax = std::clamp(std::round(g_cfg.parallax * 200.0f) / 200.0f + 0.005f * dir, 0.0f, 0.06f);
+      break;
+   case kRowPolish: g_cfg.polish = !g_cfg.polish; break;
    case kRowWater: g_cfg.water = (g_cfg.water + dir + 3) % 3; break;
    case kRowInspect: inspect_view(); return;
    case kRowReset: {
@@ -2351,11 +2579,23 @@ void draw_frame(bool sceneDrawn)
       .pNext = &illum,
       .dynamicSamplerFilter = RG_SAMPLER_FILTER_LINEAR,
       .mipLodBiasOffset = 0.0f,
-      .normalMapStrength = 1.0f,
+      .normalMapStrength = g_cfg.materials ? g_cfg.bump : 0.0f,
       .emissionMapBoost = 50.0f,   // (as Blood RT)
       .emissionMaxScreenColor = 1.5f,
       .minRoughness = g_cfg.minRoughness,
-      .heightMapDepth = 0.02f,
+      .heightMapDepth = g_cfg.materials ? g_cfg.parallax : 0.0f,
+      // the material maps' roughness and metal (rt_materials.h): RTGL1's
+      // defaults for these leave every surface a plain matte dielectric
+      .forceNonMetallic = false,
+      .metallicMax = 0.75f,
+      .metallicRoughCut = 0.7f,
+      .metallicRoughBand = 0.3f,
+      .spritePbr = 0.35f,
+      .spriteMetallicMax = 0.9f,
+      .spriteRoughMin = 0.0f,
+      .spriteNormalStrength = 1.0f,
+      .worldPbr = g_cfg.materials ? 1.0f : 0.0f,
+      .albedoFilterMode = 0,
    };
    // Blood RT's eye adaptation: a dark place is not brightened up to 32 times
    // (RTGL1's own range starts at EV 0), its noise with it
@@ -3280,6 +3520,21 @@ void RenderRTDrawWorld(int primitive, const sRenderBackendVertex *v, const float
       prim.flags |= RG_MESH_PRIMITIVE_TRANSLUCENT | RG_MESH_PRIMITIVE_NO_SHADOW |
                     RG_MESH_PRIMITIVE_NO_WATER_CAUSTICS;
       prim.emissive = 0.0f;
+      // A flame (a torch's, a candle's: warm and saturated, not grey smoke)
+      // glows in its colour through an emission map of its own -- black
+      // outside its soft shape, so no square. Its light is the torch's own.
+      if (tex) {
+         float c[3] = {0, 0, 0};
+         for (int i = 0; i < count; ++i) {
+            c[0] += v[i].r / count;
+            c[1] += v[i].g / count;
+            c[2] += v[i].b / count;
+         }
+         const float hi = std::max({c[0], c[1], c[2]}), lo = std::min({c[0], c[1], c[2]});
+         if (hi > 0.35f && c[0] >= c[1] && c[1] >= c[2] * 0.9f && (hi - lo) > 0.25f * hi)
+            if (const char *flame = flame_texture(tex, c[0] / hi, c[1] / hi, c[2] / hi))
+               prim.texture = flame;
+      }
    } else if (g_blend == kRenderBackendBlendAdd) {
       prim.flags |= RG_MESH_PRIMITIVE_TRANSLUCENT;
       prim.emissive = 1.0f;
@@ -3288,6 +3543,11 @@ void RenderRTDrawWorld(int primitive, const sRenderBackendVertex *v, const float
    } else if (tex && tex->cutout && (g_alphaTest || g_blend == kRenderBackendBlendAlpha)) {
       prim.flags |= RG_MESH_PRIMITIVE_ALPHA_TESTED;
    }
+
+   // a polished object (a marble statue, a metal one): mirror reflections
+   if (tex && tex->polished && g_cfg.polish && g_cfg.materials && !sprite && !g_RenderRTShadowOnly &&
+       !(prim.flags & (RG_MESH_PRIMITIVE_TRANSLUCENT | RG_MESH_PRIMITIVE_ALPHA_TESTED)))
+      prim.flags |= RG_MESH_PRIMITIVE_POLISHED;
 
    // a camera-facing bitmap object: seen, but it must not shadow anything
    if (g_currentObject && g_currentNoShadow && !g_RenderRTShadowOnly)
@@ -3405,6 +3665,8 @@ int RenderRTObjectWanted(uint32_t obj)
 }
 
 void RenderRTCameraMedium(int underwater) { g_underwater = underwater != 0; }
+
+void RenderRTTextureSource(const void *bitmap) { darkrt::g_pendingSource = bitmap; }
 
 void RenderRTFog(const float rgb[3], float distFeet)
 {

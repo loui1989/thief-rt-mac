@@ -3,6 +3,7 @@
 #include <allocapi.h>
 #include <bitmap.h>
 #include <resbastm.h>
+#include <restruecolor.h>
 
 #include <cstring>
 #include <limits>
@@ -313,8 +314,9 @@ grs_bitmap* ResDdsReadImage(IStoreStream* pStream,
        (std::numeric_limits<size_t>::max() - sizeof(grs_bitmap)) /
           sizeof(uint16))
       return nullptr;
+   // the 16-bit pixels, then the image's own RGBA (restruecolor.h)
    const size_t allocationSize = sizeof(grs_bitmap) +
-                                 pixelCount * sizeof(uint16);
+                                 pixelCount * (sizeof(uint16) + 4);
    if (allocationSize > std::numeric_limits<ulong>::max())
       return nullptr;
 
@@ -329,11 +331,18 @@ grs_bitmap* ResDdsReadImage(IStoreStream* pStream,
    for (size_t i = 0; i < pixelCount; ++i)
       output[i] = hasPartialAlpha ? Pack4444(pixels[i]) :
                   hasAlpha ? Pack1555(pixels[i]) : Pack565(pixels[i]);
+   auto* trueColor = reinterpret_cast<uint8*>(output + pixelCount);
+   for (size_t i = 0; i < pixelCount; ++i)
+   {
+      trueColor[i * 4] = pixels[i].r; trueColor[i * 4 + 1] = pixels[i].g;
+      trueColor[i * 4 + 2] = pixels[i].b; trueColor[i * 4 + 3] = pixels[i].a;
+   }
 
    gr_init_bitmap(bitmap, reinterpret_cast<uint8*>(output), BMT_FLAT16,
       hasPartialAlpha ? BMF_RGB_4444 :
       hasAlpha ? BMF_RGB_1555 : BMF_RGB_565,
       static_cast<int>(width), static_cast<int>(height));
+   ResTrueColorRegister(bitmap, trueColor);
    return bitmap;
 }
 

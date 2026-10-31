@@ -1,4 +1,8 @@
+#include <restruecolor.h>
 #include <render_backend.h>
+#ifdef DARK_RT
+#include <render_rt.h>
+#endif
 #include <dev2d.h>
 #include <lgd3d.h>
 #include <stdio.h>
@@ -20,6 +24,9 @@ static int g_texReportFrames = 0, g_texThrashReports = 0;
 extern "C" {
 texture_manager *g_tmgr = NULL;
 void *g_ModernTextures[LGD3D_MAX_TEXTURES];
+// NewDark's tile_factor (the image's .mtl): its UVs scaled by this
+float g_ModernUvScale[LGD3D_MAX_TEXTURES][2];
+extern "C" int ResImageMaterialTile(const void *bitmap, float *su, float *sv);
 grs_bitmap *g_ModernBitmaps[LGD3D_MAX_TEXTURES];
 void *g_ModernWhiteTexture = NULL;
 int g_ModernTextureLevel = 0;
@@ -89,6 +96,7 @@ static void Decode16(ushort p, ushort flags, uchar *r, uchar *g, uchar *b,
   }
 }
 
+static int g_trueColorTextures = 0;
 static uchar *ConvertTexture(tdrv_texture_info *info) {
   grs_bitmap *bm = info->bm;
   int w = info->w, h = info->h, x, y;
@@ -96,6 +104,16 @@ static uchar *ConvertTexture(tdrv_texture_info *info) {
   uchar *out = (uchar *)malloc(w * h * 4);
   if (!out)
     return NULL;
+  // a true-colour image's own RGBA, not its 16-bit copy (restruecolor.h):
+  // four bits a channel banded every high-resolution texture
+  if (bm->type == BMT_FLAT16 && w == bm->w && h == bm->h) {
+    const uchar *rgba = ResTrueColorFind(bm);
+    if (rgba) {
+      memcpy(out, rgba, (size_t)w * h * 4);
+      ++g_trueColorTextures;
+      return out;
+    }
+  }
   // A slot-0 texture may carry its own palette (no palette slot was left).
   const uchar *ownPalette =
       (bm->type == BMT_FLAT8 && bm->align == 0) ? palmgr_bitmap_palette(bm) : NULL;
@@ -163,10 +181,14 @@ static int LoadTexture(tdrv_texture_info *info) {
     return TDRV_FAILURE;
   if (g_ModernTextures[info->id])
     RenderBackendDestroyTexture(g_ModernTextures[info->id]);
+#ifdef DARK_RT
+  RenderRTTextureSource(info->bm);
+#endif
   g_ModernTextures[info->id] =
       RenderBackendCreateTexture(info->w, info->h, pixels, info->w * 4);
   free(pixels);
   g_ModernBitmaps[info->id] = info->bm;
+  ResImageMaterialTile(info->bm, &g_ModernUvScale[info->id][0], &g_ModernUvScale[info->id][1]);
   ++g_texLoads;
   if (info->id > g_texHighest)
     g_texHighest = info->id;
@@ -177,6 +199,9 @@ static void ReloadTexture(tdrv_texture_info *info) {
   uchar *pixels = ConvertTexture(info);
   if (!pixels)
     return;
+#ifdef DARK_RT
+  RenderRTTextureSource(info->bm);
+#endif
   if (!RenderBackendUpdateTexture(g_ModernTextures[info->id], info->w, info->h,
                                 pixels, info->w * 4)) {
     if (g_ModernTextures[info->id]) {
@@ -186,11 +211,15 @@ static void ReloadTexture(tdrv_texture_info *info) {
       UnsetTextureId(info->id);
       RenderBackendDestroyTexture(g_ModernTextures[info->id]);
     }
+#ifdef DARK_RT
+    RenderRTTextureSource(info->bm);
+#endif
     g_ModernTextures[info->id] =
         RenderBackendCreateTexture(info->w, info->h, pixels, info->w * 4);
   }
   free(pixels);
   g_ModernBitmaps[info->id] = info->bm;
+  ResImageMaterialTile(info->bm, &g_ModernUvScale[info->id][0], &g_ModernUvScale[info->id][1]);
 }
 static void UnloadTexture(int id) {
   if (id >= 0 && id < LGD3D_MAX_TEXTURES)
@@ -214,6 +243,12 @@ static void DriverEndFrame(void) {
   // Every ~5 s: a manager releasing textures while it loads them is out of
   // handles (or memory) and swapping, which costs every frame.
   if (++g_texReportFrames >= 300) {
+    static int s_trueReported = -1;
+    if (g_trueColorTextures != s_trueReported) {
+      fprintf(stderr, "textures: %d taken in full colour from their images so far\n",
+              g_trueColorTextures);
+      s_trueReported = g_trueColorTextures;
+    }
     if (g_texReleases > 0 && g_texThrashReports < 40) {
       ++g_texThrashReports;
       fprintf(stderr, "textures: %d loaded, %d swapped out in the last %d frames "

@@ -47,6 +47,7 @@
 
 #include <wrdbrend.h> // to get access to cell texutre
 #include <memall.h>
+extern int ResImageMaterialTile(const void *bitmap, float *su, float *sv);
 #include <fogzone.h>
 #include <dbmem.h>   // must be last header! 
 
@@ -1772,6 +1773,16 @@ static void portal_rt_submit_world(void)
             if (flags & kRenderRTWorldWater)
                for (i = 0; i < 2 * n; ++i)
                   uv[i] *= hw_water_tex_scale;   // as ptdrawhw.c draws water
+            {
+               // the texture's tile_factor (its .mtl), as lgd3d draws it
+               float su, sv;
+               r3s_texture ttex = portal_get_texture(ri->texture_id);
+               if (ttex && ResImageMaterialTile(ttex, &su, &sv))
+                  for (i = 0; i < n; ++i) {
+                     uv[i*2] *= su;
+                     uv[i*2+1] *= sv;
+                  }
+            }
             RenderRTWorldPolygon(ri->texture_id, flags, n, xyz, uv);
             if (!(flags & kRenderRTWorldSky) && ri->texture_id < PORTAL_RT_MAX_TEXTURE_IDS) {
                // 2: a water surface, drawn through its medium's palette

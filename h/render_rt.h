@@ -88,6 +88,9 @@ void RenderRTGameDescribeNearby(const float at[3], float radius,
 void RenderRTCameraMedium(int underwater);
 // the frame's fog: colour 0-255, distance (feet) at which it is opaque, 0 none
 void RenderRTFog(const float rgb[3], float distFeet);
+// the image (its grs_bitmap) the next backend texture is made from: its file
+// and material file name its material maps (lgd3d's modern texture path)
+void RenderRTTextureSource(const void *bitmap);
 
 // World representation. Returns nonzero if geometry for this serial must be
 // (re)submitted between RenderRTWorldBegin and RenderRTWorldEnd.

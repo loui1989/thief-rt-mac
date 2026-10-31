@@ -2,6 +2,7 @@
 
 #include <allocapi.h>
 #include <bitmap.h>
+#include <restruecolor.h>
 
 #include <cstring>
 #include <limits>
@@ -136,17 +137,19 @@ grs_bitmap* ResTgaReadImage(IStoreStream* pStream, IResMemOverride* pResMem)
 
 	const auto pixelCount = static_cast<unsigned long>(header.width) * header.height;
 	if (pixelCount >
-		(std::numeric_limits<unsigned long>::max() - sizeof(grs_bitmap)) / sizeof(uint16))
+		(std::numeric_limits<unsigned long>::max() - sizeof(grs_bitmap)) / (sizeof(uint16) + 4))
 		return nullptr;
 
+	// the 16-bit pixels, then the image's own RGBA (restruecolor.h)
 	LGALLOC_PUSH_CREDIT();
 	auto* pBitmap = reinterpret_cast<grs_bitmap*>(
-		pResMem->ResMalloc(sizeof(grs_bitmap) + pixelCount * sizeof(uint16)));
+		pResMem->ResMalloc(sizeof(grs_bitmap) + pixelCount * (sizeof(uint16) + 4)));
 	LGALLOC_POP_CREDIT();
 	if (!pBitmap)
 		return nullptr;
 
 	auto* pBits = reinterpret_cast<uint16*>(&pBitmap[1]);
+	auto* pTrue = reinterpret_cast<uint8*>(pBits + pixelCount);
 	const bool topOrigin = (header.descriptor & 0x20) != 0;
 	const bool rightOrigin = (header.descriptor & 0x10) != 0;
 	const auto alphaBits = static_cast<uint8>(header.descriptor & 0x0f);
@@ -184,6 +187,8 @@ grs_bitmap* ResTgaReadImage(IStoreStream* pStream, IResMemOverride* pResMem)
 			const auto destY = topOrigin ? sourceY : header.height - 1 - sourceY;
 			const auto destX = rightOrigin ? header.width - 1 - sourceX : sourceX;
 			pBits[destY * header.width + destX] = Pack4444(pixel);
+			uint8* t = &pTrue[(destY * header.width + destX) * 4];
+			t[0] = pixel.r; t[1] = pixel.g; t[2] = pixel.b; t[3] = pixel.a;
 		}
 	}
 
@@ -208,12 +213,16 @@ grs_bitmap* ResTgaReadImage(IStoreStream* pStream, IResMemOverride* pResMem)
 		if (!hasOpaquePixel)
 		{
 			for (unsigned long i = 0; i < pixelCount; ++i)
+			{
 				pBits[i] |= 0xf000;
+				pTrue[i * 4 + 3] = 255;
+			}
 		}
 	}
 
 	gr_init_bitmap(pBitmap, reinterpret_cast<uint8*>(pBits), BMT_FLAT16,
 		BMF_RGB_4444, header.width, header.height);
+	ResTrueColorRegister(pBitmap, pTrue);
 	return pBitmap;
 
 read_failed:
