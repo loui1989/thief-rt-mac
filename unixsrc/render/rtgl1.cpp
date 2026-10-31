@@ -3437,7 +3437,13 @@ void RenderRTObjectEnd(void)
       // a model that has not changed since it was last made ready: as it was
       // (sorting its faces and finding its normals again each frame cost
       // milliseconds a frame in a busy street)
-      if (h == c.hash && c.settled && c.whole && g_cfg.steadyFaces) {
+      // (not a model with camera-facing sprites -- a water stream, a glow:
+      // the hash leaves sprites out, so it would never change, and the
+      // sprite's animation froze on its first frame)
+      bool sprites = false;
+      for (const CapturedPrim &p : g_currentCapture)
+         sprites = sprites || p.sprite;
+      if (!sprites && h == c.hash && c.settled && c.whole && g_cfg.steadyFaces) {
          ++c.unchanged;
          c.frame = g_frameNumber;
          c.posed = RenderRTGameObjectPose(obj, c.pose) != 0;
@@ -3490,7 +3496,10 @@ void RenderRTObjectEnd(void)
    // only for a model that holds still: sorting a moving one's faces anew
    // each frame broke the match between its frames (its motion), so the
    // denoiser smeared characters as they walked
-   if (g_cfg.steadyFaces && c.whole && c.unchanged >= 1) {
+   bool hasSprites = false;
+   for (const CapturedPrim &p : c.prims)
+      hasSprites = hasSprites || p.sprite;
+   if (g_cfg.steadyFaces && c.whole && c.unchanged >= 1 && !hasSprites) {
       steady_faces(c);
       c.settled = true;
    }
