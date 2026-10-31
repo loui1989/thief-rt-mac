@@ -486,6 +486,31 @@ inline bool lit_pane(const uint8_t *a)
    return a[3] >= 128 && lum > 120 && r >= b + 25 && g >= b;
 }
 
+// Crevices: the texture's joints and cracks (darker than its average, as
+// the cavities in the occlusion channel) darkened in its colour as well. The
+// occlusion channel only darkens a surface's ambient glow in RTGL1's shaders,
+// which in Build's sector-lit levels is most of their light and in Thief's
+// lamp-lit ones next to none: so mortar between bricks reads as recessed
+// under the lamps too. strength 0..1; a flat class is left alone.
+inline void crevice_albedo(std::vector<uint8_t> &rgba, int w, int h, const Class &c, float strength)
+{
+   if (strength <= 0 || c.bump <= 0 || c.none || w < 4 || h < 4)
+      return;
+   const auto hg = heights(rgba.data(), w, h);
+   double avg = 0;
+   for (float v : hg)
+      avg += v;
+   avg /= double(std::max<size_t>(1, hg.size()));
+   const float b = std::clamp(c.bump / 1.2f, 0.0f, 1.0f);
+   for (size_t i = 0; i < hg.size(); ++i) {
+      const float rel = std::clamp(float(hg[i] / std::max(avg, 0.02)), 0.0f, 2.0f);
+      const float d = std::clamp(1.0f - rel, 0.0f, 1.0f);
+      const float f = 1.0f - strength * 0.55f * b * d * (2.0f - d);
+      for (int k = 0; k < 3; ++k)
+         rgba[i * 4 + k] = uint8_t(std::clamp(rgba[i * 4 + k] * f + 0.5f, 0.0f, 255.0f));
+   }
+}
+
 // Makes the maps of a texture (if they are not there yet) and says what it is.
 // glowMap: a NewDark illum_map's RGBA (w x h of its own), or null.
 inline Result prepare(const std::string &dir, const std::string &name, const Class &c,

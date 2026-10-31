@@ -95,6 +95,7 @@ struct Settings {
    float bump = 1.0f;         // their bumps' strength
    float parallax = 0.03f;    // parallax depth, in texture widths (0 off)
    bool polish = true;        // polished surfaces mirror the room
+   float crevice = 0.6f;      // joints and cracks darkened in the textures' colour
    int water = 0;             // 0 translucent (as the game), 1 RTGL1 water, 2 opaque
    int gi = 0;                // bounce light: 0 two bounces at half rate (as Blood RT),
                               // 1 one bounce, 2 two bounces, 3 one bounce at half rate
@@ -179,6 +180,7 @@ void load_settings()
       else if (k == "bump") g_cfg.bump = std::clamp(value, 0.0f, 4.0f);
       else if (k == "parallax") g_cfg.parallax = std::clamp(value, 0.0f, 0.1f);
       else if (k == "polish") g_cfg.polish = value != 0;
+      else if (k == "crevice") g_cfg.crevice = std::clamp(value, 0.0f, 1.0f);
       else if (k == "settings_version") version = int(value);
       else if (k == "dynres") g_cfg.dynres = std::clamp(int(value), 0, 240);
       else if (k == "reach") g_cfg.reach = std::clamp(int(value), 0, 90);
@@ -218,13 +220,13 @@ void save_settings()
       return;
    fprintf(f, "upscale = %d\nscale = %.2f\nfps = %d\nvsync = %d\nlight = %.3f\nsky = %.3f\n"
               "light_size = %.3f\nglow = %.3f\nwater = %d\nsprite_glow = %.3f\ngi = %d\n"
-              "volumetric = %d\ndynres = %d\nmax_lights = %d\nmin_roughness = %.2f\nlight_cull = %d\nflicker = %d\nambient = %.3f\nsmooth_models = %d\nfixtures_pass = %d\nlight_fix = %d\nlight_response = %d\nev_min = %d\nlight_candidates = %d\nsteady_faces = %d\nlight_fade = %d\nbloom = %d\nrt_detection = %d\nreach = %d\noutput_height = %d\nperf_log = %d\nframe_cap = %d\nfog = %d\nmaterials = %d\nbump = %.2f\nparallax = %.3f\npolish = %d\nsettings_version = 2\n",
+              "volumetric = %d\ndynres = %d\nmax_lights = %d\nmin_roughness = %.2f\nlight_cull = %d\nflicker = %d\nambient = %.3f\nsmooth_models = %d\nfixtures_pass = %d\nlight_fix = %d\nlight_response = %d\nev_min = %d\nlight_candidates = %d\nsteady_faces = %d\nlight_fade = %d\nbloom = %d\nrt_detection = %d\nreach = %d\noutput_height = %d\nperf_log = %d\nframe_cap = %d\nfog = %d\nmaterials = %d\nbump = %.2f\nparallax = %.3f\npolish = %d\ncrevice = %.2f\nsettings_version = 2\n",
            g_cfg.upscale, g_cfg.scale, int(g_cfg.fps), int(g_cfg.vsync), g_cfg.light, g_cfg.sky,
            g_cfg.lightSize, g_cfg.glow, g_cfg.water, g_cfg.spriteGlow, g_cfg.gi,
            int(g_cfg.volumetric), g_cfg.dynres, g_cfg.maxLights, g_cfg.minRoughness,
            int(g_cfg.lightCull), g_cfg.flicker, g_cfg.ambient, int(g_cfg.smoothModels),
            int(g_cfg.fixturesPass), int(g_cfg.lightFix), g_cfg.response, g_cfg.evMin,
-           g_cfg.candidates, int(g_cfg.steadyFaces), int(g_cfg.lightFade), int(g_cfg.bloom), int(g_cfg.rtDetection), g_cfg.reach, g_cfg.outputHeight, int(g_cfg.perfLog), g_cfg.frameCap, g_cfg.fog, int(g_cfg.materials), g_cfg.bump, g_cfg.parallax, int(g_cfg.polish));
+           g_cfg.candidates, int(g_cfg.steadyFaces), int(g_cfg.lightFade), int(g_cfg.bloom), int(g_cfg.rtDetection), g_cfg.reach, g_cfg.outputHeight, int(g_cfg.perfLog), g_cfg.frameCap, g_cfg.fog, int(g_cfg.materials), g_cfg.bump, g_cfg.parallax, int(g_cfg.polish), g_cfg.crevice);
    fclose(f);
 }
 
@@ -248,6 +250,8 @@ struct Ui {
 
 // ---- textures ----------------------------------------------------------
 
+namespace rtmat { struct Class; }
+
 struct RtTexture {
    uint32_t serial = 0;
    char name[160] = {};
@@ -257,6 +261,7 @@ struct RtTexture {
    std::string illumMap;
    // what its material maps make it (rt_materials.h)
    bool polished = false, glows = false, mapsNone = false;
+   const rtmat::Class *cls = nullptr;   // its material class (rt_materials.h)
    float glow = 0.0f;
    int width = 0, height = 0;
    std::vector<uint8_t> rgba;
@@ -351,6 +356,7 @@ void name_texture(RtTexture *t)
 {
    t->polished = t->glows = t->mapsNone = false;
    t->glow = 0.0f;
+   t->cls = nullptr;
    if (g_cfg.materials && !t->source.empty() && !g_rtDir.empty()) {
       if (g_matDir.empty()) {
          g_matDir = g_rtDir + "/mat_dev";
@@ -363,6 +369,8 @@ void name_texture(RtTexture *t)
          h = rtmat::fnv(&t->width, sizeof(t->width), h);
          h ^= c->hash * 0x9e3779b1u;
          h ^= rtmat::kMapsVersion * 0x85ebca6bu;
+         h ^= uint32_t(g_cfg.crevice * 20.0f + 0.5f) * 0xc2b2ae35u;
+         t->cls = c;
          if (t->illumStrength > 0)
             h = rtmat::fnv(t->illumMap.data(), t->illumMap.size(), h ^ uint32_t(t->illumStrength * 1000.0f));
          // (no dots: RTGL1 takes what follows the last dot for an extension and
@@ -404,11 +412,17 @@ const char *texture_name(RtTexture *t)
             .flags = 0,
             .format = RG_FORMAT_R8G8B8A8_SRGB,
          };
+         // crevices darkened in its colour (rt_materials.h)
+         std::vector<uint8_t> creviced;
+         if (t->cls && g_cfg.crevice > 0.0f) {
+            creviced = t->rgba;
+            rtmat::crevice_albedo(creviced, t->width, t->height, *t->cls, g_cfg.crevice);
+         }
          auto info = RgOriginalTextureInfo{
             .sType = RG_STRUCTURE_TYPE_ORIGINAL_TEXTURE_INFO,
             .pNext = &details,
             .pTextureName = t->name,
-            .pPixels = t->rgba.data(),
+            .pPixels = creviced.empty() ? t->rgba.data() : creviced.data(),
             .size = {uint32_t(t->width), uint32_t(t->height)},
             .filter = RG_SAMPLER_FILTER_AUTO,
             .addressModeU = RG_SAMPLER_ADDRESS_MODE_REPEAT,
@@ -1815,7 +1829,7 @@ const char *kUpscaleNames[] = {"Off",
 
 enum UiRow {
    kRowUpscale, kRowScale, kRowOutput, kRowDynres, kRowBounces, kRowReach, kRowLights, kRowLightFade, kRowCandidates, kRowLightCull, kRowResponse, kRowFlicker, kRowVolumetric, kRowFog, kRowBloom, kRowVsync, kRowFrameCap,
-   kRowFps, kRowDetection, kRowLight, kRowExposure, kRowAmbient, kRowSky, kRowLightSize, kRowRough, kRowSmooth, kRowSteady, kRowFixtures, kRowLightFix, kRowGlow, kRowFlameGlow, kRowMaterials, kRowBump, kRowParallax, kRowPolish, kRowWater,
+   kRowFps, kRowDetection, kRowLight, kRowExposure, kRowAmbient, kRowSky, kRowLightSize, kRowRough, kRowSmooth, kRowSteady, kRowFixtures, kRowLightFix, kRowGlow, kRowFlameGlow, kRowMaterials, kRowBump, kRowCrevice, kRowParallax, kRowPolish, kRowWater,
    kRowDebug, kRowFreeze, kRowBackFaces, kRowReuse, kRowBlink, kRowPerf, kRowInspect, kRowReset, kRowCount
 };
 
@@ -1823,7 +1837,7 @@ const char *kRowLabels[kRowCount] = {
    "Upscaler", "Render resolution", "Output resolution", "Dynamic resolution", "Bounce light", "Light reach", "Lights traced",
    "Lights coming into range", "Lights tried per pixel", "Lights behind walls", "Light changes", "Light flicker",
    "Volumetric light", "Mission fog", "Bloom", "VSync", "Frame rate limit", "FPS counter", "Light gem and guards", "Light brightness", "Darkest exposure", "Ambient light", "Sky brightness",
-   "Light size (soft shadows)", "Surface roughness", "Model shading", "Model faces", "Torches and lamps", "Lights in walls", "Lamp glow", "Flame glow", "Materials", "Bumps", "Parallax depth", "Polished reflections", "Water",
+   "Light size (soft shadows)", "Surface roughness", "Model shading", "Model faces", "Torches and lamps", "Lights in walls", "Lamp glow", "Flame glow", "Materials", "Bumps", "Crevices", "Parallax depth", "Polished reflections", "Water",
    "Debug view", "Freeze scene (test)", "Back faces (test)", "Light sampling (test)", "Blink nearest light (test)", "Performance log", "Inspect centre of view", "Reset to defaults",
 };
 
@@ -1924,6 +1938,10 @@ std::string row_value(int row)
    case kRowBump:
       if (g_cfg.bump <= 0.0f) return "Off";
       snprintf(buf, sizeof(buf), "%.2fx", g_cfg.bump);
+      return buf;
+   case kRowCrevice:
+      if (g_cfg.crevice <= 0.0f) return "Off";
+      snprintf(buf, sizeof(buf), "%.1f", g_cfg.crevice);
       return buf;
    case kRowParallax:
       if (g_cfg.parallax <= 0.0f) return "Off";
@@ -2083,6 +2101,13 @@ void change_row(int row, int dir)
       break;
    case kRowBump:
       g_cfg.bump = std::clamp(std::round(g_cfg.bump * 4.0f) / 4.0f + 0.25f * dir, 0.0f, 3.0f);
+      break;
+   case kRowCrevice:
+      g_cfg.crevice = std::clamp(std::round(g_cfg.crevice * 10.0f) / 10.0f + 0.1f * dir, 0.0f, 1.0f);
+      // every texture given again with its crevices
+      for (RtTexture &t : g_textures)
+         if (!t.rgba.empty())
+            t.dirty = true;
       break;
    case kRowParallax:
       g_cfg.parallax = std::clamp(std::round(g_cfg.parallax * 200.0f) / 200.0f + 0.005f * dir, 0.0f, 0.06f);
