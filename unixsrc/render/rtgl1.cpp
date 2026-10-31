@@ -95,6 +95,7 @@ struct Settings {
    float light = 1.0f;
    float sky = 1.0f;
    float glow = 1.0f;         // light fixtures
+   float fixtureLight = 2.0f; // the light of lamps and torches (lights at a glowing fixture or a flame)
    float spriteGlow = 1.0f;   // flame sprites' glow (their emission maps)
    bool materials = true;     // material maps made from the textures (rt_materials.h)
    float bump = 1.0f;         // their bumps' strength
@@ -177,6 +178,7 @@ void load_settings()
       else if (k == "light_size") g_cfg.lightSize = std::clamp(value, 0.02f, 2.0f);
       else if (k == "glow") g_cfg.glow = std::clamp(value, 0.0f, 10.0f);
       else if (k == "water") g_cfg.water = std::clamp(int(value), 0, 2);
+      else if (k == "fixture_light") g_cfg.fixtureLight = std::clamp(value, 0.25f, 6.0f);
       else if (k == "sprite_glow") g_cfg.spriteGlow = std::clamp(value, 0.0f, 10.0f);
       else if (k == "gi") g_cfg.gi = std::clamp(int(value), 0, 3);
       else if (k == "volumetric") g_cfg.volumetric = value != 0;
@@ -225,13 +227,13 @@ void save_settings()
       return;
    fprintf(f, "upscale = %d\nscale = %.2f\nfps = %d\nvsync = %d\nlight = %.3f\nsky = %.3f\n"
               "light_size = %.3f\nglow = %.3f\nwater = %d\nsprite_glow = %.3f\ngi = %d\n"
-              "volumetric = %d\ndynres = %d\nmax_lights = %d\nmin_roughness = %.2f\nlight_cull = %d\nflicker = %d\nambient = %.3f\nsmooth_models = %d\nfixtures_pass = %d\nlight_fix = %d\nlight_response = %d\nev_min = %d\nlight_candidates = %d\nsteady_faces = %d\nlight_fade = %d\nbloom = %d\nrt_detection = %d\nreach = %d\noutput_height = %d\nperf_log = %d\nframe_cap = %d\nfog = %d\nmaterials = %d\nbump = %.2f\nparallax = %.3f\npolish = %d\ncrevice = %.2f\nsettings_version = 2\n",
+              "volumetric = %d\ndynres = %d\nmax_lights = %d\nmin_roughness = %.2f\nlight_cull = %d\nflicker = %d\nambient = %.3f\nsmooth_models = %d\nfixtures_pass = %d\nlight_fix = %d\nlight_response = %d\nev_min = %d\nlight_candidates = %d\nsteady_faces = %d\nlight_fade = %d\nbloom = %d\nrt_detection = %d\nreach = %d\noutput_height = %d\nperf_log = %d\nframe_cap = %d\nfog = %d\nmaterials = %d\nbump = %.2f\nparallax = %.3f\npolish = %d\ncrevice = %.2f\nfixture_light = %.2f\nsettings_version = 2\n",
            g_cfg.upscale, g_cfg.scale, int(g_cfg.fps), int(g_cfg.vsync), g_cfg.light, g_cfg.sky,
            g_cfg.lightSize, g_cfg.glow, g_cfg.water, g_cfg.spriteGlow, g_cfg.gi,
            int(g_cfg.volumetric), g_cfg.dynres, g_cfg.maxLights, g_cfg.minRoughness,
            int(g_cfg.lightCull), g_cfg.flicker, g_cfg.ambient, int(g_cfg.smoothModels),
            int(g_cfg.fixturesPass), int(g_cfg.lightFix), g_cfg.response, g_cfg.evMin,
-           g_cfg.candidates, int(g_cfg.steadyFaces), int(g_cfg.lightFade), int(g_cfg.bloom), int(g_cfg.rtDetection), g_cfg.reach, g_cfg.outputHeight, int(g_cfg.perfLog), g_cfg.frameCap, g_cfg.fog, int(g_cfg.materials), g_cfg.bump, g_cfg.parallax, int(g_cfg.polish), g_cfg.crevice);
+           g_cfg.candidates, int(g_cfg.steadyFaces), int(g_cfg.lightFade), int(g_cfg.bloom), int(g_cfg.rtDetection), g_cfg.reach, g_cfg.outputHeight, int(g_cfg.perfLog), g_cfg.frameCap, g_cfg.fog, int(g_cfg.materials), g_cfg.bump, g_cfg.parallax, int(g_cfg.polish), g_cfg.crevice, g_cfg.fixtureLight);
    fclose(f);
 }
 
@@ -1382,7 +1384,15 @@ void upload_objects()
             continue;
          }
          c.keptOut = true;
-         const bool keep = c.posed && RenderRTGameObjectPose(obj, pose) &&
+         // a texture of its gone (freed by the game: a mission or a saved
+         // game loaded since): it would be kept, untextured and grey, forever
+         bool stale = false;
+         for (const CapturedPrim &p : c.prims)
+            if (p.tex && (p.tex->serial != p.texSerial || p.tex->rgba.empty())) {
+               stale = true;
+               break;
+            }
+         const bool keep = !stale && c.posed && RenderRTGameObjectPose(obj, pose) &&
                            std::fabs(pose[0] - c.pose[0]) < 0.01f &&
                            std::fabs(pose[1] - c.pose[1]) < 0.01f &&
                            std::fabs(pose[2] - c.pose[2]) < 0.01f &&
@@ -2034,7 +2044,7 @@ const char *kUpscaleNames[] = {"Off",
 
 enum UiRow {
    kRowUpscale, kRowScale, kRowOutput, kRowDynres, kRowBounces, kRowReach, kRowLights, kRowLightFade, kRowCandidates, kRowLightCull, kRowResponse, kRowFlicker, kRowVolumetric, kRowFog, kRowBloom, kRowVsync, kRowFrameCap,
-   kRowFps, kRowDetection, kRowLight, kRowExposure, kRowAmbient, kRowSky, kRowLightSize, kRowRough, kRowSmooth, kRowSteady, kRowFixtures, kRowLightFix, kRowGlow, kRowFlameGlow, kRowMaterials, kRowBump, kRowCrevice, kRowParallax, kRowPolish, kRowWater,
+   kRowFps, kRowDetection, kRowLight, kRowExposure, kRowAmbient, kRowSky, kRowLightSize, kRowRough, kRowSmooth, kRowSteady, kRowFixtures, kRowFixtureLight, kRowLightFix, kRowGlow, kRowFlameGlow, kRowMaterials, kRowBump, kRowCrevice, kRowParallax, kRowPolish, kRowWater,
    kRowDebug, kRowFreeze, kRowBackFaces, kRowReuse, kRowBlink, kRowPerf, kRowInspect, kRowReset, kRowCount
 };
 
@@ -2042,7 +2052,7 @@ const char *kRowLabels[kRowCount] = {
    "Upscaler", "Render resolution", "Output resolution", "Dynamic resolution", "Bounce light", "Light reach", "Lights traced",
    "Lights coming into range", "Lights tried per pixel", "Lights behind walls", "Light changes", "Light flicker",
    "Volumetric light", "Mission fog", "Bloom", "VSync", "Frame rate limit", "FPS counter", "Light gem and guards", "Light brightness", "Darkest exposure", "Ambient light", "Sky brightness",
-   "Light size (soft shadows)", "Surface roughness", "Model shading", "Model faces", "Torches and lamps", "Lights in walls", "Lamp glow", "Flame glow", "Materials", "Bumps", "Crevices", "Parallax depth", "Polished reflections", "Water",
+   "Light size (soft shadows)", "Surface roughness", "Model shading", "Model faces", "Torches and lamps", "Lamp and torch light", "Lights in walls", "Lamp glow", "Flame glow", "Materials", "Bumps", "Crevices", "Parallax depth", "Polished reflections", "Water",
    "Debug view", "Freeze scene (test)", "Back faces (test)", "Light sampling (test)", "Blink nearest light (test)", "Performance log", "Inspect centre of view", "Reset to defaults",
 };
 
@@ -2130,6 +2140,9 @@ std::string row_value(int row)
    case kRowRough:
       snprintf(buf, sizeof(buf), g_cfg.minRoughness >= 0.999f ? "%.2f (matte)" : "at least %.2f",
                g_cfg.minRoughness);
+      return buf;
+   case kRowFixtureLight:
+      snprintf(buf, sizeof(buf), "%.2fx", g_cfg.fixtureLight);
       return buf;
    case kRowGlow:
       if (g_cfg.glow <= 0.0f) return "Off";
@@ -2294,6 +2307,9 @@ void change_row(int row, int dir)
       break;
    case kRowGlow:
       g_cfg.glow = std::clamp(std::round(g_cfg.glow * 4.0f) / 4.0f + 0.25f * dir, 0.0f, 5.0f);
+      break;
+   case kRowFixtureLight:
+      g_cfg.fixtureLight = std::clamp(std::round(g_cfg.fixtureLight * 4.0f) / 4.0f + 0.25f * dir, 0.25f, 6.0f);
       break;
    case kRowFlameGlow:
       g_cfg.spriteGlow = std::clamp(std::round(g_cfg.spriteGlow * 4.0f) / 4.0f + 0.25f * dir, 0.0f, 1.0f);
@@ -3813,8 +3829,22 @@ void RenderRTDrawWorld(int primitive, const sRenderBackendVertex *v, const float
          }
          const float hi = std::max({c[0], c[1], c[2]}), lo = std::min({c[0], c[1], c[2]});
          if (hi > 0.2f && c[0] >= c[1] && c[1] >= c[2] * 0.9f && (hi - lo) > 0.25f * hi)
-            if (const char *flame = flame_texture(tex, c[0] / hi, c[1] / hi, c[2] / hi))
+            if (const char *flame = flame_texture(tex, c[0] / hi, c[1] / hi, c[2] / hi)) {
                prim.texture = flame;
+               // the light at a flame is a torch's (or a candle's, a brazier's)
+               float m[3] = {0, 0, 0};
+               for (const RgPrimitiveVertex &d : prim.verts)
+                  for (int k = 0; k < 3; ++k)
+                     m[k] += d.position[k] / float(prim.verts.size());
+               for (size_t li = 0; li < g_lightPositions.size() && li < g_pendingLights.size(); ++li) {
+                  const RgFloat3D &l = g_lightPositions[li];
+                  const float dx = l.data[0] - m[0], dy = l.data[1] - m[1], dz = l.data[2] - m[2];
+                  if (dx * dx + dy * dy + dz * dz < 0.6f * 0.6f) {
+                     g_fixtureLights.insert(g_pendingLights[li].id);
+                     break;
+                  }
+               }
+            }
       }
    } else if (g_blend == kRenderBackendBlendAdd) {
       prim.flags |= RG_MESH_PRIMITIVE_TRANSLUCENT;
@@ -4133,6 +4163,9 @@ void RenderRTWorldBegin(uint32_t serial)
    g_worldIndex.clear();
    g_worldTextures.clear();
    g_fixtureLights.clear();   // (marked again as the lamps are drawn)
+   // a new world (a mission or a saved game loaded): the models kept from the
+   // last one are not this one's, though some have the same numbers and places
+   g_objects.clear();
    g_worldSerial = serial;
    g_worldValid = false;
 }
@@ -4264,7 +4297,11 @@ void upload_light(const PendingLight &L)
    // Dark falls off as 1/distance up to the light's radius, RTGL1 as
    // 1/distance^2; a larger source and a lower flux keep the nearby walls
    // from burning out while the far side of a room still receives light.
-   const float lumens = peak * 4.0f * g_cfg.light;
+   // a lamp's or a torch's light: brighter than the level's fill lights
+   // (Dark lit the walls around them with baked lightmaps; traced, at the
+   // level's own brightness, they hardly showed against their surroundings)
+   const bool fixture = g_fixtureLights.count(L.id) != 0;
+   const float lumens = peak * 4.0f * g_cfg.light * (fixture ? g_cfg.fixtureLight : 1.0f);
    const float *dir = L.dir;
    RgLightSphericalEXT sphere{};
    RgLightSpotEXT spot{};
@@ -4306,7 +4343,7 @@ void upload_light(const PendingLight &L)
    // A lamp the mapper lit with a spotlight (a pool of light under it, the
    // walls around it lit by separate dim fill lights): its glass glows, so it
    // lights the walls around it too -- a third of its light, all round.
-   if (ext == &spot && g_fixtureLights.count(L.id)) {
+   if (ext == &spot && fixture) {
       sphere = RgLightSphericalEXT{
          .sType = RG_STRUCTURE_TYPE_LIGHT_SPHERICAL_EXT,
          .pNext = nullptr,
