@@ -856,6 +856,10 @@ uint64_t hash_prims_unordered(const std::vector<CapturedPrim> &prims)
             uint64_t ch = 0;
             for (int j = 0; j < 3; ++j)
                ch = ch * 1000003ull + uint64_t(int64_t(std::lround(p.verts[t + k].position[j] * 256.0f)));
+            // and where its texture lies on it: a scrolling texture (running
+            // water) changes only that, and a model taken as unchanged froze
+            for (int j = 0; j < 2; ++j)
+               ch = ch * 1000003ull + uint64_t(int64_t(std::lround(p.verts[t + k].texCoord[j] * 1024.0f)));
             corner[k] = ch;
          }
          std::sort(corner, corner + 3);

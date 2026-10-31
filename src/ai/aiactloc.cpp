@@ -24,6 +24,10 @@
 #include <aipthloc.h>
 
 // Must be last header
+#include <mprintf.h>
+#include <platform_services.h>
+#include <osysbase.h>
+#include <objedit.h>
 #include <dbmem.h>
 
 
@@ -426,6 +430,42 @@ STDMETHODIMP_(eAIResult) cAILocoAction::Update()
 
             if (pathResult > kAIR_NoResultSwitch)
                result = pathResult; // Locomotion complete, or error
+         }
+      }
+
+      // An AI that has not come nearer its destination in four seconds is
+      // stuck: logged (once per destination), with how near it is and how
+      // near it has to come (for creatures too large for their routes).
+      {
+         struct sProgress { ObjID id; uint32 since; float best; mxs_vector dest; BOOL logged; };
+         static sProgress progress[256];
+         const ObjID id = m_pAIState->GetID();
+         const float d = sqrtf(m_pAIState->DistXYSq(m_dest));
+         sProgress & p = progress[(unsigned)id % 256];
+         if (p.id != id)
+         {
+            memset(&p, 0, sizeof(p));
+            p.id = id;
+         }
+         const uint32 now = PlatformMilliseconds();
+         if (p.since == 0 || p.dest.x != m_dest.x || p.dest.y != m_dest.y || p.dest.z != m_dest.z ||
+             d < p.best - 0.5f)
+         {
+            if (p.dest.x != m_dest.x || p.dest.y != m_dest.y || p.dest.z != m_dest.z)
+               p.logged = FALSE;
+            p.since = now;
+            p.best = d;
+            p.dest = m_dest;
+         }
+         else if (!p.logged && now - p.since > 4000)
+         {
+            const cMxsVector * at = m_pAIState->GetLocation();
+            mprintf("AI %s stuck: going to (%.1f %.1f %.1f) from (%.1f %.1f %.1f) ft, %.1f ft away "
+                    "(arrives within %.1f), %.1f ft up/down (within %.1f), no nearer for 4 s%s\n",
+                    ObjWarnName(id), m_dest.x, m_dest.y, m_dest.z, at->x, at->y, at->z, d,
+                    sqrtf(m_accuracySq), m_pAIState->DiffZ(m_dest), m_accuracyZ,
+                    m_pPath ? "" : ", no path");
+            p.logged = TRUE;
          }
       }
 
