@@ -1098,6 +1098,30 @@ extern "C" int ObjAnimLightDescribe(int light_index, char *buf, int n)
    return found;
 }
 
+// the object whose anim light is this light (0: none -- a static light)
+extern "C" int ObjAnimLightOwner(int light_index)
+{
+   sPropertyObjIter iter;
+   ObjID obj, owner = 0;
+   sAnimLightProp *anim_light;
+   if (!g_AnimLightProp)
+      return 0;
+   g_AnimLightProp->IterStart(&iter);
+   while (g_AnimLightProp->IterNext(&iter, &obj))
+   {
+      if (OBJ_IS_ABSTRACT(obj))
+         continue;
+      g_AnimLightProp->Get(obj, &anim_light);
+      if (anim_light->animation.light_data_index == light_index)
+      {
+         owner = obj;
+         break;
+      }
+   }
+   g_AnimLightProp->IterStop(&iter);
+   return owner;
+}
+
 // go through and reset all the anim lights to their current states
 void ObjAnimLightReset(void)
 {

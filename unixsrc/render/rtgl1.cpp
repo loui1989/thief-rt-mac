@@ -873,7 +873,8 @@ int g_drawableW = 1, g_drawableH = 1;
 uint32_t g_framePrims = 0, g_frameDropped = 0, g_frameLights = 0;
 // this frame's light positions (meters), for making light fixtures glow
 std::vector<RgFloat3D> g_lightPositions;
-std::vector<uint32_t> g_lightPositionIds;   // (their lights' ids, in the same order)
+std::vector<uint32_t> g_lightPositionIds;
+std::unordered_map<uint32_t, int> g_lightOwnerKind;   // light id -> 0 plain, 1 a lamp's, 2 a flame's (by its object)   // (their lights' ids, in the same order)
 // the level's ambient light (0..1), and the glow it gives surfaces
 float g_levelAmbient = 0.0f;
 // the player's light, by the game and by the path tracer (for the frame counter)
@@ -1718,7 +1719,13 @@ void upload_objects()
          // (4 m + 8 m per metre of size, at most 25 m: some 280 models were
          // kept out of view in a fan mission's streets, 5000 primitives
          // uploaded every frame for shadows mostly nobody saw)
-         const float keepBase = std::clamp(4.0f + 8.0f * ext, 4.0f, 25.0f);
+         // (a lamp, a torch -- a model with a light in it or a part that
+         // glows -- much further: seen in a polished floor or a window, it went
+         // as you looked down, its reflection with it)
+         bool lit = c.passLight;
+         for (const CapturedPrim &p : c.prims)
+            lit = lit || (p.emissive > 0.0f && !p.sprite);
+         const float keepBase = lit ? 40.0f : std::clamp(4.0f + 8.0f * ext, 4.0f, 25.0f);
          const float keepAt = keepBase + (c.keptOut ? std::min(8.0f, 0.5f * keepBase) : 0.0f);
          if (dx * dx + dy * dy + dz * dz > std::min(keepAt, kKeepDistance) * std::min(keepAt, kKeepDistance)) {
             if (c.givenFrame + 1 == g_frameNumber && dx * dx + dy * dy + dz * dz < 20.0f * 20.0f)
@@ -2647,6 +2654,9 @@ float step_mul(float v, int dir, float lo, float hi)
 }
 
 extern "C" int ObjAnimLightDescribe(int light_index, char *buf, int n);
+extern "C" int ObjAnimLightOwner(int light_index);
+extern "C" void SetSimTimePassing(int passing);
+extern "C" int IsSimTimePassing(void);
 void inspect_view();
 
 void change_row(int row, int dir)
@@ -3821,6 +3831,23 @@ void inspect_view()
 
 namespace darkrt {
 
+// The game stands still while the ray tracer's panel is open (its time
+// stops, as the game's own menus stop it): guards walked on and could kill
+// you while you were changing a setting.
+void panel_pause(bool open)
+{
+   static bool s_paused = false;
+   static int s_was = 1;
+   if (open && !s_paused && g_inScene) {
+      s_was = IsSimTimePassing();
+      SetSimTimePassing(0);
+      s_paused = true;
+   } else if (!open && s_paused) {
+      SetSimTimePassing(s_was);
+      s_paused = false;
+   }
+}
+
 bool HandleKey(int scancode, int mods, bool down, bool repeat)
 {
    if (!g_active)
@@ -3830,6 +3857,7 @@ bool HandleKey(int scancode, int mods, bool down, bool repeat)
    if (toggle) {
       if (down && !repeat) {
          g_ui.open = !g_ui.open;
+         panel_pause(g_ui.open);
          g_ui.hintUntil = 0;
       }
       return true;
@@ -3844,7 +3872,12 @@ bool HandleKey(int scancode, int mods, bool down, bool repeat)
    if (!g_ui.open || !down)
       return false;   // key releases always reach the game: no stuck keys
    switch (scancode) {
-   case SDL_SCANCODE_ESCAPE: if (!repeat) g_ui.open = false; break;
+   case SDL_SCANCODE_ESCAPE:
+      if (!repeat) {
+         g_ui.open = false;
+         panel_pause(false);
+      }
+      break;
    case SDL_SCANCODE_UP: g_ui.row = (g_ui.row + kRowCount - 1) % kRowCount; break;
    case SDL_SCANCODE_DOWN: g_ui.row = (g_ui.row + 1) % kRowCount; break;
    case SDL_SCANCODE_PAGEUP: g_ui.row = std::max(g_ui.row - 10, 0); break;
@@ -4666,6 +4699,7 @@ void RenderRTWorldBegin(uint32_t serial)
    g_worldTextures.clear();
    g_fixtureLights.clear();   // (marked again as the lamps are drawn)
    g_flameLights.clear();
+   g_lightOwnerKind.clear();
    // a new world (a mission or a saved game loaded): the models kept from the
    // last one are not this one's, though some have the same numbers and places
    g_objects.clear();
@@ -4765,6 +4799,31 @@ void RenderRTLight(uint32_t id, const float pos[3], const float rgb[3], float ra
 {
    if (!g_inScene)
       return;
+   // A lamp's or a torch's light known as one from the start, by the object
+   // it belongs to: found only once its lamp or flame was drawn, it came on
+   // brighter (and a torch's orange and flickering) the moment you turned
+   // the corner and saw it -- the light popping in.
+   if (id < 0x10000u && !g_lightOwnerKind.count(id)) {
+      int kind = 0;
+      if (const int owner = ObjAnimLightOwner(int(id))) {
+         char name[128];
+         RenderRTGameObjectName(uint32_t(owner), name, sizeof(name));
+         std::string n(name);
+         for (char &ch : n)
+            ch = char(tolower((unsigned char)ch));
+         auto has = [&n](const char *w) { return n.find(w) != std::string::npos; };
+         if (has("torch") || has("candle") || has("brazier") || has("flame") || has("fire"))
+            kind = 2;
+         else if (has("lamp") || has("lantern") || has("lantrn") || has("light") || has("chandelier") ||
+                  has("sconce"))
+            kind = 1;
+      }
+      g_lightOwnerKind[id] = kind;
+      if (kind >= 1)
+         g_fixtureLights.insert(id);
+      if (kind == 2)
+         g_flameLights.insert(id);
+   }
    const float peak = std::max({rgb[0], rgb[1], rgb[2]});
    {
       // a timeline of brightness changes (a doused torch: at once, or a fade?)
