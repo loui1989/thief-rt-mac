@@ -419,6 +419,8 @@ void job_name(MatJob &j)
    h ^= rtmat::kMapsVersion * 0x85ebca6bu;
    if (j.cls->polish > 0)
       h ^= 0x5bd1e995u;   // (polished: smoother bumps since maps version 4)
+   if (std::min(j.w, j.h) < 384)
+      h ^= 0x27d4eb2fu;   // (small textures: sharper bumps since maps version 4)
    h ^= uint32_t(j.crevice * 20.0f + 0.5f) * 0xc2b2ae35u;
    if (j.illumStrength > 0)
       h = rtmat::fnv(j.illumMap.data(), j.illumMap.size(), h ^ uint32_t(j.illumStrength * 1000.0f));

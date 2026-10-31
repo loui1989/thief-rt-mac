@@ -491,12 +491,16 @@ inline std::vector<float> heights(const uint8_t *rgba, int w, int h, bool fineTo
    // the texel made a normal that changed from one pixel to the next, which
    // sparkled and crawled as the path tracer's samples moved over it -- a
    // grey stone wall's sheen shimmered standing still)
-   const int big = std::clamp(std::min(w, h) / 24, 1, 6);
-   const int small = std::clamp(std::min(w, h) / 192, 1, 3);
-   const auto fine = blur(blur(l, small), small);
+   // (a small texture -- an original 64 x 64, a fan mission's -- is not
+   // blurred at its texel: there a brick is a few texels, and blurring by a
+   // few more took its bumps away -- Black Parade's walls looked flat)
+   const int big = std::clamp(std::min(w, h) / 48, 1, 6);
+   const int small = std::clamp(std::min(w, h) / 192, 0, 3);
+   const auto fine = small > 0 ? blur(blur(l, small), small) : l;
    const auto broad = blur(blur(l, big), big);
+   const float fineW = small > 0 ? 0.35f : 0.5f;
    for (size_t i = 0; i < o.size(); ++i)
-      o[i] = (fineToo ? 0.35f * fine[i] : 0.0f) + 0.65f * broad[i] * 1.6f;
+      o[i] = (fineToo ? fineW * fine[i] : 0.0f) + (1.0f - fineW) * broad[i] * 1.6f;
    return o;
 }
 
