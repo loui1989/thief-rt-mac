@@ -875,6 +875,17 @@ void DarkContentConfigure(int argc, const char* argv[])
       }
    }
 
+   // (for the resource manager: a texture the mission ships again at low
+   // resolution, where an HD pack has it, comes from the pack -- resman.cpp)
+#ifdef _WIN32
+   _putenv_s("DARK_FM_PATH", gFMPath);
+#else
+   if (gFMPath[0])
+      setenv("DARK_FM_PATH", gFMPath, 1);
+   else
+      unsetenv("DARK_FM_PATH");
+#endif
+
    // mod_path_skip_fm (ours, in cam_mod.ini): the mods are for the original
    // missions only -- an HD pack's models and textures stay out of fan
    // missions, which bring their own. fm_mod_path (ours): the mods for a fan

@@ -34,6 +34,10 @@ public:
 	IStore* STDMETHODCALLTYPE Find(const char* pName, uint fFlags, IStore** ppCanonStore, const char* pRelPath) override;
 	IStore* FindAny(const char* const* ppNames, int nNames, uint fFlags,
 		IStore** ppCanonStore, const char* pRelPath, int* pFoundIndex);
+	// the first of the names in each root that has one, in root order (up
+	// to max): stores and canonical stores AddRef'd for the caller
+	int FindEach(const char* const* ppNames, int nNames, const char* pRelPath,
+		IStore** ppStores, IStore** ppCanonStores, int* pFoundIndices, int max);
 	void* STDMETHODCALLTYPE BeginContents(const char* pPattern, uint fFlags, const char* pRelPath) override;
 	BOOL STDMETHODCALLTYPE Next(void* pCookie, IStore** pFoundStore, char* pFoundName, IStore** ppFoundCanonStore) override;
 	void STDMETHODCALLTYPE EndContents(void* pCookie) override;

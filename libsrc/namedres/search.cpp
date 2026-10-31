@@ -361,6 +361,69 @@ IStore* cSearchPath::FindAny(const char* const* ppNames, int nNames, uint fFlags
 
 ///////////////////////////////////////
 
+int cSearchPath::FindEach(const char* const* ppNames, int nNames, const char* pRawRelPath,
+	IStore** ppStores, IStore** ppCanonStores, int* pFoundIndices, int max)
+{
+	if (!ppNames || nNames <= 0 || max <= 0)
+		return 0;
+
+	EnsureCurrentContext();
+	if (!m_bPathParsed)
+		SetupStorages();
+
+	char* pRelPath = nullptr;
+	if (pRawRelPath)
+		GetNormalizedPath(pRawRelPath, &pRelPath);
+
+	int count = 0;
+	for (auto pNode = m_pPathStorages; pNode && count < max; pNode = pNode->pNext)
+	{
+		IStore* pStore;
+		if (pRelPath)
+			pStore = pNode->pStore->GetSubstorage(pRelPath, FALSE);
+		else
+		{
+			pStore = pNode->pStore;
+			pStore->AddRef();
+		}
+
+		if (!pStore)
+			continue;
+
+		for (int i = 0; i < nNames; ++i)
+		{
+			FindInfo info{};
+			info.pName = ppNames[i];
+			info.pStore = pStore;
+			info.fFlags = 0;
+
+			if (m_pVariants)
+				m_pVariants->Iterate(FindInStorage, FALSE, &info);
+			else
+				FindInStorage(nullptr, nullptr, 0, &info);
+
+			if (info.pFound)
+			{
+				ppStores[count] = info.pFound;
+				ppCanonStores[count] = pStore;
+				pStore->AddRef();
+				pFoundIndices[count] = i;
+				++count;
+				break;
+			}
+		}
+
+		pStore->Release();
+	}
+
+	if (pRelPath)
+		Free(pRelPath);
+
+	return count;
+}
+
+///////////////////////////////////////
+
 struct SearchCookie
 {
 	PathStorageNode* pNode;

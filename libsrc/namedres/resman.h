@@ -74,6 +74,8 @@ public:
 private:
 	void CleanResources();
 	IRes* DoBind(const char* pName, const char* pTypeName, ISearchPath* pPath, const char* pRelPath, uint fBindFlags);
+	void PreferHdTexture(class cSearchPath* pPath, const char* const* ppNames, int nNames,
+		const char* pRelPath, const char* pName, IStore** ppStore, IStore** ppCanon, int* pIndex);
 	IRes* DoLookup(const char* pName, const char* pTypeName, const char* pRawCanonPath);
 
 	BOOL DropResourceData(cResourceTypeData* pData);

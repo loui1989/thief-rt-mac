@@ -25,6 +25,212 @@ BOOL g_fResPrintDrops;
 #pragma pack(pop)
 #include <string>
 #include <vector>
+#pragma pack(push, 8)
+#include <algorithm>
+#include <cmath>
+#include <cstdio>
+#include <cstring>
+#include <unordered_map>
+#pragma pack(pop)
+#include <imagefmt.h>
+#include <imgrstyp.h>
+#include <png.h>
+#include <dds.h>
+#include <tga.h>
+#include <pcx.h>
+#include <gif.h>
+#include <bitmap.h>
+#include <restruecolor.h>
+
+namespace
+{
+// ---- an HD pack's texture over a fan mission's low-resolution copy ----
+//
+// A fan mission ships many stock textures again (Black Parade: fam/core,
+// fam/city, ... as 64 x 64 PNGs), and its own files come first -- so an HD
+// pack's version of the same texture was never used, and the walls stayed
+// low resolution (and nearly without bumps). Where a later root (a mod) has
+// the texture too and the mission's copy is the original game's picture
+// (its layout and colours match the original's), the mod's is taken: the HD
+// pack is a remake of that original. A texture the mission's author changed
+// keeps the mission's. Decisions are kept in <game>/hd_over_fm.txt.
+
+struct sThumb
+{
+	int w = 0, h = 0;
+	float c[16 * 16 * 3] = {};
+	float wt[16 * 16] = {};
+};
+
+bool ThumbOf(IStore* pStore, const char* pName, IResMemOverride* pMem, sThumb& t)
+{
+	IStoreStream* s = pStore->OpenStream(pName, 0);
+	if (!s)
+		return false;
+	grs_bitmap* bm = nullptr;
+	uint8* pal = nullptr;
+	const char* ext = strrchr(pName, '.');
+	switch (DetectImageContent(s))
+	{
+	case eImageContent::kDDS:
+		bm = ResDdsReadImage(s, pMem);
+		break;
+	case eImageContent::kPNG:
+	case eImageContent::kTIFF:
+		bm = ResPngReadImage(s, pMem);
+		break;
+	case eImageContent::kPCX:
+		bm = ResPcxReadImage(s, pMem);
+		if (bm && bm->type == BMT_FLAT8)
+		{
+			s->SetPos(0);
+			pal = ResPcxReadPalette(s, pMem);
+		}
+		break;
+	case eImageContent::kGIF:
+		bm = ResGifReadImage(s, pMem);
+		if (bm && bm->type == BMT_FLAT8)
+		{
+			s->SetPos(0);
+			pal = ResGifReadPalette(s, pMem);
+		}
+		break;
+	default:
+		if (ext && !stricmp(ext, ".tga"))
+			bm = ResTgaReadImage(s, pMem);
+		break;
+	}
+	s->Close();
+	s->Release();
+	if (!bm)
+		return false;
+	bool ok = bm->w > 0 && bm->h > 0;
+	const uint8* rgba = ResTrueColorFind(bm);
+	const ushort fmt = bm->flags & 0x7f00;
+	if (!rgba && !(bm->type == BMT_FLAT16) && !(bm->type == BMT_FLAT8 && pal))
+		ok = false;
+	if (ok)
+	{
+		t.w = bm->w;
+		t.h = bm->h;
+		const int step = std::max(1, std::max(t.w, t.h) / 256);
+		for (int y = 0; y < t.h; y += step)
+			for (int x = 0; x < t.w; x += step)
+			{
+				float r, g, b, a = 1.0f;
+				if (rgba)
+				{
+					const uint8* p = rgba + (size_t(y) * t.w + x) * 4;
+					r = p[0] / 255.0f; g = p[1] / 255.0f; b = p[2] / 255.0f; a = p[3] / 255.0f;
+				}
+				else if (bm->type == BMT_FLAT16)
+				{
+					const ushort p = reinterpret_cast<const ushort*>(bm->bits + size_t(y) * bm->row)[x];
+					if (fmt == BMF_RGB_4444)
+					{
+						a = ((p >> 12) & 15) / 15.0f; r = ((p >> 8) & 15) / 15.0f;
+						g = ((p >> 4) & 15) / 15.0f; b = (p & 15) / 15.0f;
+					}
+					else if (fmt == BMF_RGB_1555 || fmt == BMF_RGB_555)
+					{
+						a = (fmt == BMF_RGB_555 || (p & 0x8000)) ? 1.0f : 0.0f;
+						r = ((p >> 10) & 31) / 31.0f; g = ((p >> 5) & 31) / 31.0f; b = (p & 31) / 31.0f;
+					}
+					else
+					{
+						r = ((p >> 11) & 31) / 31.0f; g = ((p >> 5) & 63) / 63.0f; b = (p & 31) / 31.0f;
+					}
+				}
+				else
+				{
+					const uint8 i = bm->bits[size_t(y) * bm->row + x];
+					r = pal[i * 3] / 255.0f; g = pal[i * 3 + 1] / 255.0f; b = pal[i * 3 + 2] / 255.0f;
+					if (i == 0 && (bm->flags & BMF_TRANS))
+						a = 0.0f;
+				}
+				const int cell = (y * 16 / t.h) * 16 + (x * 16 / t.w);
+				t.c[cell * 3] += r * a;
+				t.c[cell * 3 + 1] += g * a;
+				t.c[cell * 3 + 2] += b * a;
+				t.wt[cell] += a;
+			}
+		for (int i = 0; i < 256; ++i)
+			if (t.wt[i] > 0)
+				for (int k = 0; k < 3; ++k)
+					t.c[i * 3 + k] /= t.wt[i];
+	}
+	ResTrueColorForget(bm);
+	if (pal)
+		pMem->ResFree(pal);
+	pMem->ResFree(bm);
+	return ok;
+}
+
+// how alike two pictures are: their shapes (the correlation of their
+// brightness, cell by cell) and their colours on average
+bool SamePicture(const sThumb& a, const sThumb& b, float* pLikeness)
+{
+	double la[256], lb[256], ma = 0, mb = 0, ca[3] = {}, cb[3] = {}, n = 0;
+	for (int i = 0; i < 256; ++i)
+	{
+		la[i] = 0.2126 * a.c[i * 3] + 0.7152 * a.c[i * 3 + 1] + 0.0722 * a.c[i * 3 + 2];
+		lb[i] = 0.2126 * b.c[i * 3] + 0.7152 * b.c[i * 3 + 1] + 0.0722 * b.c[i * 3 + 2];
+		ma += la[i];
+		mb += lb[i];
+		for (int k = 0; k < 3; ++k)
+		{
+			ca[k] += a.c[i * 3 + k];
+			cb[k] += b.c[i * 3 + k];
+		}
+		n += 1;
+	}
+	ma /= n;
+	mb /= n;
+	double sab = 0, saa = 0, sbb = 0;
+	for (int i = 0; i < 256; ++i)
+	{
+		sab += (la[i] - ma) * (lb[i] - mb);
+		saa += (la[i] - ma) * (la[i] - ma);
+		sbb += (lb[i] - mb) * (lb[i] - mb);
+	}
+	// a flat picture (one colour): its colour is all there is to compare
+	const double corr = (saa > 1e-4 && sbb > 1e-4) ? sab / std::sqrt(saa * sbb)
+	                                                : (std::fabs(ma - mb) < 0.08 ? 1.0 : 0.0);
+	double diff = 0;
+	for (int k = 0; k < 3; ++k)
+		diff += std::fabs(ca[k] - cb[k]) / n;
+	diff /= 3.0;
+	*pLikeness = float(corr);
+	return corr >= 0.55 && diff <= 0.2;
+}
+
+std::string NormalPath(const char* p)
+{
+	std::string s(p ? p : "");
+	for (char& ch : s)
+		ch = ch == '\\' ? '/' : char(tolower((unsigned char)ch));
+	return s;
+}
+
+bool UnderPath(IStore* pStore, const std::string& root)
+{
+	if (!pStore || root.empty())
+		return false;
+	const std::string s = NormalPath(pStore->GetFullPathName());
+	return s.compare(0, root.size(), root) == 0;
+}
+
+std::mutex g_hdMutex;
+std::unordered_map<std::string, int> g_hdChoices;   // key -> 1 the mod's, 0 the mission's
+bool g_hdLoaded = false;
+int g_hdLogged = 0;
+
+std::string HdChoicesFile()
+{
+	const char* game = getenv("DARK_GAME_PATH");
+	return std::string(game && game[0] ? game : ".") + "/hd_over_fm.txt";
+}
+} // namespace
 
 namespace
 {
@@ -998,6 +1204,119 @@ void TryNameWithExt(const char* pExt, IResType*, void* pClientData)
 
 ///////////////////////////////////////
 
+void cResMan::PreferHdTexture(cSearchPath* pPath, const char* const* ppNames, int nNames,
+	const char* pRelPath, const char* pName, IStore** ppStore, IStore** ppCanon, int* pIndex)
+{
+	const char* fm = getenv("DARK_FM_PATH");
+	if (!fm || !fm[0] || getenv("DARK_HD_OVER_FM_OFF"))
+		return;
+	std::string fmRoot = NormalPath(fm);
+	while (!fmRoot.empty() && fmRoot.back() == '/')
+		fmRoot.pop_back();
+	const std::string full = NormalPath(pRelPath ? (std::string(pRelPath) + "/" + pName).c_str() : pName);
+	if (full.find("fam/") == std::string::npos && full.find("obj/") == std::string::npos &&
+		full.find("mesh/") == std::string::npos)
+		return;   // textures only (not the interface, books, ...)
+	{
+		static bool s_logged = false;
+		if (!s_logged)
+		{
+			s_logged = true;
+			fprintf(stderr, "Textures: fan mission at %s; the first texture found in %s\n", fmRoot.c_str(),
+				NormalPath((*ppCanon ? *ppCanon : *ppStore)->GetFullPathName()).c_str());
+		}
+	}
+	if (!UnderPath(*ppCanon, fmRoot) && !UnderPath(*ppStore, fmRoot))
+		return;   // not the mission's own
+
+	IStore* stores[8] = {};
+	IStore* canons[8] = {};
+	int idx[8] = {};
+	const int n = pPath->FindEach(ppNames, nNames, pRelPath, stores, canons, idx, 8);
+	int mine = -1, alt = -1;
+	for (int k = 0; k < n && mine < 0; ++k)
+		if (UnderPath(canons[k], fmRoot) || UnderPath(stores[k], fmRoot))
+			mine = k;
+	for (int k = mine + 1; mine >= 0 && k < n && alt < 0; ++k)
+		if (!UnderPath(canons[k], fmRoot) && !UnderPath(stores[k], fmRoot))
+			alt = k;
+	// the original game's own (the last root): the mission's copy is compared
+	// with it -- the HD pack is a remake of the original, not of the copy
+	const int base = n - 1;
+	if (alt >= 0 && mine >= 0 && base > alt)
+	{
+		const char* fmName = getenv("DARK_FM_NAME");
+		const std::string key = std::string(fmName ? fmName : "") + "|" + full;
+		int choice = -1;
+		{
+			std::lock_guard<std::mutex> lock(g_hdMutex);
+			if (!g_hdLoaded)
+			{
+				g_hdLoaded = true;
+				if (FILE* f = fopen(HdChoicesFile().c_str(), "r"))
+				{
+					char line[1024];
+					while (fgets(line, sizeof(line), f))
+					{
+						char* tab = strrchr(line, '\t');
+						if (!tab)
+							continue;
+						*tab = 0;
+						g_hdChoices[line] = atoi(tab + 1);
+					}
+					fclose(f);
+				}
+			}
+			auto it = g_hdChoices.find(key);
+			if (it != g_hdChoices.end())
+				choice = it->second;
+		}
+		if (choice < 0)
+		{
+			sThumb ours, theirs;
+			float likeness = 0;
+			choice = 0;
+			if (ThumbOf(stores[mine], ppNames[idx[mine]], &m_DefResMem, ours) &&
+				ThumbOf(stores[base], ppNames[idx[base]], &m_DefResMem, theirs) &&
+				std::fabs(float(theirs.w) / theirs.h - float(ours.w) / ours.h) < 0.01f &&
+				SamePicture(ours, theirs, &likeness))
+				choice = 1;
+			{
+				std::lock_guard<std::mutex> lock(g_hdMutex);
+				g_hdChoices[key] = choice;
+				if (FILE* f = fopen(HdChoicesFile().c_str(), "a"))
+				{
+					fprintf(f, "%s\t%d\n", key.c_str(), choice);
+					fclose(f);
+				}
+				if (g_hdLogged < 60)
+				{
+					++g_hdLogged;
+					fprintf(stderr, "Textures: %s: %s (%dx%d, the original %dx%d, likeness %.2f)\n", full.c_str(),
+						choice ? "the HD pack's (the mission's is the original)" : "the mission's own (its own picture)",
+						ours.w, ours.h, theirs.w, theirs.h, likeness);
+				}
+			}
+		}
+		if (choice == 1)
+		{
+			(*ppStore)->Release();
+			if (*ppCanon)
+				(*ppCanon)->Release();
+			*ppStore = stores[alt];
+			(*ppStore)->AddRef();
+			*ppCanon = canons[alt];
+			(*ppCanon)->AddRef();
+			*pIndex = idx[alt];
+		}
+	}
+	for (int k = 0; k < n; ++k)
+	{
+		stores[k]->Release();
+		canons[k]->Release();
+	}
+}
+
 IRes* cResMan::DoBind(const char* pName, const char* pTypeName, ISearchPath* pPath, const char* pRelPath, uint fBindFlags)
 {
 	if (!pName || pName[0] == '\0')
@@ -1068,6 +1387,12 @@ IRes* cResMan::DoBind(const char* pName, const char* pTypeName, ISearchPath* pPa
 					foundIndex = i;
 			}
 		}
+
+		// a fan mission's low-resolution copy of a texture an HD pack has
+		if (results.pStore && foundIndex >= 0 && !stricmp(pTypeName, RESTYPE_IMAGE))
+			if (auto* pConcretePath = dynamic_cast<cSearchPath*>(pPath))
+				PreferHdTexture(pConcretePath, results.candidatePtrs, results.candidateCount,
+					results.pRelPath, pName, &results.pStore, &results.pFoundCanonStore, &foundIndex);
 
 		if (foundIndex >= 0)
 			strcpy(results.pFoundName, results.candidatePtrs[foundIndex]);
