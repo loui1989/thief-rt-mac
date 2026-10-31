@@ -154,6 +154,9 @@ static void SendDoorMessages(ObjID object, int what_happened, int what_was_happe
 
 static void LogDoor(int o_id, const char* what);
 
+// Set by a limit callback that ignores the crossing (see CheckAngleLimits).
+extern BOOL g_AngLimitDeclined;
+
 BOOL RotDoorOpenCallback(int o_id)
 {
    cPhysModel    *pModel = g_PhysModels.GetActive(o_id);
@@ -169,7 +172,10 @@ BOOL RotDoorOpenCallback(int o_id)
 
    // If we're closing, ignore
    if (pDoorProp->status == kDoorClosing)
+   {
+      g_AngLimitDeclined = TRUE;
       return FALSE;
+   }
 
    LogDoor(o_id, "reaches open (set to its open place)");
 
@@ -216,7 +222,10 @@ BOOL RotDoorCloseCallback(int o_id)
 
    // If we're opening, ignore
    if (pDoorProp->status == kDoorOpening)
+   {
+      g_AngLimitDeclined = TRUE;
       return FALSE;
+   }
 
    LogDoor(o_id, "reaches closed (set to its closed place)");
 

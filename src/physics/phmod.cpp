@@ -2826,6 +2826,15 @@ void cPhysModel::AddAngleLimit(int axis, int angle, LimitCallback callback)
 
 ///////////////////////////////////////
 
+// A limit callback sets this when it ignores the crossing (a door's
+// "closed" stop while the door is opening, say).  Such a limit must not
+// hold the rotation: a door that starts its swing sitting exactly on the
+// stop it is leaving can read as crossing it (the sign of a near-zero dot
+// product depends on float rounding), and holding it there froze the
+// door's angle every frame while its hinge offset kept moving it -- the
+// door slid away instead of swinging.
+BOOL g_AngLimitDeclined = FALSE;
+
 BOOL cPhysModel::CheckAngleLimits(mxs_angvec start, mxs_angvec end, mxs_angvec *limit)
 {
    mxs_matrix start_mat, end_mat;
@@ -2846,10 +2855,19 @@ BOOL cPhysModel::CheckAngleLimits(mxs_angvec start, mxs_angvec end, mxs_angvec *
 
       if (((start_dp * end_dp) < 0) || (end_dp == 0.0 && start_dp != 0.0))
       {
-         limited = TRUE;
-
          if (m_AngLimitList[i]->callback)
-            hard_limit |= m_AngLimitList[i]->callback(GetObjID());
+         {
+            g_AngLimitDeclined = FALSE;
+            BOOL hard = m_AngLimitList[i]->callback(GetObjID());
+            if (g_AngLimitDeclined)
+            {
+               g_AngLimitDeclined = FALSE;
+               continue;
+            }
+            hard_limit |= hard;
+         }
+
+         limited = TRUE;
       }
    }
 

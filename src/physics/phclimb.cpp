@@ -431,6 +431,22 @@ BOOL CheckClimb(ObjID objID)
 
 ////////////////////////////////////////
 
+// Set when the mantle under way ends in a crouch (see CheckMantle).
+static BOOL g_MantleCrouch = FALSE;
+
+// One line in the log per mantle attempt that ends differently from the last
+// (the retry below checks every frame, so repeats are dropped).
+static void MantleLog(const char *what)
+{
+   static const char *s_last = NULL;
+   static int s_lines = 0;
+   if (what == s_last || s_lines >= 400)
+      return;
+   s_last = what;
+   ++s_lines;
+   fprintf(stderr, "Mantle: %s\n", what);
+}
+
 void BreakMantle(ObjID objID)
 {
    cPhysModel *pModel;
@@ -460,8 +476,27 @@ void BreakMantle(ObjID objID)
 
    PhysSetModLocation(objID, (mxs_vector *)&pModel->GetLocationVec());
 
+   // only a mantle that got onto the ledge (state 4 or later) ends crouched;
+   // one let go of earlier drops back standing
+   const BOOL end_crouched = g_MantleCrouch && pModel->GetMantlingState() >= 4;
+   g_MantleCrouch = FALSE;
+
    PlayerMotionActivate(kMoEnable);
    pModel->SetMantlingState(0);
+
+   // A mantle into a space too low to stand in ends crouched: the crouch
+   // motion's offsets are put in place at once, so the shape that is placed
+   // and tested below is the crouched one.
+   if (end_crouched)
+   {
+      g_pPlayerMode->SetMode(kPM_Crouch);
+      mxs_vector head_lower = {0, 0, -2.02f};
+      mxs_vector body_lower = {0, 0, -1.0f};
+      PlayerMotionSetOffset(PLAYER_HEAD, &head_lower);
+      PlayerMotionSetOffset(PLAYER_BODY, &body_lower);
+      PhysSetModLocation(objID, (mxs_vector *)&pModel->GetLocationVec());
+      MantleLog("mantle finished crouched");
+   }
 
    mxs_matrix orien;
    mx_ang2mat(&orien, &pModel->GetRotation());
@@ -514,9 +549,13 @@ static inline BOOL CanMantleOnto(ObjID objid)
 // or had to be retried from another angle. The forward move is scaled to match.
 static float g_MantleForward = 1.0f;
 
+// On unless "new_mantle 0": NewDark's own cam_ext.cfg turns it on.
 static BOOL NewMantle()
 {
-   return config_is_defined("new_mantle");
+   int value;
+   if (!config_is_defined("new_mantle"))
+      return TRUE;
+   return !config_get_int("new_mantle", &value) || value != 0;
 }
 
 BOOL CheckMantle(ObjID objID)
@@ -531,6 +570,11 @@ BOOL CheckMantle(ObjID objID)
 
    if (!pModel->IsPlayer() || !g_pPlayerMode->IsJumping())
       return FALSE;
+
+   // Already on the way up: a new contact during the climb restarted it
+   // from the first stage with a fresh target.
+   if (pModel->IsMantling())
+      return TRUE;
 
    mxs_matrix orien;
    mxs_vector ledge_offset;
@@ -566,6 +610,7 @@ BOOL CheckMantle(ObjID objID)
          mprintf("Mantle up failed\n");
       #endif
 
+      MantleLog("no room above the head (ceiling within 3.5 ft)");
       return FALSE;
    }
 
@@ -596,6 +641,7 @@ BOOL CheckMantle(ObjID objID)
          mprintf("Mantle forward failed\n");
       #endif
 
+      MantleLog("blocked 3.5 ft above the head (the wall goes on up)");
       return FALSE;
    }
 
@@ -634,10 +680,6 @@ BOOL CheckMantle(ObjID objID)
          pModel->SetMantlingTargVec(target_pos);
          pModel->SetMantlingState(1);
 
-         PlayerMotionActivate(kMoDisable);
-
-         Label grunt = {"garclimb"};
-         SchemaPlay(&grunt, NULL, NULL);
       }
       else
       {
@@ -656,10 +698,6 @@ BOOL CheckMantle(ObjID objID)
             pModel->SetMantlingTargVec(target_pos);
             pModel->SetMantlingState(1);
 
-            PlayerMotionActivate(kMoDisable);
-
-            Label grunt = {"garclimb"};
-            SchemaPlay(&grunt, NULL, NULL);
          }
          else
          {
@@ -678,10 +716,6 @@ BOOL CheckMantle(ObjID objID)
                pModel->SetMantlingTargVec(target_pos);
                pModel->SetMantlingState(1);
 
-               PlayerMotionActivate(kMoDisable);
-
-               Label grunt = {"garclimb"};
-               SchemaPlay(&grunt, NULL, NULL);
             }
             else
             {
@@ -698,10 +732,6 @@ BOOL CheckMantle(ObjID objID)
                pModel->SetMantlingTargVec(target_pos);
                pModel->SetMantlingState(1);
 
-               PlayerMotionActivate(kMoDisable);
-
-               Label grunt = {"garclimb"};
-               SchemaPlay(&grunt, NULL, NULL);
             }
          }
       }
@@ -722,7 +752,9 @@ BOOL CheckMantle(ObjID objID)
             mprintf("Aborting mantle, can't fit in target position\n");
          #endif
 
-         BreakMantle(objID);
+         // nothing has been started yet: just drop the target
+         MantleLog("can't reach the ledge's lip");
+         pModel->SetMantlingState(0);
          return FALSE;
       }
 
@@ -752,6 +784,25 @@ BOOL CheckMantle(ObjID objID)
            }
         }
      }
+     g_MantleCrouch = FALSE;
+     if (!fits && NewMantle())
+     {
+        // NewDark's new mantle also climbs into spaces only tall enough to
+        // crouch in (a window, a vent): try the crouched shape, with the feet
+        // just over the lip, at the same forward distances.
+        for (float f = 1.0f; f >= 0.5f - 0.001f && !fits; f -= 0.125f)
+        {
+           delta = delta_full;
+           mx_scale_addeq_vec(&delta, &movement_dir, f);
+           delta.z += -PLAYER_FOOT_POS - 0.32f;
+           if (PhysPlayerValidPosCrouched(objID, &delta))
+           {
+              fits = TRUE;
+              g_MantleForward = f;
+              g_MantleCrouch = TRUE;
+           }
+        }
+     }
      if (!fits)
      {
          #ifndef SHIP
@@ -759,14 +810,63 @@ BOOL CheckMantle(ObjID objID)
             mprintf("Aborting mantle, can't fit in target position\n");
          #endif
 
-         BreakMantle(objID);
+         MantleLog("no room on the ledge, standing or crouched");
+         g_MantleCrouch = FALSE;
+         pModel->SetMantlingState(0);
          return FALSE;
       }
 
+      // It fits: start the climb.
+      PlayerMotionActivate(kMoDisable);
+      Label grunt = {"garclimb"};
+      SchemaPlay(&grunt, NULL, NULL);
+
+      MantleLog(g_MantleCrouch ? "mantling, crouched" : "mantling");
       return TRUE;
    }
 
+   MantleLog("no ledge found within reach");
    return FALSE;
+}
+
+// The mantle is checked when the player first touches something while
+// airborne with jump held -- once.  Touching the wall a little too low, the
+// check fails and nothing re-checks it while the player keeps rising against
+// the same wall, so a held jump did nothing.  While jump is held in the air
+// with something in front, check again every frame.
+static void MantleRetry(cPhysModel *pModel)
+{
+   if (!pModel->IsPlayer() || pModel->IsMantling() || pModel->IsClimbing() ||
+       !g_pPlayerMode->IsJumping() || g_pPlayerMode->GetMode() == kPM_Dead ||
+       g_pPlayerMode->GetMode() == kPM_Swim || g_pPlayerMovement->GetGroundObj() != OBJ_NULL ||
+       PhysObjInWater(pModel->GetObjID()))
+      return;
+
+   // something right in front, at the body or the feet
+   mxs_matrix orien;
+   mxs_vector ahead;
+   mx_ang2mat(&orien, &pModel->GetRotation());
+   mx_copy_vec(&ahead, &orien.vec[0]);
+   ahead.z = 0;
+   if (IsZeroVector(ahead))
+      return;
+   mx_normeq_vec(&ahead);
+   mx_scaleeq_vec(&ahead, PLAYER_RADIUS * 2);
+
+   static const int parts[2] = {PLAYER_BODY, PLAYER_FOOT};
+   BOOL wall = FALSE;
+   for (int k = 0; k < 2 && !wall; ++k)
+   {
+      Location start, end, hit;
+      ObjID hit_obj = 0;
+      MakeHintedLocationFromVector(&start, &pModel->GetLocationVec(parts[k]), &pModel->GetLocation(parts[k]));
+      MakeHintedLocationFromVector(&end, &start.vec, &start);
+      mx_addeq_vec(&end.vec, &ahead);
+      if (PhysRaycast(start, end, &hit, &hit_obj, 0, kCollideOBB | kCollideTerrain) != kCollideNone)
+         wall = TRUE;
+   }
+   if (wall)
+      CheckMantle(pModel->GetObjID());
 }
 
 ////////////////////////////////////////
@@ -775,6 +875,12 @@ void UpdateMantling(cPhysModel *pModel, mxs_real dt)
 {
    static mxs_real delta_t = 0;
    ObjID  hit_obj;
+
+   if (pModel->GetMantlingState() == 0)
+   {
+      MantleRetry(pModel);
+      return;
+   }
 
    switch (pModel->GetMantlingState())
    {
@@ -907,8 +1013,14 @@ void UpdateMantling(cPhysModel *pModel, mxs_real dt)
             mx_mk_vec(&targ_loc, 0, 0, -PLAYER_FOOT_POS - PLAYER_RADIUS - 1.0f);
             mx_addeq_vec(&targ_loc, &pModel->GetLocationVec());
 
-            mx_mk_vec(&offset, 0, 0, PLAYER_HEAD_POS);
+            mx_mk_vec(&offset, 0, 0, PLAYER_HEAD_POS - (g_MantleCrouch ? 2.02f : 0.0f));
             pModel->SetSubModOffset(PLAYER_HEAD, offset);
+            if (g_MantleCrouch)
+            {
+               // keep the body under the low ceiling while rising
+               mx_mk_vec(&offset, 0, 0, -0.5f);
+               pModel->SetSubModOffset(PLAYER_BODY, offset);
+            }
 
             pModel->SetMantlingTargVec(targ_loc);
             pModel->SetTargetLocation(targ_loc);
@@ -960,7 +1072,7 @@ void UpdateMantling(cPhysModel *pModel, mxs_real dt)
          {
             mxs_vector offset;
 
-            mx_mk_vec(&offset, 0, 0, PLAYER_BODY_POS);
+            mx_mk_vec(&offset, 0, 0, PLAYER_BODY_POS - (g_MantleCrouch ? 1.0f : 0.0f));
             pModel->SetSubModOffset(PLAYER_BODY, offset);
             mx_mk_vec(&offset, 0, 0, PLAYER_KNEE_POS);
             pModel->SetSubModOffset(PLAYER_KNEE, offset);

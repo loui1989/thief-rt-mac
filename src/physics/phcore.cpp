@@ -6459,7 +6459,24 @@ static void UpdatePositions()
          {
             // Check for rotation limits
             ang_limit = pModel->GetEndRotationVec();
-            pModel->CheckAngleLimits(pModel->GetRotation(), pModel->GetEndRotationVec(), &ang_limit);
+            if (pModel->CheckAngleLimits(pModel->GetRotation(), pModel->GetEndRotationVec(), &ang_limit) &&
+                !pModel->IsPlayer() && !IsZeroVector(pModel->GetCOGOffset()))
+            {
+               // The model's end location already includes the swing of its
+               // off-centre pivot for the full rotation.  The limit kept a
+               // different angle, so move the end location to match it, or a
+               // held door drifts off its hinge.  (A callback that slammed the
+               // door set both end angle and location, making this zero.)
+               mxs_matrix held_m, end_m;
+               mxs_vector held_off, end_off, end_loc;
+               mx_ang2mat(&held_m, &ang_limit);
+               mx_ang2mat(&end_m, &pModel->GetEndRotationVec());
+               mx_mat_mul_vec(&held_off, &held_m, &pModel->GetCOGOffset());
+               mx_mat_mul_vec(&end_off, &end_m, &pModel->GetCOGOffset());
+               mx_add_vec(&end_loc, &pModel->GetEndLocationVec(), &held_off);
+               mx_subeq_vec(&end_loc, &end_off);
+               pModel->SetEndLocationVec(end_loc);
+            }
             pModel->SetRotation(ang_limit, TRUE);
          }
 

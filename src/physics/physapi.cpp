@@ -1787,7 +1787,19 @@ BOOL PhysObjHasPhysics(ObjID objID)
 
 //
 // Test for physics model in world
+static BOOL ValidPosWithLower(ObjID objID, mxs_vector *delta, BOOL crouched);
+
 BOOL PhysObjValidPos(ObjID objID, mxs_vector *delta)
+{
+   return ValidPosWithLower(objID, delta, FALSE);
+}
+
+BOOL PhysPlayerValidPosCrouched(ObjID objID, mxs_vector *delta)
+{
+   return ValidPosWithLower(objID, delta, TRUE);
+}
+
+static BOOL ValidPosWithLower(ObjID objID, mxs_vector *delta, BOOL crouched)
 {
    cPhysModel *pModel;
    mxs_vector  real_delta;
@@ -1821,6 +1833,14 @@ BOOL PhysObjValidPos(ObjID objID, mxs_vector *delta)
    for (int i=0; i<pModel->NumSubModels(); i++)
    {
       mx_add_vec(&new_vec, (mxs_vector *) &pModel->GetLocationVec(i), delta); 
+      // the crouch motion's offsets (phmodata.c): head down 2.02, body 1
+      if (crouched && pModel->IsPlayer())
+      {
+         if (i == PLAYER_HEAD)
+            new_vec.z -= 2.02f;
+         else if (i == PLAYER_BODY)
+            new_vec.z -= 1.0f;
+      }
       MakeLocationFromVector(&new_loc, &new_vec);
 
       switch (pModel->GetType(i))

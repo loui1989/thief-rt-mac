@@ -176,6 +176,8 @@ EXTERN BOOL PhysRegisterOBB(ObjID objID, unsigned flags);
 
 EXTERN BOOL PhysObjHasPhysics(ObjID objID);
 EXTERN BOOL PhysObjValidPos(ObjID objID, mxs_vector *delta);
+// As PhysObjValidPos, with the player's head and body lowered as when crouched.
+EXTERN BOOL PhysPlayerValidPosCrouched(ObjID objID, mxs_vector *delta);
 EXTERN BOOL PhysSphereIntersectsDoor(ObjID objID);
 EXTERN BOOL PhysObjOnGround(ObjID objID);
 EXTERN BOOL PhysObjOnPlatform(ObjID objID);
