@@ -30,6 +30,7 @@
 #include <string.h>
 
 #include <engscrpt.h>
+#include <fogzone.h>
 
 // must be last header
 #include <dbmem.h>
@@ -154,11 +155,7 @@ struct sFogSettings
    BOOL assigned;
 };
 
-// The stock renderer has one fog definition.  Retain NewDark's eight zone
-// values so scripts can reliably read back and animate the zone they set;
-// zone-aware rendering can consume this same table when its WR metadata is
-// available.
-static sFogSettings gScriptFogZones[8];
+// NewDark's eight fog zones live with the mission's fog zones (fogzone.h).
 
 }
 
@@ -395,29 +392,16 @@ public:
    {
       if (zone < 1 || zone > 8)
          return;
-      const sFogSettings &settings = gScriptFogZones[zone - 1];
-      if (!settings.assigned)
+      // the mission's zone (or one a script set); one without fog of its
+      // own follows the global fog
+      if (!FogZoneGet(zone, &red, &green, &blue, &distance))
          GetFog(red, green, blue, distance);
-      else
-      {
-         red = settings.red;
-         green = settings.green;
-         blue = settings.blue;
-         distance = settings.distance;
-      }
    }
 
    STDMETHOD_(void, SetFogZone)(int zone, int red, int green, int blue,
                                 float distance)
    {
-      if (zone < 1 || zone > 8)
-         return;
-      sFogSettings &settings = gScriptFogZones[zone - 1];
-      settings.red = red;
-      settings.green = green;
-      settings.blue = blue;
-      settings.distance = distance;
-      settings.assigned = TRUE;
+      FogZoneSet(zone, red, green, blue, distance);
    }
 
    STDMETHOD_(void, GetWeather)(int &type, real &frequency, real &speed,

@@ -47,6 +47,7 @@
 
 #include <wrdbrend.h> // to get access to cell texutre
 #include <memall.h>
+#include <fogzone.h>
 #include <dbmem.h>   // must be last header! 
 
 #ifndef SHIP
@@ -94,6 +95,9 @@ extern grs_bitmap *make_texture_map(int d);
 r3s_texture (*portal_get_texture)(int d) = make_texture_map;
 ulong portal_fog_color[3];
 float portal_fog_dist = 0;
+// this frame's fog: the mission's, or the fog zone the camera is in (fogzone.h)
+static float portal_frame_fog_rgb[3];
+static float portal_frame_fog_dist;
 BOOL portal_fog_on = TRUE;
 ulong fog_r3_color;
 float fog_dist_modifier = .05f;
@@ -2083,6 +2087,7 @@ static void portal_rt_begin(float zoom, int cell)
    // MEDIA_WATER (engfeat/media.h) is 2
    RenderRTCameraMedium(cell >= 0 && cell < wr_num_cells && WR_CELL(cell) &&
                         WR_CELL(cell)->medium == 2);
+   RenderRTFog(portal_frame_fog_rgb, portal_fog_on ? portal_frame_fog_dist : 0.0f);
    RenderRTPrepBegin();
    portal_rt_submit_world();
    portal_rt_find_lights(cell);
@@ -2098,10 +2103,13 @@ void portal_render_scene(Position *pos, float zoom)
 {  PROF
    Location *loc;
    int cell, i;
+   BOOL fog_was_on;
    // objects attached to others (NewDark detail attachments) follow them
    DetailAttachmentsUpdate();
    loc = &pos->loc;
    cell = CellFromLoc(loc);
+   FogZoneFrame(cell, portal_frame_fog_rgb, &portal_frame_fog_dist);
+   fog_was_on = portal_fog_on;
 #ifdef STATS_ON
    zero_stats();
 #endif
@@ -2238,17 +2246,18 @@ void portal_render_scene(Position *pos, float zoom)
       porthw_end_frame();
    }
 
-   if (g_lgd3d && portal_fog_on) {
-      if (portal_fog_dist) {
-         lgd3d_set_fog_color(portal_fog_color[0], portal_fog_color[1],
-                             portal_fog_color[2]);
-         //zb//temp lgd3d_set_fog_density(fog_dist_modifier / portal_fog_dist);
-         lgd3d_set_linear_fog_distance( portal_fog_dist );
-
-         fog_r3_color = guiRGB(portal_fog_color[0], portal_fog_color[1],
-                               portal_fog_color[2]);
-      } else
-         portal_fog_on = FALSE;
+   // the frame's fog (a fog zone's, eased): a frame without any leaves the
+   // setting alone -- it was switched off for good here, so one fogless
+   // moment (a clear zone) ended the mission's fog
+   if (portal_frame_fog_dist <= 0)
+      portal_fog_on = FALSE;   // for this frame only: restored at its end
+   if (g_lgd3d && portal_fog_on && portal_frame_fog_dist > 0) {
+      const int fr = (int)(portal_frame_fog_rgb[0] + 0.5f);
+      const int fg = (int)(portal_frame_fog_rgb[1] + 0.5f);
+      const int fb = (int)(portal_frame_fog_rgb[2] + 0.5f);
+      lgd3d_set_fog_color(fr, fg, fb);
+      lgd3d_set_linear_fog_distance(portal_frame_fog_dist);
+      fog_r3_color = guiRGB(fr, fg, fb);
    }
 
 #ifdef STATS_ON
@@ -2339,7 +2348,7 @@ cleanup:
    if (portal_post_render_cback)
       portal_post_render_cback();
 
-   if (g_lgd3d && portal_fog_on && portal_fog_dist)
+   if (g_lgd3d && portal_fog_on && portal_frame_fog_dist > 0)
       lgd3d_set_fog_enable(FALSE);
 
    if (portal_render_overlays_cback)
@@ -2365,6 +2374,7 @@ cleanup:
    }
    RenderRTSceneEnd();
 #endif
+   portal_fog_on = fog_was_on;
    portal_end_3d();
 
 #ifndef SHIP

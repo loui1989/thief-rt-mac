@@ -51,6 +51,8 @@
 #include <room.h>
 #include <roomtowr.h>
 #include <weather.h>
+#include <fogzone.h>
+#include <timer.h>
 
 #include <dbmem.h>
 #include <initguid.h>
@@ -1249,4 +1251,132 @@ EXTERN void WeatherFrame(ulong nMillisec)
 
    // move our little raindrops/snowflakes
    MovePrecip(nMillisec);
+}
+
+
+/* --<<= -+-/-/-/=/=/\/- <<< ((( ((( / \ ))) ))) >>> -\/\=\=\-\-\-+- =>>-- *\
+
+   NewDark fog zones (FOGZONEVAR): the mission's global fog and eight zones,
+   each a colour and the distance (feet) at which it is opaque. Version 1.0:
+   nine 8-byte entries, a byte the editor leaves zero, red, green, blue, then
+   the distance as a float. The global entry is the mission's fog (what the
+   original engine keeps in its FOG tag, which NewDark missions do not have).
+
+\* --<<= -+-\-\-\=\=\/\- <<< ((( ((( \ / ))) ))) >>> -/\/=/=/-/-/-+- =>>-- */
+
+struct sFogZoneEntry
+{
+   uchar pad;
+   uchar r, g, b;
+   float dist;
+};
+
+struct sMissionFogZones
+{
+   sFogZoneEntry entry[9];
+};
+
+static_assert(sizeof(sMissionFogZones) == 72, "FOGZONEVAR is 72 bytes");
+
+sFileVarDesc g_FogZoneFileVarDesc =
+{
+   kMissionVar,
+   "FOGZONEVAR",
+   "Fog zones",
+   FILEVAR_TYPE(sMissionFogZones),
+   { 1, 0},
+   { 1, 0},
+};
+
+static BOOL g_FogZonesLoaded = FALSE;
+
+class cMissionFogZones : public cFileVar<sMissionFogZones,&g_FogZoneFileVarDesc>
+{
+public:
+   void Update()
+   {
+      g_FogZonesLoaded = TRUE;
+      // the global entry is the mission's fog
+      portal_fog_color[0] = entry[0].r;
+      portal_fog_color[1] = entry[0].g;
+      portal_fog_color[2] = entry[0].b;
+      portal_fog_dist = entry[0].dist;
+      mprintf("Fog: global (%d %d %d) opaque at %.0f ft", entry[0].r, entry[0].g, entry[0].b, entry[0].dist);
+      for (int i = 1; i < 9; i++)
+         if (entry[i].dist > 0)
+            mprintf("; zone %d (%d %d %d) at %.0f ft", i, entry[i].r, entry[i].g, entry[i].b, entry[i].dist);
+      mprintf("\n");
+   }
+
+   void Reset()
+   {
+      g_FogZonesLoaded = FALSE;
+      cFileVarBase::Reset();
+   }
+
+   sFogZoneEntry & Zone(int i) { return entry[i]; }
+};
+
+static cMissionFogZones g_FogZones;
+
+BOOL FogZoneGet(int zone, int *r, int *g, int *b, float *dist)
+{
+   if (zone < 1 || zone > 8 || !g_FogZonesLoaded || g_FogZones.Zone(zone).dist <= 0)
+      return FALSE;
+   const sFogZoneEntry & e = g_FogZones.Zone(zone);
+   *r = e.r; *g = e.g; *b = e.b; *dist = e.dist;
+   return TRUE;
+}
+
+void FogZoneSet(int zone, int r, int g, int b, float dist)
+{
+   if (zone < 1 || zone > 8)
+      return;
+   sFogZoneEntry & e = g_FogZones.Zone(zone);
+   e.r = (uchar)r; e.g = (uchar)g; e.b = (uchar)b; e.dist = dist;
+   g_FogZonesLoaded = TRUE;
+}
+
+void FogZoneFrame(int cameraCell, float rgb[3], float *dist)
+{
+   // the target: the camera's zone if it has fog of its own, else the global
+   float target[3] = { (float)portal_fog_color[0], (float)portal_fog_color[1],
+                       (float)portal_fog_color[2] };
+   float targetDist = portal_fog_dist;
+   const int zone = cameraCell >= 0 ? portal_cell_fog_zone(cameraCell) : 0;
+   if (g_FogZonesLoaded && zone >= 1 && zone <= 8)
+   {
+      const sFogZoneEntry & e = g_FogZones.Zone(zone);
+      // a zone without a distance has no fog: clear air inside it
+      target[0] = e.r; target[1] = e.g; target[2] = e.b;
+      targetDist = e.dist;
+   }
+
+   // eased: density (1/distance) and colour move a little each frame
+   static float s_rgb[3] = { 0, 0, 0 }, s_density = 0;
+   static ulong s_last = 0;
+   static int s_lastZone = -1;
+   const ulong now = tm_get_millisec();
+   float k = s_last ? (now - s_last) / 700.0f : 1.0f;
+   s_last = now;
+   if (k > 1.0f || k < 0.0f)
+      k = 1.0f;
+   const float targetDensity = targetDist > 0 ? 1.0f / targetDist : 0.0f;
+   if (s_density <= 0)
+      for (int i = 0; i < 3; i++)
+         s_rgb[i] = target[i];   // fog coming in takes its colour at once
+   s_density += (targetDensity - s_density) * k;
+   if (targetDensity > 0)
+      for (int i = 0; i < 3; i++)
+         s_rgb[i] += (target[i] - s_rgb[i]) * k;
+   if (zone != s_lastZone)
+   {
+      if (g_FogZonesLoaded)
+         mprintf("Fog: camera in fog zone %d (%.0f %.0f %.0f, opaque at %.0f ft)\n",
+                 zone, target[0], target[1], target[2], targetDist);
+      s_lastZone = zone;
+   }
+   for (int i = 0; i < 3; i++)
+      rgb[i] = s_rgb[i];
+   *dist = s_density > 1e-6f ? 1.0f / s_density : 0.0f;
 }

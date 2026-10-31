@@ -86,6 +86,8 @@ void RenderRTGameDescribeNearby(const float at[3], float radius,
 
 // Nonzero while the camera is under water.
 void RenderRTCameraMedium(int underwater);
+// the frame's fog: colour 0-255, distance (feet) at which it is opaque, 0 none
+void RenderRTFog(const float rgb[3], float distFeet);
 
 // World representation. Returns nonzero if geometry for this serial must be
 // (re)submitted between RenderRTWorldBegin and RenderRTWorldEnd.

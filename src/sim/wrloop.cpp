@@ -226,6 +226,14 @@ typedef struct sWRExtRenderInfoDisk
 static_assert(sizeof(sWRExtRenderInfoDisk) == 52,
               "Unexpected WREXT render-info record layout");
 
+// the low nibble is the cell's fog zone (fogzone.h)
+EXTERN int portal_cell_fog_zone(int cell);
+int portal_cell_fog_zone(int cell)
+{
+   return cell >= 0 && cell < wr_num_cells
+      ? (gExtendedCellZones[cell] & 15) : 0;
+}
+
 int portal_cell_ambient_zone(int cell)
 {
    return cell >= 0 && cell < wr_num_cells

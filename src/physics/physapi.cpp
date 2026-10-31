@@ -3074,7 +3074,14 @@ void PhysPlayerJump(ObjID player, mxs_real jump_speed)
 
       mx_scale_vec(&grav_comp, &kGravityDir, mx_dot_vec(&kGravityDir, &velocity));
       mx_subeq_vec(&velocity, &grav_comp);
-      mx_scaleeq_vec(&velocity, 1.05f);
+      // NewDark's jump_speed_boost: how much of the running speed a jump
+      // adds on (fan missions ask for 1.4, for the longer running jumps
+      // their routes are built around); the original 1.05 otherwise
+      float boost = 1.05f;
+      config_get_float("jump_speed_boost", &boost);
+      if (boost < 0.5f || boost > 3.0f)
+         boost = 1.05f;
+      mx_scaleeq_vec(&velocity, boost);
       mx_scale_addeq_vec(&velocity, &kGravityDir, -jump_speed);
 
       if (friction <= 1.0)

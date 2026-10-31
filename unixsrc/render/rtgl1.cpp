@@ -91,6 +91,7 @@ struct Settings {
    int gi = 0;                // bounce light: 0 two bounces at half rate (as Blood RT),
                               // 1 one bounce, 2 two bounces, 3 one bounce at half rate
    bool volumetric = false;   // haze lit by every light
+   int fog = 2;               // the mission's fog: 0 off, 1 light, 2 as the mission, 3 thick
    int dynres = 0;            // dynamic resolution's target fps, 0 off
    int outputHeight = 0;      // the frame's height in pixels, 0 = the screen's own (Retina)
    bool perfLog = false;      // logs/perf.log: where each frame's time goes, every 2 s
@@ -162,6 +163,7 @@ void load_settings()
       else if (k == "sprite_glow") g_cfg.spriteGlow = std::clamp(value, 0.0f, 10.0f);
       else if (k == "gi") g_cfg.gi = std::clamp(int(value), 0, 3);
       else if (k == "volumetric") g_cfg.volumetric = value != 0;
+      else if (k == "fog") g_cfg.fog = std::clamp(int(value), 0, 3);
       else if (k == "dynres") g_cfg.dynres = std::clamp(int(value), 0, 240);
       else if (k == "reach") g_cfg.reach = std::clamp(int(value), 0, 90);
       else if (k == "max_lights") g_cfg.maxLights = std::clamp(int(value), 0, 4096);
@@ -197,13 +199,13 @@ void save_settings()
       return;
    fprintf(f, "upscale = %d\nscale = %.2f\nfps = %d\nvsync = %d\nlight = %.3f\nsky = %.3f\n"
               "light_size = %.3f\nglow = %.3f\nwater = %d\nsprite_glow = %.3f\ngi = %d\n"
-              "volumetric = %d\ndynres = %d\nmax_lights = %d\nmin_roughness = %.2f\nlight_cull = %d\nflicker = %d\nambient = %.3f\nsmooth_models = %d\nfixtures_pass = %d\nlight_fix = %d\nlight_response = %d\nev_min = %d\nlight_candidates = %d\nsteady_faces = %d\nlight_fade = %d\nbloom = %d\nrt_detection = %d\nreach = %d\noutput_height = %d\nperf_log = %d\nframe_cap = %d\n",
+              "volumetric = %d\ndynres = %d\nmax_lights = %d\nmin_roughness = %.2f\nlight_cull = %d\nflicker = %d\nambient = %.3f\nsmooth_models = %d\nfixtures_pass = %d\nlight_fix = %d\nlight_response = %d\nev_min = %d\nlight_candidates = %d\nsteady_faces = %d\nlight_fade = %d\nbloom = %d\nrt_detection = %d\nreach = %d\noutput_height = %d\nperf_log = %d\nframe_cap = %d\nfog = %d\n",
            g_cfg.upscale, g_cfg.scale, int(g_cfg.fps), int(g_cfg.vsync), g_cfg.light, g_cfg.sky,
            g_cfg.lightSize, g_cfg.glow, g_cfg.water, g_cfg.spriteGlow, g_cfg.gi,
            int(g_cfg.volumetric), g_cfg.dynres, g_cfg.maxLights, g_cfg.minRoughness,
            int(g_cfg.lightCull), g_cfg.flicker, g_cfg.ambient, int(g_cfg.smoothModels),
            int(g_cfg.fixturesPass), int(g_cfg.lightFix), g_cfg.response, g_cfg.evMin,
-           g_cfg.candidates, int(g_cfg.steadyFaces), int(g_cfg.lightFade), int(g_cfg.bloom), int(g_cfg.rtDetection), g_cfg.reach, g_cfg.outputHeight, int(g_cfg.perfLog), g_cfg.frameCap);
+           g_cfg.candidates, int(g_cfg.steadyFaces), int(g_cfg.lightFade), int(g_cfg.bloom), int(g_cfg.rtDetection), g_cfg.reach, g_cfg.outputHeight, int(g_cfg.perfLog), g_cfg.frameCap, g_cfg.fog);
    fclose(f);
 }
 
@@ -377,6 +379,10 @@ int g_lightEventFrames = 0;   // a light just put out or lit: the denoiser lets 
 std::vector<PendingLight> g_fadingOut;   // left the traced set, still fading out
 std::vector<PendingLight> g_frozenLights;  // while g_freeze
 bool g_underwater = false;
+// the mission's fog for this frame (a fog zone's, eased): colour 0-255 and the
+// distance in feet at which it is opaque, 0 none (portal.c, fogzone.h)
+float g_fogRgb[3] = { 0, 0, 0 };
+float g_fogDistFt = 0;
 int g_drawableW = 1, g_drawableH = 1;
 uint32_t g_framePrims = 0, g_frameDropped = 0, g_frameLights = 0;
 // this frame's light positions (meters), for making light fixtures glow
@@ -1608,7 +1614,7 @@ const char *kUpscaleNames[] = {"Off",
                                "MetalFX Custom"};
 
 enum UiRow {
-   kRowUpscale, kRowScale, kRowOutput, kRowDynres, kRowBounces, kRowReach, kRowLights, kRowLightFade, kRowCandidates, kRowLightCull, kRowResponse, kRowFlicker, kRowVolumetric, kRowBloom, kRowVsync, kRowFrameCap,
+   kRowUpscale, kRowScale, kRowOutput, kRowDynres, kRowBounces, kRowReach, kRowLights, kRowLightFade, kRowCandidates, kRowLightCull, kRowResponse, kRowFlicker, kRowVolumetric, kRowFog, kRowBloom, kRowVsync, kRowFrameCap,
    kRowFps, kRowDetection, kRowLight, kRowExposure, kRowAmbient, kRowSky, kRowLightSize, kRowRough, kRowSmooth, kRowSteady, kRowFixtures, kRowLightFix, kRowGlow, kRowWater,
    kRowDebug, kRowFreeze, kRowBackFaces, kRowReuse, kRowBlink, kRowPerf, kRowInspect, kRowReset, kRowCount
 };
@@ -1616,7 +1622,7 @@ enum UiRow {
 const char *kRowLabels[kRowCount] = {
    "Upscaler", "Render resolution", "Output resolution", "Dynamic resolution", "Bounce light", "Light reach", "Lights traced",
    "Lights coming into range", "Lights tried per pixel", "Lights behind walls", "Light changes", "Light flicker",
-   "Volumetric light", "Bloom", "VSync", "Frame rate limit", "FPS counter", "Light gem and guards", "Light brightness", "Darkest exposure", "Ambient light", "Sky brightness",
+   "Volumetric light", "Mission fog", "Bloom", "VSync", "Frame rate limit", "FPS counter", "Light gem and guards", "Light brightness", "Darkest exposure", "Ambient light", "Sky brightness",
    "Light size (soft shadows)", "Surface roughness", "Model shading", "Model faces", "Torches and lamps", "Lights in walls", "Lamp glow", "Water",
    "Debug view", "Freeze scene (test)", "Back faces (test)", "Light sampling (test)", "Blink nearest light (test)", "Performance log", "Inspect centre of view", "Reset to defaults",
 };
@@ -1663,6 +1669,8 @@ std::string row_value(int row)
    case kRowResponse: return g_cfg.response == 0 ? "As Blood RT" : g_cfg.response == 2 ? "Instant (noisier)" : "Quick";
    case kRowFlicker: return g_cfg.flicker == 1 ? "As the game" : g_cfg.flicker == 2 ? "Nearly steady" : "Smoothed";
    case kRowVolumetric: return g_cfg.volumetric ? "On" : "Off";
+   case kRowFog:
+      return g_cfg.fog == 0 ? "Off" : g_cfg.fog == 1 ? "Light" : g_cfg.fog == 3 ? "Thick" : "As the mission";
    case kRowBloom: return g_cfg.bloom ? "On" : "Off";
    case kRowVsync: return g_cfg.vsync ? "On" : "Off";
    case kRowFps: return g_cfg.fps ? "On" : "Off";
@@ -1801,6 +1809,7 @@ void change_row(int row, int dir)
    case kRowResponse: g_cfg.response = (g_cfg.response + dir + 3) % 3; break;
    case kRowFlicker: g_cfg.flicker = (g_cfg.flicker + dir + 3) % 3; break;
    case kRowVolumetric: g_cfg.volumetric = !g_cfg.volumetric; break;
+   case kRowFog: g_cfg.fog = (g_cfg.fog + dir + 4) % 4; break;
    case kRowBloom: g_cfg.bloom = !g_cfg.bloom; break;
    case kRowVsync: g_cfg.vsync = !g_cfg.vsync; break;
    case kRowFps: g_cfg.fps = !g_cfg.fps; break;
@@ -2217,17 +2226,44 @@ void draw_frame(bool sceneDrawn)
       .waterCausticSlant = 0.6f,
       .waterCausticWallBoost = 4.0f,
    };
+   // The mission's fog, in the volume Raze RT's haze uses: one medium
+   // between the camera and everything, lit by the lamps it hangs around,
+   // its own colour the glow it has unlit. The game's fog is linear, clear
+   // at the eye and opaque at its distance; the volume's is exponential, so
+   // its density rises along the view (a fifth near, the rest far), which
+   // keeps near things clear the way the game's fog does. Its reach is the
+   // fog's distance: what lies beyond is fog.
+   const bool fogOn = g_cfg.fog > 0 && g_fogDistFt > 0;
+   float volFar = 40.0f, volNear = 0.3f, volFarDens = 0.3f;
+   RgFloat3D volAmbient = {{0.004f, 0.005f, 0.008f}};
+   if (fogOn) {
+      const float D = g_fogDistFt * 0.3048f;
+      const float thick = g_cfg.fog == 1 ? 0.5f : g_cfg.fog == 3 ? 1.8f : 1.0f;
+      volFar = std::clamp(D, 12.0f, 300.0f);
+      // optical depth over the reach (~3 at the fog's distance: 95% fog);
+      // the volume puts 0.001 x density in each of its 64 slices
+      const float tau = 3.0f * thick * volFar / D;
+      volNear = 0.4f * tau / 0.064f;
+      volFarDens = 1.6f * tau / 0.064f;
+      auto lin = [](float c) {
+         c = std::clamp(c / 255.0f, 0.0f, 1.0f);
+         return c <= 0.04045f ? c / 12.92f : std::pow((c + 0.055f) / 1.055f, 2.4f);
+      };
+      // as bright as the sky it is usually matched to
+      for (int i = 0; i < 3; ++i)
+         volAmbient.data[i] = lin(g_fogRgb[i]) * g_cfg.sky;
+   }
    auto volumetric = RgDrawFrameVolumetricParams{
       .sType = RG_STRUCTURE_TYPE_DRAW_FRAME_VOLUMETRIC_PARAMS,
       .pNext = &refl,
       // RTGL1's default is on, with a bright ambient haze: costly, and it
       // greyed Thief's darkness. Optional, lit by the lamps when on.
-      .enable = g_cfg.volumetric,
+      .enable = g_cfg.volumetric || fogOn,
       .maxHistoryLength = 8.0f,
       .useSimpleDepthBased = false,
-      .volumetricFar = 40.0f,
-      .ambientColor = {{0.004f, 0.005f, 0.008f}},
-      .scaterring = 0.3f,
+      .volumetricFar = volFar,
+      .ambientColor = volAmbient,
+      .scaterring = volNear,
       .assymetry = 0.6f,
       .useIlluminationVolume = false,
       .fallbackSourceColor = {{0, 0, 0}},
@@ -2236,7 +2272,7 @@ void draw_frame(bool sceneDrawn)
       .illuminateFromAllLights = true,
       .mediaColor = {{1.0f, 1.0f, 1.0f}},
       .mediaColorFar = {{1.0f, 1.0f, 1.0f}},
-      .farScattering = 0.3f,
+      .farScattering = volFarDens,
       .densityCurve = 1.0f,
       .occludeEmission = false,
       .ditherRadius = 2.0f,
@@ -3369,6 +3405,16 @@ int RenderRTObjectWanted(uint32_t obj)
 }
 
 void RenderRTCameraMedium(int underwater) { g_underwater = underwater != 0; }
+
+void RenderRTFog(const float rgb[3], float distFeet)
+{
+   if ((distFeet > 0) != (g_fogDistFt > 0))
+      fprintf(stderr, "RT: mission fog %s (%.0f %.0f %.0f, opaque at %.1f m)\n",
+              distFeet > 0 ? "on" : "off", rgb[0], rgb[1], rgb[2], distFeet * 0.3048f);
+   for (int i = 0; i < 3; ++i)
+      g_fogRgb[i] = rgb[i];
+   g_fogDistFt = distFeet > 0 ? distFeet : 0;
+}
 
 void RenderRTObjectEnd(void)
 {
