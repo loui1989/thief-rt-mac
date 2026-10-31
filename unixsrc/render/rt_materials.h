@@ -25,11 +25,18 @@
 // The texture's RTGL1 name carries its file's name, a hash of its pixels and
 // of its class, so a changed table or texture makes its maps again, and the
 // same picture loaded twice shares them.
+//
+// The maps are at most kMapMax texels across (kGlowMax for emission, which is
+// seen as it is): an HD pack's 2048 textures would otherwise make some 5 MB of
+// maps each, 14 GB for the Thief Gold HD Mod. They are made off the main
+// thread (rtgl1.cpp), so the functions here keep to their own files.
 
 namespace rtmat {
 
 // part of every material name: a new version makes every map again
-constexpr uint32_t kMapsVersion = 2;
+constexpr uint32_t kMapsVersion = 3;
+constexpr int kMapMax = 512;
+constexpr int kGlowMax = 1024;
 
 // ---- PNG, write and read (zlib) ----------------------------------------------
 
@@ -76,7 +83,9 @@ inline bool write_png(const std::string &path, const uint8_t *pix, int w, int h,
    chunk(o, "IHDR", ihdr, 13);
    chunk(o, "IDAT", z.data(), zsize);
    chunk(o, "IEND", nullptr, 0);
-   const std::string tmp = path + ".tmp";
+   // (a file of its own for each writer: two threads may make the same maps)
+   static std::atomic<unsigned> s_tmp{0};
+   const std::string tmp = path + ".tmp" + std::to_string(s_tmp.fetch_add(1));
    FILE *f = fopen(tmp.c_str(), "wb");
    if (!f)
       return false;
@@ -445,22 +454,37 @@ inline std::vector<float> heights(const uint8_t *rgba, int w, int h)
       const uint8_t *a = &rgba[size_t(i) * 4];
       l[size_t(i)] = (0.2126f * a[0] + 0.7152f * a[1] + 0.0722f * a[2]) / 255.0f;
    }
+   // a box blur of radius r, wrapping, as a running sum along each row and
+   // column (the same sums as adding up the 2r+1 texels at each one)
+   auto wrap = [](int i, int n) { return ((i % n) + n) % n; };
    auto blur = [&](const std::vector<float> &in, int r) {
       std::vector<float> tmp(in.size()), out(in.size());
-      for (int y = 0; y < h; ++y)
+      const float inv = 1.0f / float(2 * r + 1);
+      for (int y = 0; y < h; ++y) {
+         const float *row = &in[size_t(y) * w];
+         double s = 0;
+         for (int d = -r; d <= r; ++d)
+            s += row[wrap(d, w)];
          for (int x = 0; x < w; ++x) {
-            float s = 0;
-            for (int d = -r; d <= r; ++d)
-               s += in[size_t(y * w + ((x + d) % w + w) % w)];
-            tmp[size_t(y * w + x)] = s / float(2 * r + 1);
+            tmp[size_t(y) * w + x] = float(s) * inv;
+            s += row[wrap(x + r + 1, w)] - row[wrap(x - r, w)];
          }
-      for (int y = 0; y < h; ++y)
+      }
+      std::vector<double> col(size_t(w), 0.0);
+      for (int d = -r; d <= r; ++d) {
+         const float *row = &tmp[size_t(wrap(d, h)) * w];
+         for (int x = 0; x < w; ++x)
+            col[size_t(x)] += row[x];
+      }
+      for (int y = 0; y < h; ++y) {
+         const float *add = &tmp[size_t(wrap(y + r + 1, h)) * w];
+         const float *sub = &tmp[size_t(wrap(y - r, h)) * w];
+         float *o = &out[size_t(y) * w];
          for (int x = 0; x < w; ++x) {
-            float s = 0;
-            for (int d = -r; d <= r; ++d)
-               s += tmp[size_t(((y + d) % h + h) % h * w + x)];
-            out[size_t(y * w + x)] = s / float(2 * r + 1);
+            o[x] = float(col[size_t(x)]) * inv;
+            col[size_t(x)] += add[x] - sub[x];
          }
+      }
       return out;
    };
    const int big = std::clamp(std::min(w, h) / 24, 1, 6);
@@ -469,6 +493,30 @@ inline std::vector<float> heights(const uint8_t *rgba, int w, int h)
    for (size_t i = 0; i < o.size(); ++i)
       o[i] = 0.45f * fine[i] + 0.55f * broad[i] * 1.6f;
    return o;
+}
+
+// halved (2x2 texels averaged) until it is at most maxSize across
+inline const uint8_t *shrink(const uint8_t *rgba, int w, int h, int maxSize,
+                             std::vector<uint8_t> &store, int &ow, int &oh)
+{
+   ow = w;
+   oh = h;
+   const uint8_t *src = rgba;
+   while (std::max(ow, oh) > maxSize && ow >= 2 && oh >= 2) {
+      const int nw = ow / 2, nh = oh / 2;
+      std::vector<uint8_t> next(size_t(nw) * nh * 4);
+      for (int y = 0; y < nh; ++y)
+         for (int x = 0; x < nw; ++x)
+            for (int k = 0; k < 4; ++k) {
+               const size_t a = (size_t(2 * y) * ow + 2 * x) * 4 + k, b = a + size_t(ow) * 4;
+               next[(size_t(y) * nw + x) * 4 + k] = uint8_t((src[a] + src[a + 4] + src[b] + src[b + 4] + 2) / 4);
+            }
+      store.swap(next);
+      src = store.data();
+      ow = nw;
+      oh = nh;
+   }
+   return src;
 }
 
 struct Result {
@@ -521,6 +569,12 @@ inline Result prepare(const std::string &dir, const std::string &name, const Cla
    res.none = c.none;
    if (c.none || w < 4 || h < 4)
       return res;
+   // the maps' own sizes (kMapMax, kGlowMax)
+   std::vector<uint8_t> smallStore, glowStore;
+   int ew = w, eh = h;
+   const uint8_t *eRgba = shrink(rgba, w, h, kGlowMax, glowStore, ew, eh);
+   rgba = shrink(eRgba, ew, eh, kMapMax, smallStore, w, h);
+   const size_t EN = size_t(ew) * eh;
    const std::string base = dir + "/" + name;
    const std::string pE = base + "_e.png", pORM = base + "_orm.png", pN = base + "_n.png",
                      pH = base + "_h.png", pNoE = base + "_e.none";
@@ -536,23 +590,23 @@ inline Result prepare(const std::string &dir, const std::string &name, const Cla
    if (exists(pE))
       res.glows = true;
    else if (!exists(pNoE)) {
-      std::vector<uint8_t> e(N * 3, 0);
+      std::vector<uint8_t> e(EN * 3, 0);
       int lit = 0;
       if (glowMap && gw > 0 && gh > 0) {
          // the material's glow map, scaled to the texture
          const float k = std::clamp(glowStrength * 2.5f, 0.25f, 1.0f);
-         for (int y = 0; y < h; ++y)
-            for (int x = 0; x < w; ++x) {
-               const uint8_t *g = &(*glowMap)[(size_t(std::min(gh - 1, y * gh / h)) * gw +
-                                               std::min(gw - 1, x * gw / w)) * 4];
-               uint8_t *o = &e[(size_t(y) * w + x) * 3];
+         for (int y = 0; y < eh; ++y)
+            for (int x = 0; x < ew; ++x) {
+               const uint8_t *g = &(*glowMap)[(size_t(std::min(gh - 1, y * gh / eh)) * gw +
+                                               std::min(gw - 1, x * gw / ew)) * 4];
+               uint8_t *o = &e[(size_t(y) * ew + x) * 3];
                for (int k3 = 0; k3 < 3; ++k3)
                   o[k3] = uint8_t(std::clamp(g[k3] * k * g[3] / 255.0f, 0.0f, 255.0f));
                lit += (o[0] | o[1] | o[2]) > 8;
             }
       } else if (c.window && c.glow > 0) {
-         for (size_t i = 0; i < N; ++i) {
-            const uint8_t *a = &rgba[i * 4];
+         for (size_t i = 0; i < EN; ++i) {
+            const uint8_t *a = &eRgba[i * 4];
             if (!lit_pane(a))
                continue;
             for (int k3 = 0; k3 < 3; ++k3)
@@ -561,10 +615,10 @@ inline Result prepare(const std::string &dir, const std::string &name, const Cla
          }
          // a few lit texels are a highlight, not a lit window (the lit
          // windows of the original's city are 2-25% pane)
-         if (lit < int(N / 100))
+         if (lit < int(EN / 100))
             lit = 0;
       }
-      if (lit > 0 && write_png(pE, e.data(), w, h, 3))
+      if (lit > 0 && write_png(pE, e.data(), ew, eh, 3))
          res.glows = true;
       else if (FILE *f = fopen(pNoE.c_str(), "wb"))
          fclose(f);

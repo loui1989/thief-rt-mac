@@ -38,12 +38,17 @@
 
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <chrono>
 #include <cmath>
 #include <cstdarg>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <condition_variable>
+#include <memory>
+#include <mutex>
+#include <thread>
 #include <deque>
 #include <map>
 #include <string>
@@ -252,6 +257,8 @@ struct Ui {
 
 namespace rtmat { struct Class; }
 
+struct MatJob;
+
 struct RtTexture {
    uint32_t serial = 0;
    char name[160] = {};
@@ -270,7 +277,12 @@ struct RtTexture {
    bool hasAlpha = false;  // any texel not fully opaque
    bool cutout = false;    // any texel see-through (alpha < 50%)
    bool white = false;     // the 1x1 white "no texture" texture
+   // its material maps being made (off the main thread), until they are done
+   // it is given to RTGL1 as it is, under its plain name
+   std::shared_ptr<MatJob> job;
 };
+
+void settle_job(RtTexture &t);
 
 uint32_t g_textureSerial = 0;
 std::deque<RtTexture> g_textures;   // never freed: world groups refer to them
@@ -281,6 +293,7 @@ bool g_alphaTest = false;
 
 void copy_pixels(RtTexture &t, int width, int height, const void *rgba, int rowBytes)
 {
+   settle_job(t);   // (a job reads the pixels)
    t.width = width;
    t.height = height;
    t.rgba.resize(size_t(width) * height * 4);
@@ -350,90 +363,224 @@ std::vector<uint8_t> *illum_image(const std::string &path, int &w, int &h)
    return it->second.first.empty() ? nullptr : &it->second.first;
 }
 
-// The texture's RTGL1 name: its material name (its file, its pixels, its
-// class) when it came from an image file, and its maps made; else dark.t<n>.
-void name_texture(RtTexture *t)
+// ---- material maps, made off the main thread --------------------------------
+//
+// Making a texture's maps takes a while (an HD pack's 2048 texture: a second or
+// so), and a mission has hundreds of textures: made as the first frame drew
+// them, the game stood still for minutes. So each is made by a pool of
+// threads; the texture is shown as it is meanwhile, and with its maps and its
+// crevices from the frame after they are done. A small texture whose maps
+// are made already is done at once (no frame without its bumps).
+
+struct MatJob {
+   // what it is made from: the texture's pixels stay as they are while the job
+   // lives (settle_job before they change)
+   const uint8_t *rgba = nullptr;
+   int w = 0, h = 0;
+   const rtmat::Class *cls = nullptr;
+   std::string source, illumMap;
+   const std::vector<uint8_t> *glowMap = nullptr;
+   int gw = 0, gh = 0;
+   float illumStrength = 0.0f, crevice = 0.0f;
+   // what it makes
+   char name[160] = {};
+   rtmat::Result result;
+   std::vector<uint8_t> creviced;
+   // 0 waiting, 1 being made, 2 done, 3 given up
+   std::atomic<int> state{0};
+};
+
+void run_job(MatJob &j)
 {
-   t->polished = t->glows = t->mapsNone = false;
-   t->glow = 0.0f;
-   t->cls = nullptr;
-   if (g_cfg.materials && !t->source.empty() && !g_rtDir.empty()) {
-      if (g_matDir.empty()) {
-         g_matDir = g_rtDir + "/mat_dev";
-         mkdir(g_matDir.c_str(), 0755);
-      }
-      rtmat::load_table(g_rtDir);
-      const rtmat::Class *c = rtmat::class_of(t->source);
-      if (c) {
-         uint32_t h = rtmat::fnv(t->rgba.data(), t->rgba.size());
-         h = rtmat::fnv(&t->width, sizeof(t->width), h);
-         h ^= c->hash * 0x9e3779b1u;
-         h ^= rtmat::kMapsVersion * 0x85ebca6bu;
-         h ^= uint32_t(g_cfg.crevice * 20.0f + 0.5f) * 0xc2b2ae35u;
-         t->cls = c;
-         if (t->illumStrength > 0)
-            h = rtmat::fnv(t->illumMap.data(), t->illumMap.size(), h ^ uint32_t(t->illumStrength * 1000.0f));
-         // (no dots: RTGL1 takes what follows the last dot for an extension and
-         // drops it, and then finds none of the maps)
-         snprintf(t->name, sizeof(t->name), "m_%s_%08x", rtmat::file_safe(t->source).c_str(), h);
-         int gw = 0, gh = 0;
-         std::vector<uint8_t> *glowMap = t->illumStrength > 0 && !t->illumMap.empty()
-                                            ? illum_image(t->illumMap, gw, gh) : nullptr;
-         const rtmat::Result r = rtmat::prepare(g_matDir, t->name, *c, t->rgba.data(), t->width, t->height,
-                                                glowMap, gw, gh, t->illumStrength);
-         t->polished = r.polished;
-         t->glows = r.glows;
-         t->glow = r.glow;
-         t->mapsNone = r.none;
-         return;
-      }
+   uint32_t h = rtmat::fnv(j.rgba, size_t(j.w) * j.h * 4);
+   h = rtmat::fnv(&j.w, sizeof(j.w), h);
+   h ^= j.cls->hash * 0x9e3779b1u;
+   h ^= rtmat::kMapsVersion * 0x85ebca6bu;
+   h ^= uint32_t(j.crevice * 20.0f + 0.5f) * 0xc2b2ae35u;
+   if (j.illumStrength > 0)
+      h = rtmat::fnv(j.illumMap.data(), j.illumMap.size(), h ^ uint32_t(j.illumStrength * 1000.0f));
+   // (no dots: RTGL1 takes what follows the last dot for an extension and
+   // drops it, and then finds none of the maps)
+   snprintf(j.name, sizeof(j.name), "m_%s_%08x", rtmat::file_safe(j.source).c_str(), h);
+   j.result = rtmat::prepare(g_matDir, j.name, *j.cls, j.rgba, j.w, j.h,
+                             j.glowMap, j.gw, j.gh, j.illumStrength);
+   // crevices darkened in its colour (rt_materials.h)
+   if (j.crevice > 0.0f && !j.result.none && j.cls->bump > 0) {
+      j.creviced.assign(j.rgba, j.rgba + size_t(j.w) * j.h * 4);
+      rtmat::crevice_albedo(j.creviced, j.w, j.h, *j.cls, j.crevice);
    }
-   snprintf(t->name, sizeof(t->name), "dark.t%u", t->serial);
 }
 
-// The RTGL1 name for a texture, uploading its pixels first if they changed.
+struct MatPool {
+   std::mutex m;
+   std::condition_variable cv;
+   std::deque<std::shared_ptr<MatJob>> queue;
+   unsigned threads = 0;
+
+   void push(std::shared_ptr<MatJob> job)
+   {
+      {
+         std::lock_guard<std::mutex> lock(m);
+         queue.push_back(std::move(job));
+      }
+      if (!threads) {
+         // (left running to the end: the pool is never freed)
+         const unsigned cores = std::thread::hardware_concurrency();
+         threads = std::clamp(cores > 2 ? cores - 2 : 1u, 1u, 8u);
+         for (unsigned i = 0; i < threads; ++i)
+            std::thread([this] { work(); }).detach();
+      }
+      cv.notify_one();
+   }
+
+   void work()
+   {
+      for (;;) {
+         std::shared_ptr<MatJob> job;
+         {
+            std::unique_lock<std::mutex> lock(m);
+            cv.wait(lock, [this] { return !queue.empty(); });
+            job = std::move(queue.front());
+            queue.pop_front();
+         }
+         int waiting = 0;
+         if (!job->state.compare_exchange_strong(waiting, 1))
+            continue;   // given up
+         run_job(*job);
+         job->state.store(2);
+      }
+   }
+
+   size_t waiting()
+   {
+      std::lock_guard<std::mutex> lock(m);
+      return queue.size();
+   }
+};
+
+MatPool &mat_pool()
+{
+   static MatPool *s_pool = new MatPool;   // (never freed: its threads run on)
+   return *s_pool;
+}
+
+// The texture's job given up (or waited for, when it is being made): its
+// pixels are about to change or go.
+void settle_job(RtTexture &t)
+{
+   if (!t.job)
+      return;
+   int waiting = 0;
+   if (!t.job->state.compare_exchange_strong(waiting, 3))
+      while (t.job->state.load() == 1)
+         std::this_thread::sleep_for(std::chrono::milliseconds(1));
+   t.job.reset();
+}
+
+// the texture's material class, when it gets maps
+const rtmat::Class *material_class(const RtTexture *t)
+{
+   if (!g_cfg.materials || t->source.empty() || g_rtDir.empty())
+      return nullptr;
+   if (g_matDir.empty()) {
+      g_matDir = g_rtDir + "/mat_dev";
+      mkdir(g_matDir.c_str(), 0755);
+   }
+   rtmat::load_table(g_rtDir);
+   return rtmat::class_of(t->source);
+}
+
+// gives RTGL1 the picture under this name (or shares the one it has)
+bool provide_texture(RtTexture *t, const char *name, const uint8_t *pixels)
+{
+   snprintf(t->name, sizeof(t->name), "%s", name);
+   auto ref = g_nameRefs.find(t->name);
+   if (ref != g_nameRefs.end()) {
+      ++ref->second;   // the same picture, already given to RTGL1
+      return t->provided = true;
+   }
+   auto details = RgOriginalTextureDetailsEXT{
+      .sType = RG_STRUCTURE_TYPE_ORIGINAL_TEXTURE_DETAILS_EXT,
+      .pNext = nullptr,
+      .flags = 0,
+      .format = RG_FORMAT_R8G8B8A8_SRGB,
+   };
+   auto info = RgOriginalTextureInfo{
+      .sType = RG_STRUCTURE_TYPE_ORIGINAL_TEXTURE_INFO,
+      .pNext = &details,
+      .pTextureName = t->name,
+      .pPixels = pixels,
+      .size = {uint32_t(t->width), uint32_t(t->height)},
+      .filter = RG_SAMPLER_FILTER_AUTO,
+      .addressModeU = RG_SAMPLER_ADDRESS_MODE_REPEAT,
+      .addressModeV = RG_SAMPLER_ADDRESS_MODE_REPEAT,
+   };
+   t->provided = rt.rgProvideOriginalTexture(&info) == RG_RESULT_SUCCESS;
+   if (t->provided)
+      g_nameRefs[t->name] = 1;
+   return t->provided;
+}
+
+// a finished job's texture, with its maps
+void adopt_job(RtTexture *t)
+{
+   std::shared_ptr<MatJob> j = std::move(t->job);
+   if (t->provided)
+      release_name(t->name);
+   t->provided = false;
+   t->cls = j->cls;
+   t->polished = j->result.polished;
+   t->glows = j->result.glows;
+   t->glow = j->result.glow;
+   t->mapsNone = j->result.none;
+   provide_texture(t, j->name, j->creviced.empty() ? t->rgba.data() : j->creviced.data());
+}
+
+// The RTGL1 name for a texture, uploading its pixels first if they changed:
+// its material name (its file, its pixels, its class) when it came from an
+// image file and its maps are made; else dark.t<n>.
 const char *texture_name(RtTexture *t)
 {
    if (!t || t->white || t->rgba.empty())
       return nullptr;
    if (t->dirty) {
+      settle_job(*t);
       if (t->provided)
          release_name(t->name);
       t->provided = false;
-      name_texture(t);
-      auto ref = g_nameRefs.find(t->name);
-      if (ref != g_nameRefs.end()) {
-         ++ref->second;   // the same picture, already given to RTGL1
-         t->provided = true;
-      } else {
-         auto details = RgOriginalTextureDetailsEXT{
-            .sType = RG_STRUCTURE_TYPE_ORIGINAL_TEXTURE_DETAILS_EXT,
-            .pNext = nullptr,
-            .flags = 0,
-            .format = RG_FORMAT_R8G8B8A8_SRGB,
-         };
-         // crevices darkened in its colour (rt_materials.h)
-         std::vector<uint8_t> creviced;
-         if (t->cls && g_cfg.crevice > 0.0f) {
-            creviced = t->rgba;
-            rtmat::crevice_albedo(creviced, t->width, t->height, *t->cls, g_cfg.crevice);
-         }
-         auto info = RgOriginalTextureInfo{
-            .sType = RG_STRUCTURE_TYPE_ORIGINAL_TEXTURE_INFO,
-            .pNext = &details,
-            .pTextureName = t->name,
-            .pPixels = creviced.empty() ? t->rgba.data() : creviced.data(),
-            .size = {uint32_t(t->width), uint32_t(t->height)},
-            .filter = RG_SAMPLER_FILTER_AUTO,
-            .addressModeU = RG_SAMPLER_ADDRESS_MODE_REPEAT,
-            .addressModeV = RG_SAMPLER_ADDRESS_MODE_REPEAT,
-         };
-         t->provided = rt.rgProvideOriginalTexture(&info) == RG_RESULT_SUCCESS;
-         if (t->provided)
-            g_nameRefs[t->name] = 1;
-      }
+      t->polished = t->glows = t->mapsNone = false;
+      t->glow = 0.0f;
+      t->cls = nullptr;
       t->dirty = false;
+      if (const rtmat::Class *c = material_class(t)) {
+         auto j = std::make_shared<MatJob>();
+         j->rgba = t->rgba.data();
+         j->w = t->width;
+         j->h = t->height;
+         j->cls = c;
+         j->source = t->source;
+         j->illumMap = t->illumMap;
+         j->illumStrength = t->illumStrength;
+         j->crevice = g_cfg.crevice;
+         if (t->illumStrength > 0 && !t->illumMap.empty())
+            j->glowMap = illum_image(t->illumMap, j->gw, j->gh);   // (main thread: its cache)
+         t->job = j;
+         if (size_t(t->width) * t->height <= 256 * 256) {
+            // small: at once
+            j->state.store(1);
+            run_job(*j);
+            j->state.store(2);
+            adopt_job(t);
+            return t->provided ? t->name : nullptr;
+         }
+         mat_pool().push(j);
+      }
+      char plain[32];
+      snprintf(plain, sizeof(plain), "dark.t%u", t->serial);
+      provide_texture(t, plain, t->rgba.data());
    }
+   if (t->job && t->job->state.load() == 2)
+      adopt_job(t);
    return t->provided ? t->name : nullptr;
 }
 
@@ -1550,6 +1697,7 @@ void DestroyTexture(void *handle)
    for (auto &w : g_worldTextures)
       if (w.second == t)
          w.second = nullptr;
+   settle_job(*t);
    if (t->provided)
       release_name(t->name);
    t->provided = false;
@@ -3487,6 +3635,18 @@ void RenderRTSceneEnd(void)
    flush_lights();
    upload_world();
    upload_objects();
+   // the material maps being made (texture_name), now and then
+   if ((g_frameNumber & 63) == 0) {
+      static size_t s_reported = 0;
+      const size_t n = mat_pool().threads ? mat_pool().waiting() : 0;
+      if (n != s_reported) {
+         if (n)
+            fprintf(stderr, "RT: material maps: %zu textures to go (%u threads)\n", n, mat_pool().threads);
+         else
+            fprintf(stderr, "RT: material maps: all made\n");
+         s_reported = n;
+      }
+   }
    ++g_frameNumber;
    g_inScene = false;
    g_RenderRTCaptureVertices = 0;
