@@ -98,10 +98,6 @@ void r3_start_block()
          }   
 
          cx.w2c_invalid = FALSE;
-         if (r3d_glob.cur_space == R3_LINEAR_SPACE)
-            r3d_rt_c2w_valid = 0;
-         else
-            _r3_rt_update_c2w();
       }
 
       // this is just o2c = w2c * o2w
@@ -112,6 +108,17 @@ void r3_start_block()
       }
   }
 
+
+   // The ray tracer's camera-to-world is a global, but each r3d context has
+   // its own camera: a second context (an inventory item, a HUD model, the
+   // sky) rebuilt it for itself and the main view's next objects were then
+   // taken back to the world with that camera -- captured metres from where
+   // they are, so they vanished from their place.  Taken from the context
+   // in use at every block.
+   if (r3d_glob.cur_space == R3_LINEAR_SPACE)
+      r3d_rt_c2w_valid = 0;
+   else
+      _r3_rt_update_c2w();
 
    r3d_state.in_block = TRUE;
 }
