@@ -28,6 +28,9 @@
 
 namespace rtmat {
 
+// part of every material name: a new version makes every map again
+constexpr uint32_t kMapsVersion = 2;
+
 // ---- PNG, write and read (zlib) ----------------------------------------------
 
 inline uint32_t crc32_of(const uint8_t *p, size_t n, uint32_t c = 0)
@@ -531,8 +534,9 @@ inline Result prepare(const std::string &dir, const std::string &name, const Cla
                e[i * 3 + k3] = uint8_t(std::min(255.0f, a[k3] * 1.15f));
             ++lit;
          }
-         // a few lit texels are a highlight, not a lit window
-         if (lit < int(N / 50))
+         // a few lit texels are a highlight, not a lit window (the lit
+         // windows of the original's city are 2-25% pane)
+         if (lit < int(N / 100))
             lit = 0;
       }
       if (lit > 0 && write_png(pE, e.data(), w, h, 3))
@@ -626,7 +630,8 @@ inline std::string file_safe(const std::string &s)
 {
    std::string o;
    for (char ch : s)
-      o += (isalnum((unsigned char)ch) || ch == '-' || ch == '.') ? char(tolower((unsigned char)ch)) : '_';
+      // (no dots: RTGL1 would take the rest of the name for an extension)
+      o += (isalnum((unsigned char)ch) || ch == '-') ? char(tolower((unsigned char)ch)) : '_';
    if (o.size() > 100)
       o = o.substr(o.size() - 100);
    return o;

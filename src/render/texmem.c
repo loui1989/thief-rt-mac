@@ -275,6 +275,9 @@ static void _texmem_unuse_handle(int handle)
 
 // wrapper on the portal create mipmapped texture stuff
 // in dbg, keeps a count to try and stay on top of usage
+extern void ResImageCopyAttachments(const void *from, const void *to, int w, int h);
+extern void ResImageFreeCopyAttachments(const void *bitmap);
+
 grs_bitmap *texmem_convert_tmap(grs_bitmap *bm)
 {
    DoIfDBG(tm_cnt++);
@@ -290,6 +293,7 @@ void texmem_free_tmap(grs_bitmap *bm)
 #endif
    if (bm->align!=0)
       palmgr_release_slot(bm->align);
+   ResImageFreeCopyAttachments(bm);
    free_mipmapped_texture(bm,TRUE);
 }
 
@@ -557,6 +561,10 @@ BOOL texmem_interpret_new_res(IRes *pRes,
    // Then substitute it in for the resource's own data, and tell it
    // to look at this index.
    pbm_new = texmem_convert_tmap(pbm);
+   // the copy keeps the image's file name, material file and full colour
+   // (resimage.cpp): the resource's own data is replaced by it
+   if (pbm_new && pbm_new->w == pbm->w && pbm_new->h == pbm->h)
+      ResImageCopyAttachments(pbm, pbm_new, pbm->w, pbm->h);
    IRes_Unlock(pRes);
    if (use_idx != TEXMEM_NO_HND)
    {

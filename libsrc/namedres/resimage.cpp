@@ -260,6 +260,43 @@ extern "C" int ResImageMaterialTile(const void* bitmap, float* su, float* sv)
 	return *su != 1.0f || *sv != 1.0f;
 }
 
+// A copy of an image made elsewhere (texmem's mip-mapped world textures)
+// takes its name, material and full colour with it. The copy's colour is its
+// own allocation, freed by ResImageFreeCopyAttachments.
+extern "C" void ResImageCopyAttachments(const void* from, const void* to, int w, int h)
+{
+	if (!from || !to || from == to)
+		return;
+	sResImageInfo info;
+	if (ResImageInfoFind(from, &info))
+	{
+		sResImageInfo* copy = (sResImageInfo*)malloc(sizeof(sResImageInfo));
+		if (copy)
+		{
+			*copy = info;
+			ResImageInfoRegister(to, copy);
+		}
+	}
+	const unsigned char* rgba = ResTrueColorFind(from);
+	if (rgba && w > 0 && h > 0)
+	{
+		unsigned char* copy = (unsigned char*)malloc((size_t)w * h * 4);
+		if (copy)
+		{
+			memcpy(copy, rgba, (size_t)w * h * 4);
+			ResTrueColorRegister(to, copy);
+		}
+	}
+}
+
+extern "C" void ResImageFreeCopyAttachments(const void* bitmap)
+{
+	const unsigned char* rgba = ResTrueColorFind(bitmap);
+	ResTrueColorForget(bitmap);
+	free((void*)rgba);
+	ResImageInfoForget(bitmap);
+}
+
 void* cImageResource::LoadData(ulong* pSize, ulong* pTimestamp, IResMemOverride* pResMem)
 {
 	cAutoResThreadLock lock{};

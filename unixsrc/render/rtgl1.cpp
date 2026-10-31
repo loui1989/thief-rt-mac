@@ -362,9 +362,12 @@ void name_texture(RtTexture *t)
          uint32_t h = rtmat::fnv(t->rgba.data(), t->rgba.size());
          h = rtmat::fnv(&t->width, sizeof(t->width), h);
          h ^= c->hash * 0x9e3779b1u;
+         h ^= rtmat::kMapsVersion * 0x85ebca6bu;
          if (t->illumStrength > 0)
             h = rtmat::fnv(t->illumMap.data(), t->illumMap.size(), h ^ uint32_t(t->illumStrength * 1000.0f));
-         snprintf(t->name, sizeof(t->name), "m.%s.%08x", rtmat::file_safe(t->source).c_str(), h);
+         // (no dots: RTGL1 takes what follows the last dot for an extension and
+         // drops it, and then finds none of the maps)
+         snprintf(t->name, sizeof(t->name), "m_%s_%08x", rtmat::file_safe(t->source).c_str(), h);
          int gw = 0, gh = 0;
          std::vector<uint8_t> *glowMap = t->illumStrength > 0 && !t->illumMap.empty()
                                             ? illum_image(t->illumMap, gw, gh) : nullptr;
@@ -433,7 +436,7 @@ const char *flame_texture(RtTexture *base, float r, float g, float b)
    const int qg = int(std::clamp(g * k, 0.0f, 1.0f) * 15.0f + 0.5f);
    const int qb = int(std::clamp(b * k, 0.0f, 1.0f) * 15.0f + 0.5f);
    char name[200];
-   snprintf(name, sizeof(name), "flame.%08x.%x%x%x",
+   snprintf(name, sizeof(name), "flame_%08x_%x%x%x",
             rtmat::fnv(base->rgba.data(), base->rgba.size()), qr, qg, qb);
    static std::unordered_set<std::string> s_made;
    if (!s_made.count(name)) {
