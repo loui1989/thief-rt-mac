@@ -559,6 +559,17 @@ inline void crevice_albedo(std::vector<uint8_t> &rgba, int w, int h, const Class
    }
 }
 
+// Whether a texture's maps are on disk already (prepare would only look).
+inline bool maps_made(const std::string &dir, const std::string &name, const Class &c)
+{
+   if (c.none)
+      return true;
+   const std::string base = dir + "/" + name;
+   if (!exists(base + "_orm.png") || (!exists(base + "_e.png") && !exists(base + "_e.none")))
+      return false;
+   return c.bump <= 0 || (exists(base + "_n.png") && exists(base + "_h.png"));
+}
+
 // Makes the maps of a texture (if they are not there yet) and says what it is.
 // glowMap: a NewDark illum_map's RGBA (w x h of its own), or null.
 inline Result prepare(const std::string &dir, const std::string &name, const Class &c,

@@ -403,7 +403,8 @@ struct MatJob {
    std::atomic<int> state{0};
 };
 
-void run_job(MatJob &j)
+// the job's RTGL1 name (its file, a hash of its pixels and class)
+void job_name(MatJob &j)
 {
    uint32_t h = rtmat::fnv(j.rgba, size_t(j.w) * j.h * 4);
    h = rtmat::fnv(&j.w, sizeof(j.w), h);
@@ -415,6 +416,12 @@ void run_job(MatJob &j)
    // (no dots: RTGL1 takes what follows the last dot for an extension and
    // drops it, and then finds none of the maps)
    snprintf(j.name, sizeof(j.name), "m_%s_%08x", rtmat::file_safe(j.source).c_str(), h);
+}
+
+void run_job(MatJob &j)
+{
+   if (!j.name[0])
+      job_name(j);
    j.result = rtmat::prepare(g_matDir, j.name, *j.cls, j.rgba, j.w, j.h,
                              j.glowMap, j.gw, j.gh, j.illumStrength);
    // crevices darkened in its colour (rt_materials.h)
@@ -568,6 +575,43 @@ void adopt_job(RtTexture *t)
       provide_texture(t, j->name, j->creviced.data(), j->cw, j->ch);
 }
 
+bool g_preloading = false;
+const char *texture_name(RtTexture *t);
+
+// A mission's textures, all of them, mapped by the threads before its first
+// frame (all cores; the frame waits): the walls are bump-mapped from the
+// start instead of turning from flat to bumped in the first seconds, and
+// none of them is mapped on the main thread during play.
+void preload_textures()
+{
+   if (!g_cfg.materials || g_rtDir.empty())
+      return;
+   const auto t0 = std::chrono::steady_clock::now();
+   std::vector<RtTexture *> started;
+   g_preloading = true;
+   for (RtTexture &t : g_textures)
+      if (t.dirty && !t.white && !t.rgba.empty() && !t.source.empty()) {
+         texture_name(&t);
+         if (t.job)
+            started.push_back(&t);
+      }
+   g_preloading = false;
+   if (started.empty())
+      return;
+   size_t made = 0;
+   for (RtTexture *t : started) {
+      while (t->job && t->job->state.load() < 2)
+         std::this_thread::sleep_for(std::chrono::milliseconds(2));
+      ++made;
+   }
+   // given to RTGL1 now, each with its maps (texture_name adopts the jobs)
+   for (RtTexture *t : started)
+      texture_name(t);
+   fprintf(stderr, "RT: material maps for %zu textures ready in %.1f s (%u threads)\n", made,
+           std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count(),
+           mat_pool().threads);
+}
+
 // The RTGL1 name for a texture, uploading its pixels first if they changed:
 // its material name (its file, its pixels, its class) when it came from an
 // image file and its maps are made; else dark.t<n>.
@@ -597,16 +641,28 @@ const char *texture_name(RtTexture *t)
          if (t->illumStrength > 0 && !t->illumMap.empty())
             j->glowMap = illum_image(t->illumMap, j->gw, j->gh);   // (main thread: its cache)
          t->job = j;
+         if (g_preloading) {
+            // a mission loading (preload_textures): made by the threads, all
+            // at once, and given to the path tracer when they all are
+            mat_pool().push(j);
+            return nullptr;
+         }
          if (size_t(t->width) * t->height <= 256 * 256) {
-            // small: at once
-            j->state.store(1);
+            // small and its maps made already (on disk): at once, so it is
+            // never seen flat. Making new maps waits for the threads (each
+            // took ~30 ms here: the hitches as new textures came into view)
             const auto t0 = std::chrono::steady_clock::now();
-            run_job(*j);
+            job_name(*j);
+            if (rtmat::maps_made(g_matDir, j->name, *c)) {
+               j->state.store(1);
+               run_job(*j);
+               j->state.store(2);
+               g_frameTexSeconds += std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
+               ++g_frameMapsInline;
+               adopt_job(t);
+               return t->provided ? t->name : nullptr;
+            }
             g_frameTexSeconds += std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
-            ++g_frameMapsInline;
-            j->state.store(2);
-            adopt_job(t);
-            return t->provided ? t->name : nullptr;
          }
          mat_pool().push(j);
       }
@@ -1484,10 +1540,16 @@ std::vector<WorldGroup> g_world;
 std::unordered_map<uint64_t, size_t> g_worldIndex;
 std::unordered_map<int, RtTexture *> g_worldTextures;
 
+bool g_worldFresh = false;   // a new world: its textures to preload
+
 void upload_world()
 {
    if (!g_worldValid)
       return;
+   if (g_worldFresh) {
+      g_worldFresh = false;
+      preload_textures();
+   }
    static uint32_t s_reported = 0;
    size_t tris = 0, cutTris = 0;
    for (size_t i = 0; i < g_world.size(); ++i) {
@@ -2785,11 +2847,14 @@ void draw_frame(bool sceneDrawn)
       .farScattering = volFarDens,
       .densityCurve = 1.0f,
       .occludeEmission = false,
-      .ditherRadius = 2.0f,
+      .ditherRadius = 5.0f,   // (Raze RT's: with the depth gate)
       .ditherRadiusZ = 1.0f,
       .spatialBlur = 1.0f,
       .lightNearFade = 0.3f,
-      .depthGate = 0.0f,
+      // Raze RT's: each light's haze skips the cells behind what is seen
+      // (shader 0015 runs only with the gate on), the saving that made
+      // volumetric light affordable there
+      .depthGate = 1.0f,
       .depthGateBias = 0.0f,
       .depthGateFeather = 1.0f,
       .depthGateTaps = 5,
@@ -4230,6 +4295,7 @@ void RenderRTWorldPolygon(int textureId, int flags, int count, const float *xyz,
 void RenderRTWorldEnd(void)
 {
    g_worldValid = true;
+   g_worldFresh = true;
    size_t verts = 0;
    for (const WorldGroup &g : g_world)
       verts += g.verts.size();
