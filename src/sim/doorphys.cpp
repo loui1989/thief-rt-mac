@@ -455,9 +455,73 @@ static void LogDoor(int o_id, const char* what)
            (double)p->open, (double)p->closed, (double)p->base_speed);
 }
 
+// The doors in motion, followed every physics frame until they stop: where
+// they are, how fast they move and turn -- and when one is further from its
+// hinge than it can be, the moment it left it.
+struct sDoorTrace
+{
+   int obj;
+   float age, sinceLog;
+   BOOL offHinge;
+};
+static cDynArray<sDoorTrace> g_DoorTraces;
+
+static void DoorTraceStart(int o_id)
+{
+   for (int i = 0; i < g_DoorTraces.Size(); ++i)
+      if (g_DoorTraces[i].obj == o_id)
+      {
+         g_DoorTraces[i].age = 0;
+         return;
+      }
+   sDoorTrace t = { o_id, 0.0f, 0.0f, FALSE };
+   g_DoorTraces.Append(t);
+}
+
+void DoorTraceFrame(float dt)
+{
+   static int s_lines = 0;
+   for (int i = 0; i < g_DoorTraces.Size(); )
+   {
+      sDoorTrace& t = g_DoorTraces[i];
+      t.age += dt;
+      t.sinceLog += dt;
+      cPhysModel* pModel = g_PhysModels.GetActive(t.obj);
+      sDoorProp* p = IsDoor(t.obj) ? GetDoorProperty(t.obj) : NULL;
+      if (!pModel || !p || t.age > 12.0f ||
+          ((p->status == kDoorOpen || p->status == kDoorClosed || p->status == kDoorHalt) && t.age > 0.5f))
+      {
+         g_DoorTraces.DeleteItem(i);
+         continue;
+      }
+      const mxs_vector& at = ObjPosGet(t.obj)->loc.vec;
+      const mxs_angvec& fac = ObjPosGet(t.obj)->fac;
+      const float fromBase = mx_dist_vec(&at, &p->base_location);
+      // (a rotating door's origin moves at most twice its centre-of-mass
+      // offset from where it was closed)
+      const float most = 2.0f * mx_mag_vec(&pModel->GetCOGOffset()) + 1.0f;
+      const mxs_vector& v = pModel->GetVelocity();
+      const mxs_vector& w = pModel->GetDynamics()->GetRotationalVelocity();
+      if (s_lines < 400 && (t.sinceLog >= 0.2f || (!t.offHinge && fromBase > most)))
+      {
+         ++s_lines;
+         t.sinceLog = 0;
+         fprintf(stderr, "Door %d %s%.2f s: status %d, at (%.2f %.2f %.2f) %.2f ft from closed, facing %d %d %d, "
+                 "velocity (%.2f %.2f %.2f), turning (%.2f %.2f %.2f), step %.3f s, location held %d\n",
+                 t.obj, (!t.offHinge && fromBase > most) ? "OFF ITS HINGE at " : "", t.age, p->status,
+                 at.x, at.y, at.z, fromBase, fac.tx, fac.ty, fac.tz, v.x, v.y, v.z, w.x, w.y, w.z, dt,
+                 (int)pModel->IsLocationControlled());
+      }
+      if (fromBase > most)
+         t.offHinge = TRUE;
+      ++i;
+   }
+}
+
 BOOL DoorStartOpening(int o_id)
 {
    LogDoor(o_id, "starts opening");
+   DoorTraceStart(o_id);
    cPhysModel  *pModel = g_PhysModels.GetActive(o_id);
    sDoorProp   *pDoorProp;
 
@@ -551,6 +615,7 @@ BOOL DoorStartOpening(int o_id)
 BOOL DoorStartClosing(int o_id)
 {
    LogDoor(o_id, "starts closing");
+   DoorTraceStart(o_id);
    cPhysModel  *pModel = g_PhysModels.GetActive(o_id);
    sDoorProp   *pDoorProp;
 

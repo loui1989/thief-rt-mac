@@ -6795,6 +6795,10 @@ static void PhysicsFrame(mxs_real dt)
 
    pObjSys->Unlock();
    CreaturePosPropUnlock();
+
+   // (diagnostics: the doors seen flying off their hinges -- doorphys.cpp)
+   extern void DoorTraceFrame(float dt);
+   DoorTraceFrame(dt);
 }
 
 void PhysClearTimers()
