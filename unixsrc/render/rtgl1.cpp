@@ -966,7 +966,11 @@ void upload_objects()
          // one coming or going made the path tracer rebuild a piece of the
          // scene, and a long walk round the city gave it more and more.
          const float ext = std::max({c.bmax[0] - c.bmin[0], c.bmax[1] - c.bmin[1], c.bmax[2] - c.bmin[2], 0.0f});
-         const float keepAt = std::clamp(12.0f + 12.0f * ext, 12.0f, 40.0f) + (c.keptOut ? 8.0f : 0.0f);
+         // (a bottle or a cabbage out of view shadows nothing seen from more
+         // than a few metres: Black Parade's markets kept ~400 such models,
+         // 8000 primitives a frame, costing milliseconds of uploading)
+         const float keepBase = std::clamp(5.0f + 14.0f * ext, 5.0f, 40.0f);
+         const float keepAt = keepBase + (c.keptOut ? std::min(8.0f, 0.5f * keepBase) : 0.0f);
          if (dx * dx + dy * dy + dz * dz > std::min(keepAt, kKeepDistance) * std::min(keepAt, kKeepDistance)) {
             if (c.givenFrame + 1 == g_frameNumber && dx * dx + dy * dy + dz * dz < 20.0f * 20.0f)
                log_model_change(obj, "leaves the scene: not drawn by the game for %u frames, %.1f m away (kept to %.1f m)",
