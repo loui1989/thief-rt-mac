@@ -93,6 +93,7 @@ struct Settings {
    int dynres = 0;            // dynamic resolution's target fps, 0 off
    int outputHeight = 0;      // the frame's height in pixels, 0 = the screen's own (Retina)
    bool perfLog = false;      // logs/perf.log: where each frame's time goes, every 2 s
+   int frameCap = 60;         // the most frames a second (the game's own pacing: 60)
    int reach = 40;            // lights fade out with their walking distance (metres); 0: nearest maxLights
    int maxLights = 64;        // lights given to the path tracer, nearest first; 0 all
    int flicker = 0;           // flickering lights: 0 smoothed, 1 as the game, 2 nearly steady
@@ -179,6 +180,7 @@ void load_settings()
       else if (k == "min_roughness") g_cfg.minRoughness = std::clamp(value, 0.0f, 1.0f);
       else if (k == "output_height") g_cfg.outputHeight = std::clamp(int(value), 0, 4320);
       else if (k == "perf_log") g_cfg.perfLog = value != 0;
+      else if (k == "frame_cap") g_cfg.frameCap = std::clamp(int(value), 30, 240);
    }
    fclose(f);
 }
@@ -194,13 +196,13 @@ void save_settings()
       return;
    fprintf(f, "upscale = %d\nscale = %.2f\nfps = %d\nvsync = %d\nlight = %.3f\nsky = %.3f\n"
               "light_size = %.3f\nglow = %.3f\nwater = %d\nsprite_glow = %.3f\ngi = %d\n"
-              "volumetric = %d\ndynres = %d\nmax_lights = %d\nmin_roughness = %.2f\nlight_cull = %d\nflicker = %d\nambient = %.3f\nsmooth_models = %d\nfixtures_pass = %d\nlight_fix = %d\nlight_response = %d\nev_min = %d\nlight_candidates = %d\nsteady_faces = %d\nlight_fade = %d\nbloom = %d\nrt_detection = %d\nreach = %d\noutput_height = %d\nperf_log = %d\n",
+              "volumetric = %d\ndynres = %d\nmax_lights = %d\nmin_roughness = %.2f\nlight_cull = %d\nflicker = %d\nambient = %.3f\nsmooth_models = %d\nfixtures_pass = %d\nlight_fix = %d\nlight_response = %d\nev_min = %d\nlight_candidates = %d\nsteady_faces = %d\nlight_fade = %d\nbloom = %d\nrt_detection = %d\nreach = %d\noutput_height = %d\nperf_log = %d\nframe_cap = %d\n",
            g_cfg.upscale, g_cfg.scale, int(g_cfg.fps), int(g_cfg.vsync), g_cfg.light, g_cfg.sky,
            g_cfg.lightSize, g_cfg.glow, g_cfg.water, g_cfg.spriteGlow, g_cfg.gi,
            int(g_cfg.volumetric), g_cfg.dynres, g_cfg.maxLights, g_cfg.minRoughness,
            int(g_cfg.lightCull), g_cfg.flicker, g_cfg.ambient, int(g_cfg.smoothModels),
            int(g_cfg.fixturesPass), int(g_cfg.lightFix), g_cfg.response, g_cfg.evMin,
-           g_cfg.candidates, int(g_cfg.steadyFaces), int(g_cfg.lightFade), int(g_cfg.bloom), int(g_cfg.rtDetection), g_cfg.reach, g_cfg.outputHeight, int(g_cfg.perfLog));
+           g_cfg.candidates, int(g_cfg.steadyFaces), int(g_cfg.lightFade), int(g_cfg.bloom), int(g_cfg.rtDetection), g_cfg.reach, g_cfg.outputHeight, int(g_cfg.perfLog), g_cfg.frameCap);
    fclose(f);
 }
 
@@ -1599,7 +1601,7 @@ const char *kUpscaleNames[] = {"Off",
                                "MetalFX Custom"};
 
 enum UiRow {
-   kRowUpscale, kRowScale, kRowOutput, kRowDynres, kRowBounces, kRowReach, kRowLights, kRowLightFade, kRowCandidates, kRowLightCull, kRowResponse, kRowFlicker, kRowVolumetric, kRowBloom, kRowVsync,
+   kRowUpscale, kRowScale, kRowOutput, kRowDynres, kRowBounces, kRowReach, kRowLights, kRowLightFade, kRowCandidates, kRowLightCull, kRowResponse, kRowFlicker, kRowVolumetric, kRowBloom, kRowVsync, kRowFrameCap,
    kRowFps, kRowDetection, kRowLight, kRowExposure, kRowAmbient, kRowSky, kRowLightSize, kRowRough, kRowSmooth, kRowSteady, kRowFixtures, kRowLightFix, kRowGlow, kRowWater,
    kRowDebug, kRowFreeze, kRowBackFaces, kRowReuse, kRowBlink, kRowPerf, kRowInspect, kRowReset, kRowCount
 };
@@ -1607,7 +1609,7 @@ enum UiRow {
 const char *kRowLabels[kRowCount] = {
    "Upscaler", "Render resolution", "Output resolution", "Dynamic resolution", "Bounce light", "Light reach", "Lights traced",
    "Lights coming into range", "Lights tried per pixel", "Lights behind walls", "Light changes", "Light flicker",
-   "Volumetric light", "Bloom", "VSync", "FPS counter", "Light gem and guards", "Light brightness", "Darkest exposure", "Ambient light", "Sky brightness",
+   "Volumetric light", "Bloom", "VSync", "Frame rate limit", "FPS counter", "Light gem and guards", "Light brightness", "Darkest exposure", "Ambient light", "Sky brightness",
    "Light size (soft shadows)", "Surface roughness", "Model shading", "Model faces", "Torches and lamps", "Lights in walls", "Lamp glow", "Water",
    "Debug view", "Freeze scene (test)", "Back faces (test)", "Light sampling (test)", "Blink nearest light (test)", "Performance log", "Inspect centre of view", "Reset to defaults",
 };
@@ -1678,6 +1680,9 @@ std::string row_value(int row)
    }
    case kRowBackFaces: return g_dropBackFaces ? "Dropped" : "Shadows only";
    case kRowBlink: return g_blinkTest ? "On" : "Off";
+   case kRowFrameCap:
+      snprintf(buf, sizeof(buf), "%d fps%s", g_cfg.frameCap, g_cfg.frameCap == 60 ? " (as the game)" : "");
+      return buf;
    case kRowPerf: return g_cfg.perfLog ? "On: logs/perf.log" : "Off";
    case kRowReuse: {
       static const char *kReuse[] = {"Normal", "No spatial reuse", "No reuse", "8 shadow rays"};
@@ -1812,6 +1817,14 @@ void change_row(int row, int dir)
    case kRowReuse: g_reuseTest = (g_reuseTest + dir + 4) % 4; return;   // not saved
    case kRowBlink: g_blinkTest = !g_blinkTest; g_blinkId = ~0u; return;   // not saved
    case kRowPerf: g_cfg.perfLog = !g_cfg.perfLog; break;
+   case kRowFrameCap: {
+      static const int kCaps[] = {60, 100, 120};
+      int i = 0;
+      while (i < 3 && kCaps[i] != g_cfg.frameCap)
+         ++i;
+      g_cfg.frameCap = kCaps[((i < 3 ? i : 0) + dir + 3) % 3];
+      break;
+   }
    case kRowFreeze: {
       g_freezeMode = (g_freezeMode + dir + 4) % 4;
       g_freeze = g_freezeMode == 1 || g_freezeMode == 2;
@@ -3004,6 +3017,8 @@ bool segment_blocked(const float a[3], const float b[3])
 extern "C" {
 
 int RenderRTActive(void) { return g_active ? 1 : 0; }
+
+int RenderRTFrameCap(void) { return g_active ? g_cfg.frameCap : 0; }
 
 int RenderRTDetectionWanted(void) { return g_active && g_cfg.rtDetection && g_frameNumber > 2 ? 1 : 0; }
 

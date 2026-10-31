@@ -36,6 +36,12 @@
 
 #include <timings.h>
 #include <platform_services.h>
+#include <algorithm>
+#include <chrono>
+#include <thread>
+#ifdef DARK_RT
+#include <render_rt.h>
+#endif
 
 #include <mprintf.h>
 
@@ -304,7 +310,11 @@ typedef struct _StateRecord
 
 static void SlowFrame(long nMilliseconds)
 {
+   // Asleep for all but the last millisecond, then waiting it out exactly:
+   // the original spun the whole time, a core at full load for nothing.
    uint32 nStart = PlatformMilliseconds();
+   if (nMilliseconds > 1)
+      std::this_thread::sleep_for(std::chrono::milliseconds(nMilliseconds - 1));
    while ((PlatformMilliseconds()-nStart) < (uint32)nMilliseconds)
    {}
 }
@@ -358,6 +368,22 @@ static eLoopMessageResult LGAPI _LoopFunc(void* data, eLoopMessage msg, tLoopMes
             mprintf("[%d] ",gSimTime.nTicks);
 #endif
 
+#ifdef DARK_RT
+         // The ray tracer's frame rate setting (60 as authored, 100 or 120
+         // for a fast display): the frame's least length, and the least
+         // simulated step with it, or game time would run ahead of real time
+         // (the simulation never steps less than 10 ms by itself).
+         if (RenderRTActive())
+         {
+            const int cap = RenderRTFrameCap();
+            if (cap > 0)
+            {
+               nSlowFrameTime = 1000 / cap;
+               gParams.minFrameTime = std::min<tSimTime>(DEFAULT_MIN_SIM_TIME,
+                  (tSimTime)(nSlowFrameTime * SIM_TIME_SECOND / 1000));
+            }
+         }
+#endif
          if (nSlowFrameTime > 0)
          {
 //            nCurrentRealFrameTime = tm_get_millisec_unrecorded();

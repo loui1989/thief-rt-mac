@@ -106,6 +106,9 @@ int RenderRTDetectionWanted(void);
 // Time the game spends on the ray tracer's own preparations (finding the
 // lights, their walking distances, models out of view): on the counter.
 void RenderRTPrepBegin(void);
+// The frame rate setting: the fewest milliseconds a frame takes are 1000 /
+// this (60, 100 or 120); 0 when not set.
+int RenderRTFrameCap(void);
 void RenderRTPrepEnd(void);
 int RenderRTPointLighting(const float pos[3], float *value);
 void RenderRTNoteLighting(float original, float traced);
