@@ -257,6 +257,10 @@ static void BuildContentCatalog(std::vector<sContentItem>& items)
    configured.description =
       "Use configured mod paths; installed mods may require unsupported NewDark features.";
    items.push_back(configured);
+   // mods are installed (cam_mod.ini): the modded campaign first, as the one
+   // meant to be played
+   if (config_is_defined("mod_path"))
+      std::swap(items[items.size() - 2], items[items.size() - 1]);
 
    if (collection)
    {

@@ -553,7 +553,7 @@ inline void crevice_albedo(std::vector<uint8_t> &rgba, int w, int h, const Class
    for (size_t i = 0; i < hg.size(); ++i) {
       const float rel = std::clamp(float(hg[i] / std::max(avg, 0.02)), 0.0f, 2.0f);
       const float d = std::clamp(1.0f - rel, 0.0f, 1.0f);
-      const float f = 1.0f - strength * 0.55f * b * d * (2.0f - d);
+      const float f = 1.0f - strength * 0.85f * b * d * (2.0f - d);
       for (int k = 0; k < 3; ++k)
          rgba[i * 4 + k] = uint8_t(std::clamp(rgba[i * 4 + k] * f + 0.5f, 0.0f, 255.0f));
    }

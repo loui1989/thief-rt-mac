@@ -2248,7 +2248,7 @@ void change_row(int row, int dir)
             t.dirty = true;
       break;
    case kRowBump:
-      g_cfg.bump = std::clamp(std::round(g_cfg.bump * 4.0f) / 4.0f + 0.25f * dir, 0.0f, 3.0f);
+      g_cfg.bump = std::clamp(std::round(g_cfg.bump * 4.0f) / 4.0f + 0.25f * dir, 0.0f, 4.0f);
       break;
    case kRowCrevice:
       g_cfg.crevice = std::clamp(std::round(g_cfg.crevice * 10.0f) / 10.0f + 0.1f * dir, 0.0f, 1.0f);
@@ -2258,7 +2258,7 @@ void change_row(int row, int dir)
             t.dirty = true;
       break;
    case kRowParallax:
-      g_cfg.parallax = std::clamp(std::round(g_cfg.parallax * 200.0f) / 200.0f + 0.005f * dir, 0.0f, 0.06f);
+      g_cfg.parallax = std::clamp(std::round(g_cfg.parallax * 200.0f) / 200.0f + 0.005f * dir, 0.0f, 0.1f);
       break;
    case kRowPolish: g_cfg.polish = !g_cfg.polish; break;
    case kRowWater: g_cfg.water = (g_cfg.water + dir + 3) % 3; break;
