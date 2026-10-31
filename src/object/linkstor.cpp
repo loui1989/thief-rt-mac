@@ -33,6 +33,7 @@
 #include <hshpptem.h>
 
 // Must be last header
+#include <mprintf.h>
 #include <dbmem.h>
 
 static LazyAggMember(IObjectSystem) gpObjSys; 
@@ -435,6 +436,13 @@ STDMETHODIMP cBaseLinkDataStore::Load(RelationID id , IUnknown* fileunk, int fil
       // wrap a DataOpsFile around the tagfile
       IDataOpsFile* opfile = new cDataOpsTagFile(file); 
 
+      // (NewDark relations this engine added: what of their data arrived)
+      const BOOL traceLoad = strcmp(rel->Describe()->name, "DetailAttachement") == 0;
+      int traceRead = 0, traceKept = 0;
+      if (traceLoad)
+         mprintf("Link data %s: block version %d.%d, data version %lu, %d bytes a link here\n",
+                 rel->Describe()->name, v.major, v.minor, version, desc->size);
+
       while(file->TellFromEnd() > 0)
       {
          LinkID link;
@@ -468,17 +476,29 @@ STDMETHODIMP cBaseLinkDataStore::Load(RelationID id , IUnknown* fileunk, int fil
 
          // check for existence
          sLink dummy;
+         ++traceRead;
          if (rel->Get(link,&dummy))
+         {
             Set(link,dat);
+            ++traceKept;
+         }
+         else if (traceLoad)
+            mprintf("Link data %s: link %08x not found\n", rel->Describe()->name, link);
 
          ops->Delete(dat); 
       }
+      if (traceLoad)
+         mprintf("Link data %s: %d read, %d kept\n", rel->Describe()->name, traceRead, traceKept);
       SafeRelease(opfile);
       SafeRelease(ops); 
       cleanup_file(file);
    }
    else 
+   {
+      if (strcmp(rel->Describe()->name, "DetailAttachement") == 0)
+         mprintf("Link data DetailAttachement: no data block in this file\n");
       retval = E_FAIL;
+   }
    SafeRelease(file);
    SafeRelease(rel);
    
