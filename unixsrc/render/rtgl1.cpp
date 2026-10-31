@@ -48,6 +48,7 @@
 #include <map>
 #include <string>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 #include <dlfcn.h>
 #include <limits.h>
@@ -2495,6 +2496,32 @@ void inspect_view()
    }
    out("model draws so far that captured nothing: %u; drawn only in pieces (the whole model kept): %u\n",
        g_emptyCaptures, g_pieceCaptures);
+   // the models hit by earlier inspections: where they are now, if anywhere
+   static std::vector<uint32_t> s_inspected;
+   if (bestObj && std::find(s_inspected.begin(), s_inspected.end(), bestObj) == s_inspected.end())
+      s_inspected.push_back(bestObj);
+   if (s_inspected.size() > 8)
+      s_inspected.erase(s_inspected.begin());
+   for (uint32_t id : s_inspected) {
+      char name[128];
+      RenderRTGameObjectName(id, name, sizeof(name));
+      auto it = g_objects.find(id);
+      if (it == g_objects.end()) {
+         out("earlier inspected object %u \"%s\": not known to the ray tracer now\n", id, name);
+         continue;
+      }
+      const CachedObject &c = it->second;
+      size_t tris = 0, shadow = 0;
+      for (const CapturedPrim &p : c.prims) {
+         tris += p.verts.size() / 3;
+         if (p.flags & RG_MESH_PRIMITIVE_SHADOW_ONLY)
+            shadow += p.verts.size() / 3;
+      }
+      out("earlier inspected object %u \"%s\": at (%.2f %.2f %.2f), %zu triangles (%zu shadow-only) in %zu "
+          "primitives, whole %d, drawn frame %u, given frame %u (now %u)\n",
+          id, name, c.center[0], c.center[1], c.center[2], tris, shadow, c.prims.size(), int(c.whole),
+          c.frame, c.givenFrame, g_frameNumber);
+   }
    if (!g_droppedObjects.empty()) {
       out("models recently dropped (not drawn by the game and moved or gone):\n");
       for (const DroppedObject &d : g_droppedObjects) {
@@ -3101,6 +3128,10 @@ void RenderRTObjectEnd(void)
    // while the game still drew them.
    if (g_currentCapture.empty()) {
       ++g_emptyCaptures;
+      static std::unordered_set<uint32_t> s_emptyLogged;
+      if (s_emptyLogged.size() < 40 && s_emptyLogged.insert(obj).second)
+         log_model_change(obj, "drawn by the game with nothing captured (%s)",
+                          g_currentWhole ? "whole" : "in pieces");
       return;
    }
    CachedObject &c = g_objects[obj];
@@ -3162,8 +3193,21 @@ void RenderRTObjectEnd(void)
                sum[k] += v.position[k];
             ++n;
          }
+      float was[3] = {c.center[0], c.center[1], c.center[2]};
       for (int k = 0; k < 3; ++k)
          c.center[k] = n ? float(sum[k] / double(n)) : 0.0f;
+      // a model that has not moved but whose captured shape is somewhere
+      // else now (drawn with another transform): log where it went
+      const float jx = c.center[0] - was[0], jy = c.center[1] - was[1], jz = c.center[2] - was[2];
+      if (c.unchanged == 0 && (was[0] != 0 || was[1] != 0 || was[2] != 0) &&
+          jx * jx + jy * jy + jz * jz > 1.0f) {
+         const RgFloat3D cam = to_rt(g_camera.pos);
+         log_model_change(obj, "captured %.1f m from where it was: (%.1f %.1f %.1f) -> (%.1f %.1f %.1f), "
+                          "camera (%.1f %.1f %.1f), %zu primitives, %s",
+                          std::sqrt(jx * jx + jy * jy + jz * jz), was[0], was[1], was[2], c.center[0],
+                          c.center[1], c.center[2], cam.data[0], cam.data[1], cam.data[2], c.prims.size(),
+                          g_currentWhole ? "whole" : "in pieces");
+      }
    }
    for (int k = 0; k < 3; ++k) {
       c.bmin[k] = 1e30f;
