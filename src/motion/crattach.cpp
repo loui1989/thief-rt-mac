@@ -116,6 +116,16 @@ static sStructDesc sDetailAttachStructDesc = StructDescBuild(sDetailAttachData, 
 
 static IRelation *g_pDetailAttachRelation = NULL;
 
+// A link without placement data (or with all of it zero) keeps the place its
+// object had relative to the other when first seen: what the mission showed.
+struct sDetailAttachKept
+{
+   LinkID link;
+   mxs_vector relPos;   // in the parent's space
+   mxs_matrix relMat;
+};
+static cDynArray<sDetailAttachKept> g_DetailAttachKept;
+
 // Every attached object placed where its link puts it. Once a frame, before
 // the scene is drawn.
 EXTERN void DetailAttachmentsUpdate(void)
@@ -131,6 +141,31 @@ EXTERN void DetailAttachmentsUpdate(void)
       ObjPos *parent = ObjPosGet(link.dest);
       if (parent == NULL || link.source == link.dest)
          continue;
+      if (data != NULL)
+      {
+         static const sDetailAttachData zero = {};
+         if (memcmp(data, &zero, sizeof(zero)) == 0)
+            data = NULL;
+      }
+      {
+         // each link once in the log: what it says
+         static cDynArray<LinkID> logged;
+         BOOL seen = FALSE;
+         for (int i = 0; i < logged.Size() && !seen; ++i)
+            seen = logged[i] == query->ID();
+         if (!seen && logged.Size() < 64)
+         {
+            logged.Append(query->ID());
+            if (data)
+               mprintf("Detail attachment: %d on %d, type %d joint %d, at (%.2f %.2f %.2f), turned (%d %d %d)%s\n",
+                       link.source, link.dest, data->type, data->joint, data->relPos.x, data->relPos.y,
+                       data->relPos.z, data->relRot.tx, data->relRot.ty, data->relRot.tz,
+                       CreatureGetMeshInterface(link.dest) ? ", a creature" : "");
+            else
+               mprintf("Detail attachment: %d on %d, no placement: kept where it was%s\n",
+                       link.source, link.dest, CreatureGetMeshInterface(link.dest) ? ", a creature" : "");
+         }
+      }
 
       mxs_vector loc;
       mxs_matrix orient;
@@ -156,8 +191,29 @@ EXTERN void DetailAttachmentsUpdate(void)
       }
       else
       {
-         mx_identity_mat(&rel);
-         mx_zero_vec(&offset);
+         // its place relative to the parent when first seen
+         sDetailAttachKept *kept = NULL;
+         for (int i = 0; i < g_DetailAttachKept.Size() && !kept; ++i)
+            if (g_DetailAttachKept[i].link == query->ID())
+               kept = &g_DetailAttachKept[i];
+         if (kept == NULL)
+         {
+            ObjPos *own = ObjPosGet(link.source);
+            if (own == NULL)
+               continue;
+            sDetailAttachKept k;
+            k.link = query->ID();
+            mxs_vector d;
+            mx_sub_vec(&d, &own->loc.vec, &loc);
+            mx_mat_tmul_vec(&k.relPos, &orient, &d);     // into the parent's space
+            mxs_matrix ownMat;
+            mx_ang2mat(&ownMat, &own->fac);
+            mx_tmul_mat(&k.relMat, &orient, &ownMat);    // orient^T * own
+            g_DetailAttachKept.Append(k);
+            kept = &g_DetailAttachKept[g_DetailAttachKept.Size() - 1];
+         }
+         rel = kept->relMat;
+         mx_mat_mul_vec(&offset, &orient, &kept->relPos);
       }
       mx_add_vec(&where, &loc, &offset);
       mx_mul_mat(&world, &orient, &rel);
