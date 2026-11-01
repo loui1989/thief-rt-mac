@@ -26,6 +26,9 @@
 
 #include <cfgdbg.h>
 #include <mprintf.h>
+#if defined(__APPLE__) || defined(__linux__)
+#include <execinfo.h>
+#endif
 #include <timings.h>
 #include <dynarray.h>
 
@@ -681,10 +684,20 @@ void LGAPI CrPosPropListener(sPropertyListenMsg* msg, PropListenerData data)
 
    Position *pPosition=ObjPosGet(msg->obj);
 
-   // something else moving a self-propelled creature up or down (logged: a
-   // sitter held at its height while its motion stood it up)
-   if (!pCreature->IsBallistic() &&
-       fabs(pPosition->loc.vec.z - pCreature->GetMultiped()->global_pos.z) > 0.3f)
+   // Something else moving a self-propelled creature a little up or down
+   // while it plays a motion: its height is its motion's and its ground
+   // keeping's, so it keeps its own (moved across as told). A floor sitter
+   // was put back at its sitting height every frame while its motion stood
+   // it up -- it got up stuck to the waist in the floor and walked off so,
+   // then sat down again (Black Parade's Clodorus). (A creature moved
+   // further -- put somewhere else -- goes where it is put.)
+   mxs_vector to = pPosition->loc.vec;
+   const mxs_vector &own = pCreature->GetMultiped()->global_pos;
+   const float dz = to.z - own.z;
+   const float dx = to.x - own.x, dy = to.y - own.y;
+   const BOOL heightKept = !pCreature->IsBallistic() && pCreature->IsPlayingMotion() &&
+                           fabs(dz) > 0.02f && fabs(dz) < 1.5f && dx * dx + dy * dy < 1.0f;
+   if (heightKept)
    {
       static ObjID s_obj[16];
       static int   s_n = 0;
@@ -694,13 +707,27 @@ void LGAPI CrPosPropListener(sPropertyListenMsg* msg, PropListenerData data)
       if (k == s_n && s_n < 16)
       {
          s_obj[s_n++] = msg->obj;
-         mprintf("%s moved from outside its motion: its butt from %.2f to %.2f\n", ObjWarnName(msg->obj),
-                 pCreature->GetMultiped()->global_pos.z, pPosition->loc.vec.z);
+         mprintf("%s moved from outside its motion: its butt from %.2f to %.2f -- kept at its own height\n",
+                 ObjWarnName(msg->obj), own.z, to.z);
+#if defined(__APPLE__) || defined(__linux__)
+         if (s_n <= 4)
+         {
+            void *frames[12];
+            const int n = backtrace(frames, 12);
+            char **names = backtrace_symbols(frames, n);
+            for (int f = 1; names && f < n; f++)
+               mprintf("      from %s\n", names[f]);
+            free(names);
+         }
+#endif
       }
+      to.z = own.z;
    }
 
    // can cause creature to become tilted
-   pCreature->MoveButt(&pPosition->loc.vec,&pPosition->fac, TRUE,TRUE);
+   pCreature->MoveButt(&to,&pPosition->fac, TRUE,TRUE);
+   if (heightKept)
+      pCreature->UpdateObjPosition();   // (the object where the creature is)
    pCreature->FlushRelativeState();
    CreatureAttachmentsPosUpdate(pCreature->GetObjID());
 

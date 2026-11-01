@@ -2354,7 +2354,10 @@ void upload_world()
       float alpha = 1.0f;
       if (g.flags & kRenderRTWorldWater) {
          flags &= ~RgMeshPrimitiveFlags(RG_MESH_PRIMITIVE_ALPHA_TESTED);
-         if (g_cfg.water == 1) {
+         // (a water surface with no texture of its own -- texture 0, as
+         // Black Parade's canals: the path tracer's own water, else nothing
+         // showed but the bed below)
+         if (g_cfg.water == 1 || !tex) {
             flags |= RG_MESH_PRIMITIVE_WATER;    // RTGL1's reflective/refractive water
          } else if (g_cfg.water == 0) {
             // Thief's water texture through its medium's palette (portal.c),

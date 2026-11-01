@@ -1730,13 +1730,18 @@ static void portal_rt_submit_world(void)
             mxs_real uvdot, u2, v2;
             if (n < 3 || n > 256)
                continue;
-            if (portal_rt_is_sky(ri->texture_id))
-               flags |= kRenderRTWorldSky;
+            // (a water surface -- a medium boundary -- is never a sky, though
+            // its texture number may be 0: Black Parade's canals, drawn as
+            // openings onto the sky, invisible. Without a texture of its own,
+            // the path tracer's water.)
             if (p >= first_portal)
                flags |= kRenderRTWorldWater;
+            else if (portal_rt_is_sky(ri->texture_id))
+               flags |= kRenderRTWorldSky;
             if (pc->flags & RENDER_DOESNT_LIGHT)
                flags |= kRenderRTWorldFullbright;
-            tex = (flags & kRenderRTWorldSky) ? NULL : portal_get_texture(ri->texture_id);
+            tex = ((flags & kRenderRTWorldSky) || portal_rt_is_sky(ri->texture_id))
+                     ? NULL : portal_get_texture(ri->texture_id);
             if (tex) {
                int tw, th;
                if (ResImageTerrainScale(tex, &tw, &th)) {
@@ -1801,7 +1806,8 @@ static void portal_rt_submit_world(void)
                RenderRTWorldPolygonFacing(pl->normal.x, pl->normal.y, pl->normal.z);
             }
             RenderRTWorldPolygon(ri->texture_id, flags, n, xyz, uv);
-            if (!(flags & kRenderRTWorldSky) && ri->texture_id < PORTAL_RT_MAX_TEXTURE_IDS) {
+            if (!(flags & kRenderRTWorldSky) && !portal_rt_is_sky(ri->texture_id) &&
+                ri->texture_id < PORTAL_RT_MAX_TEXTURE_IDS) {
                // 2: a water surface, drawn through its medium's palette
                portal_rt_texture_seen[ri->texture_id] =
                   (flags & kRenderRTWorldWater) ? 2 : 1;
