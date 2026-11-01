@@ -1361,6 +1361,7 @@ struct CachedObject {
    float wallOffset[3] = {};
    bool wallApplied = false;   // to this capture
    std::vector<CapturedPrim> split;
+   std::vector<uint64_t> ids;   // its primitives' names (object_prim_ids), kept while they last
    size_t splitNear = 0;
    bool splitValid = false;
 };
@@ -2164,6 +2165,7 @@ void upload_objects()
       g_perfPrims += uint32_t(c.prims.size());
       for (const CapturedPrim &p : c.prims)
          g_perfTris += p.verts.size() / 3;
+      const bool wasFresh = c.fresh;
       if (c.fresh) {
          g_capParts.fresh += 1;
          // (a model drawn in pieces: its faces made steady once it is all in)
@@ -2211,7 +2213,11 @@ void upload_objects()
          for (size_t i = 0; i < c.split.size(); ++i)
             upload_captured(ids[i], c.split[i], i < c.splitNear);
       } else {
-         const std::vector<uint64_t> ids = object_prim_ids(obj, c.prims);
+         // (named again only when its primitives change: a vector and a map
+         // made for each of hundreds of models every frame)
+         if (wasFresh || c.ids.size() != c.prims.size())
+            c.ids = object_prim_ids(obj, c.prims);
+         const std::vector<uint64_t> &ids = c.ids;
          for (size_t i = 0; i < c.prims.size(); ++i)
             upload_captured(ids[i], c.prims[i], c.passLight);
       }

@@ -2311,7 +2311,12 @@ void portal_render_scene(Position *pos, float zoom)
             draw_region_lgd3d(active_regions[i]);
          }
          // now render lightmaps if we're z buffering
-         if (g_zbuffer && !portal_multitexture && (!punt_hardware_lighting)) {
+         // (not under the path tracer: see draw_region_lgd3d)
+         if (g_zbuffer && !portal_multitexture && (!punt_hardware_lighting)
+#ifdef DARK_RT
+             && !RenderRTActive()
+#endif
+            ) {
             lgd3d_set_zcompare(TRUE);
             lgd3d_set_zwrite(FALSE);
             lgd3d_blend_multiply(portal_hack_blend);

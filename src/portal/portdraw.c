@@ -1059,6 +1059,19 @@ void draw_region(int cell)
 
 #endif  // ~SHIP
 
+#ifdef DARK_RT
+   // The path tracer has the world from its own copy of it (portal.c,
+   // RenderRTWorldPolygon) and throws these draws away: the engine still
+   // set up, clipped, lit and drew every wall and floor in view -- and then
+   // its light maps in a second pass -- each frame for nothing, milliseconds
+   // of the frame in a big street. Its objects are still drawn (below).
+   if (RenderRTActive())
+   {
+      r->changed_anim_light_bitmask = 0;
+      goto skip_poly_draw;
+   }
+#endif
+
    // now draw all the polygons
 
    r3_start_block();
@@ -1230,6 +1243,19 @@ void draw_region_lgd3d(int cell)
       _polygon_cell_flags_color = (r->flags) << 8;
 
 #endif  // ~SHIP
+
+#ifdef DARK_RT
+   // The path tracer has the world from its own copy of it (portal.c,
+   // RenderRTWorldPolygon) and throws these draws away: the engine still
+   // set up, clipped, lit and drew every wall and floor in view -- and then
+   // its light maps in a second pass -- each frame for nothing, milliseconds
+   // of the frame in a big street. Its objects are still drawn (below).
+   if (RenderRTActive())
+   {
+      r->changed_anim_light_bitmask = 0;
+      goto skip_poly_draw1;
+   }
+#endif
 
    // now draw all the polygons
 
