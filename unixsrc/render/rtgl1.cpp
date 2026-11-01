@@ -411,6 +411,10 @@ struct MatJob {
    const std::vector<uint8_t> *glowMap = nullptr;
    int gw = 0, gh = 0;
    float illumStrength = 0.0f, crevice = 0.0f;
+   // a window's glass mask (<rt>/glass/<texture>.png): only its white part
+   // mirrors, the frame and the wall around it do not
+   std::vector<uint8_t> glass;
+   int glw = 0, glh = 0;
    // what it makes
    char name[160] = {};
    rtmat::Result result;
@@ -434,6 +438,8 @@ void job_name(MatJob &j)
    h ^= uint32_t(j.crevice * 20.0f + 0.5f) * 0xc2b2ae35u;
    if (j.illumStrength > 0)
       h = rtmat::fnv(j.illumMap.data(), j.illumMap.size(), h ^ uint32_t(j.illumStrength * 1000.0f));
+   if (!j.glass.empty())
+      h = rtmat::fnv(j.glass.data(), j.glass.size(), h ^ 0x9a55u);
    // (no dots: RTGL1 takes what follows the last dot for an extension and
    // drops it, and then finds none of the maps)
    snprintf(j.name, sizeof(j.name), "m_%s_%08x", rtmat::file_safe(j.source).c_str(), h);
@@ -444,7 +450,8 @@ void run_job(MatJob &j)
    if (!j.name[0])
       job_name(j);
    j.result = rtmat::prepare(g_matDir, j.name, *j.cls, j.rgba, j.w, j.h,
-                             j.glowMap, j.gw, j.gh, j.illumStrength);
+                             j.glowMap, j.gw, j.gh, j.illumStrength,
+                             j.glass.empty() ? nullptr : &j.glass, j.glw, j.glh);
    // crevices darkened in its colour (rt_materials.h)
    if (j.crevice > 0.0f && !j.result.none && j.cls->bump > 0) {
       j.creviced.assign(j.rgba, j.rgba + size_t(j.w) * j.h * 4);
@@ -659,6 +666,18 @@ const char *texture_name(RtTexture *t)
          j->illumMap = t->illumMap;
          j->illumStrength = t->illumStrength;
          j->crevice = g_cfg.crevice;
+         if (c->window && c->polish > 0) {
+            std::vector<uint8_t> rgba;
+            int mw = 0, mh = 0;
+            if (rtmat::read_png(g_rtDir + "/glass/" + rtmat::file_safe(t->source) + ".png", rgba, mw, mh) &&
+                mw > 0 && mh > 0) {
+               j->glass.resize(size_t(mw) * mh);
+               for (size_t i = 0; i < j->glass.size(); ++i)
+                  j->glass[i] = rgba[i * 4];
+               j->glw = mw;
+               j->glh = mh;
+            }
+         }
          if (t->illumStrength > 0 && !t->illumMap.empty())
             j->glowMap = illum_image(t->illumMap, j->gw, j->gh);   // (main thread: its cache)
          t->job = j;

@@ -587,7 +587,8 @@ inline bool maps_made(const std::string &dir, const std::string &name, const Cla
 // glowMap: a NewDark illum_map's RGBA (w x h of its own), or null.
 inline Result prepare(const std::string &dir, const std::string &name, const Class &c,
                       const uint8_t *rgba, int w, int h,
-                      const std::vector<uint8_t> *glowMap, int gw, int gh, float glowStrength)
+                      const std::vector<uint8_t> *glowMap, int gw, int gh, float glowStrength,
+                      const std::vector<uint8_t> *glass = nullptr, int glw = 0, int glh = 0)
 {
    Result res;
    res.none = c.none;
@@ -662,8 +663,14 @@ inline Result prepare(const std::string &dir, const std::string &name, const Cla
          const float rel = std::clamp(float(hg[i] / std::max(avg, 0.02)), 0.0f, 2.0f);
          float r;
          // a window's lit pane keeps its glow (a mirror over it would dim it);
-         // its dark panes reflect the street
-         const float polish = (c.window && lit_pane(&rgba[i * 4])) ? std::min(c.polish, 0.15f) : c.polish;
+         // its dark panes reflect the street -- only its glass, where it has
+         // a glass mask: not the frame or the wall around it
+         float polish = (c.window && lit_pane(&rgba[i * 4])) ? std::min(c.polish, 0.15f) : c.polish;
+         if (glass) {
+            const int x = int(i % size_t(w)), y = int(i / size_t(w));
+            if ((*glass)[size_t(std::min(glh - 1, y * glh / h)) * glw + std::min(glw - 1, x * glw / w)] < 128)
+               polish = 0.0f;
+         }
          if (polish > 0)
             r = 0.7f - std::clamp(polish * (0.85f + 0.15f * rel), 0.0f, 3.0f) / 4.5f;
          else
@@ -677,6 +684,13 @@ inline Result prepare(const std::string &dir, const std::string &name, const Cla
       write_png(pORM, orm.data(), w, h, 3);
    }
    res.polished = c.polish > 0;
+   if (glass && res.polished) {
+      // (a mask with no glass at all: an empty opening, nothing mirrors)
+      bool any = false;
+      for (uint8_t v : *glass)
+         if (v >= 128) { any = true; break; }
+      res.polished = any;
+   }
 
    // bumps and heights
    if (c.bump > 0) {
