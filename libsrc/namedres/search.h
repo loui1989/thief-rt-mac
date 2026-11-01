@@ -45,6 +45,7 @@ public:
 
 	void DoIterate(const char* pContext, tSearchPathIterateCallback callback, void* pClientData);
 	void SetupSingleStore(const char* pStorePath, int fRecurse);
+	void Dump(const char* pProbe);
 	void SetGlobalContextPath(ISearchPath* pContext);
 
 private:

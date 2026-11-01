@@ -780,6 +780,8 @@ double SfxNowMs(void)
 
 static bool _sfx_start_play_impl(_sfx *fx, BOOL after_delay);
 
+extern "C" void SearchPathDump(ISearchPath*, const char*);
+
 // Why a sound did not play, in the log: once for each sound and reason.
 static void SfxRefused(const char *name, const char *why, IRes *res)
 {
@@ -911,6 +913,16 @@ static bool _sfx_start_play_impl(_sfx *fx, BOOL after_delay)
    else
    {
       SfxRefused(tmpname, "no such sound file found", NULL);
+      {
+         // the folders searched, once: is the fan mission's snd in them?
+         static int s_dumps = 0;
+         if (s_dumps++ < 2)
+         {
+            char probe[128];
+            snprintf(probe, sizeof(probe), "%s.ogg", tmpname);
+            SearchPathDump(pSoundPath, probe);
+         }
+      }
       Warning(("sfx_start_play: couldn't Prep %s\n", tmpname));
    }
 

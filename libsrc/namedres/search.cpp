@@ -1,3 +1,4 @@
+#include <stdio.h>
 #include <search.h>
 #include <storeman.h>
 #include <pathutil.h>
@@ -672,6 +673,31 @@ void cSearchPath::SetupSingleStore(const char* pStorePath, int fRecurse)
 }
 
 ///////////////////////////////////////
+
+// (diagnostics: the folders a search path looks in, in order, and whether
+// each has a given file -- a sound a fan mission has that was not found)
+extern "C" void SearchPathDump(ISearchPath* pPath, const char* pProbe)
+{
+	auto* p = dynamic_cast<cSearchPath*>(pPath);
+	if (p)
+		p->Dump(pProbe);
+}
+
+void cSearchPath::Dump(const char* pProbe)
+{
+	EnsureCurrentContext();
+	if (!m_bPathParsed)
+		SetupStorages();
+	int n = 0;
+	for (auto* pNode = m_pPathStorages; pNode; pNode = pNode->pNext, ++n)
+	{
+		const char* full = pNode->pStore->GetFullPathName();
+		const BOOL has = pProbe ? pNode->pStore->StreamExists(pProbe) : FALSE;
+		fprintf(stderr, "Search path %p [%d]: %s%s\n", (void*)this, n, full ? full : "?",
+		        has ? "   <-- has it" : "");
+	}
+	fprintf(stderr, "Search path %p: %d folders (looking for %s)\n", (void*)this, n, pProbe ? pProbe : "-");
+}
 
 void cSearchPath::ClearStorages()
 {
