@@ -1355,6 +1355,7 @@ struct CachedObject {
    // its order, so each vertex is the same vertex as last frame (see
    // match_previous)
    std::vector<CapturedPrim> prev;
+   bool prevTaken = false;  // prev is last given prims, swapped in (not copied) with this capture
    bool fresh = false;      // captured anew this frame (not as it was)
    bool steadied = false;   // steady_faces done on this frame's capture
    // a torch round its flame's light: its faces next to the flame let the
@@ -2033,7 +2034,9 @@ void match_previous(CachedObject &c)
             match_faces(p, c.prev[f->second]);
       }
    }
-   c.prev = c.prims;
+   if (!c.prevTaken)
+      c.prev = c.prims;   // (to be matched to next time: as given)
+   c.prevTaken = false;
 }
 
 std::vector<uint64_t> object_prim_ids(uint32_t obj, const std::vector<CapturedPrim> &prims)
@@ -2117,11 +2120,14 @@ void upload_objects()
                stale = true;
                break;
             }
+         // (one that moved, drawn in the last two frames: as it was then --
+         // out of view, a moving one is drawn every third frame only)
          const bool keep = !stale && c.posed && RenderRTGameObjectPose(obj, pose) &&
-                           std::fabs(pose[0] - c.pose[0]) < 0.01f &&
-                           std::fabs(pose[1] - c.pose[1]) < 0.01f &&
-                           std::fabs(pose[2] - c.pose[2]) < 0.01f &&
-                           pose[3] == c.pose[3] && pose[4] == c.pose[4] && pose[5] == c.pose[5];
+                           (g_frameNumber - c.frame < 3 ||
+                            (std::fabs(pose[0] - c.pose[0]) < 0.01f &&
+                             std::fabs(pose[1] - c.pose[1]) < 0.01f &&
+                             std::fabs(pose[2] - c.pose[2]) < 0.01f &&
+                             pose[3] == c.pose[3] && pose[4] == c.pose[4] && pose[5] == c.pose[5]));
          if (!keep) {
             if (c.givenFrame + 1 == g_frameNumber && dx * dx + dy * dy + dz * dz < 20.0f * 20.0f)
                log_model_change(obj, "leaves the scene: not drawn by the game this frame and %s, %.1f m away",
@@ -5040,10 +5046,16 @@ int RenderRTObjectWanted(uint32_t obj)
    float pose[6];
    if (!c.posed || !RenderRTGameObjectPose(obj, pose))
       return 1;
+   bool moved = pose[3] != c.pose[3] || pose[4] != c.pose[4] || pose[5] != c.pose[5];
    for (int k = 0; k < 3; ++k)
-      if (std::fabs(pose[k] - c.pose[k]) >= 0.01f)
-         return 1;
-   return (pose[3] != c.pose[3] || pose[4] != c.pose[4] || pose[5] != c.pose[5]) ? 1 : 0;
+      moved = moved || std::fabs(pose[k] - c.pose[k]) >= 0.01f;
+   // One moving out of view (a character walking about behind you): drawn
+   // again every third frame, not every frame -- it is there for its shadow
+   // and its reflection, which may lag a frame or two. Each one drawn and
+   // made ready anew every frame cost milliseconds a frame in a crowd.
+   if (moved && g_frameNumber - c.frame < 3)
+      return 0;
+   return moved ? 1 : 0;
 }
 
 void RenderRTCameraMedium(int underwater) { g_underwater = underwater != 0; }
@@ -5287,6 +5299,13 @@ void RenderRTObjectEnd(void)
       c.settled = false;
       c.unchanged = (h == c.hash) ? c.unchanged + 1 : 0;
       c.hash = h;
+      // what was given last time becomes the one this capture is matched
+      // to, swapped, not copied (a moving character's every vertex was
+      // copied every frame); unless it was never given
+      if (!c.fresh && g_cfg.steadyFaces) {
+         c.prev.swap(c.prims);
+         c.prevTaken = true;
+      }
       c.prims = std::move(g_currentCapture);
       c.fresh = true;
       c.steadied = false;

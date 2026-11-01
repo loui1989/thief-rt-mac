@@ -3868,9 +3868,11 @@ void cCreature::TrackMotionHeight(float zBefore)
       h->tracking = fabs(total.z) > 1.0f;
       h->expectZ = zNow;
       // the first two such motions of the first few creatures playing them,
-      // and what follows: their height subframe by subframe (the log)
+      // and what follows: their height subframe by subframe (the log; off
+      // unless config height_trace -- it found Clodorus's particles)
       static int s_creatures = 0;
-      if (h->tracking && h->traced < 2 && (h->traced > 0 || s_creatures < 4))
+      static const BOOL s_trace = config_is_defined("height_trace");
+      if (s_trace && h->tracking && h->traced < 2 && (h->traced > 0 || s_creatures < 4))
       {
          if (h->traced++ == 0)
             ++s_creatures;
