@@ -8,6 +8,7 @@
 #include <algorithm>
 #include <chrono>
 #include <filesystem>
+#include <cstring>
 #include <fnmatch.h>
 #include <limits.h>
 #include <stdlib.h>
@@ -91,7 +92,17 @@ BOOL __stdcall ComputeAnchoredPath(const char *anchor, const char *target, char 
     if (error)
         return FALSE;
     fs::path relative = fs::relative(goal, base, error);
-    return CopyAllocated((error ? goal : relative).generic_string(), output);
+    std::string result = (error ? goal : relative).generic_string();
+    // A folder keeps its trailing separator, as on Windows (there the
+    // relative path is the target's own text past the common part): a store
+    // listing its subfolders joins the parent's path and this, and without
+    // the slash "snd/" + "dahlquist" was taken for a file and skipped -- a
+    // fan mission's sounds in snd/<folder>/ were never found.
+    const size_t n = target ? strlen(target) : 0;
+    if (n && (target[n - 1] == '/' || target[n - 1] == '\\') && !result.empty() &&
+        result != "." && result.back() != '/')
+        result.push_back('/');
+    return CopyAllocated(result, output);
 }
 
 BOOL __stdcall IsValidFileSpec(const char *path)

@@ -636,8 +636,19 @@ int StorageSetupCallback(IStore* /*pStore*/, const char* pSubstoreName, void* pC
 
 	auto* pData = reinterpret_cast<SubpathEnumerateData*>(pClientData);
 
-	strcpy(FullPath, pData->pRootPath);
-	strcat(FullPath, pSubstoreName);
+	// (a subfolder named as a full path is that path; one named without its
+	// trailing separator gets one: "snd/" + "dahlquist" was taken for a file
+	// in snd/ and skipped, and a fan mission's snd/<folder>/ never searched)
+	if (pSubstoreName[0] == '/' || (pSubstoreName[0] && pSubstoreName[1] == ':'))
+		strncpy(FullPath, pSubstoreName, sizeof(FullPath) - 2);
+	else
+	{
+		strncpy(FullPath, pData->pRootPath, sizeof(FullPath) - 2);
+		strncat(FullPath, pSubstoreName, sizeof(FullPath) - 2 - strlen(FullPath));
+	}
+	const size_t n = strlen(FullPath);
+	if (n && FullPath[n - 1] != '/' && FullPath[n - 1] != '\\')
+		strcat(FullPath, "/");
 
 	pData->pThisPath->SetupSingleStore(FullPath, FALSE);
 
@@ -649,6 +660,14 @@ int StorageSetupCallback(IStore* /*pStore*/, const char* pSubstoreName, void* pC
 void cSearchPath::SetupSingleStore(const char* pStorePath, int fRecurse)
 {
 	auto* pStore = m_pStoreMan->GetStore(pStorePath, FALSE);
+	if (!(pStore && pStore->Exists()) && !fRecurse)
+	{
+		// (a subfolder that was listed but could not be opened as a folder)
+		static int s_told = 0;
+		if (s_told++ < 40)
+			fprintf(stderr, "Search path: subfolder %s not opened (%s)\n", pStorePath ? pStorePath : "?",
+			        pStore ? "not there" : "no store");
+	}
 	if (pStore && pStore->Exists())
 	{
 		auto* pNode = reinterpret_cast<PathStorageNode*>(Malloc(sizeof(PathStorageNode)));
