@@ -1841,8 +1841,18 @@ static void UpdateModelDynamics(cPhysModel *pModel, mxs_real dt)
    {
       if (!pModel->GetDynamics()->Frozen() && !pModel->IsLocationControlled())
       {
-         Assert_(pModel->GetDynamics()->GetMass() > 0.0);
-         UpdateModelTransDynamics(pModel, base_friction, friction, dt);
+         // An object a mission gave no mass (Black Parade's second mission
+         // has one): its forces would divide by zero and send it off to
+         // infinity, and the check that stopped the game here was the only
+         // thing between them. It is not moved by forces.
+         if (!(pModel->GetDynamics()->GetMass() > 0.0))
+         {
+            static int s_told = 0;
+            if (s_told++ < 10)
+               mprintf("Physics: %s has no mass: not moved by forces\n", ObjWarnName(objID));
+         }
+         else
+            UpdateModelTransDynamics(pModel, base_friction, friction, dt);
       }
    }
 
