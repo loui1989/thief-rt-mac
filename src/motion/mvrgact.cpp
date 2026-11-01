@@ -6,6 +6,8 @@
 // $Header: r:/t2repos/thief2/src/motion/mvrgact.cpp,v 1.16 1999/08/05 17:09:13 Justin Exp $
 
 #include <mmanuver.h>
+#include <mprintf.h>
+#include <objedit.h>
 #include <mcoord.h>
 #include <wrtype.h>
 #include <portal.h>
@@ -378,6 +380,22 @@ void cGroundActionManeuver::Execute()
          }
 
          mx_copy_vec(&buttPos,&curLoc->vec);
+         // A creature sitting, kneeling or lying (its butt well under its
+         // standing height): its motion moves its butt itself -- getting up
+         // from the floor raises it by the height it sat down by. Put at its
+         // standing height first, it got up to twice that; and with the
+         // ground found wrong, it was put a floor lower and got up sunk to the
+         // waist (Black Parade's floor sitters). Kept at its height; and no
+         // creature dropped more than a step in one go.
+         if (curLoc->vec.z < desiredZ - 1.0f || curLoc->vec.z - desiredZ > 1.5f)
+         {
+            static int s_told = 0;
+            if (s_told++ < 20)
+               mprintf("%s: not put at its standing height for %s (butt at %.2f, the ground at %.2f, standing at %.2f)\n",
+                       ObjWarnName(m_pMotor->GetObjID()), g_pMotionSet->GetName(m_MotionNum),
+                       curLoc->vec.z, groundHeight, desiredZ);
+            desiredZ = curLoc->vec.z;
+         }
          buttPos.z=desiredZ;
 
          if(m_DoRotate)

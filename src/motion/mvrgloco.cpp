@@ -31,6 +31,7 @@
 
 #include <fix.h>
 #include <mprintf.h>
+#include <objedit.h>
 #include <config.h>
 #include <cfgdbg.h>
 #include <mschutil.h>
@@ -584,6 +585,18 @@ void cGroundLocoManeuver::Execute()
 
          MvrGetEndButtHeight(m_pMotor,m_MotionNum,&desiredZ);
          desiredZ+=groundHeight;
+         // (up to standing height from the floor, however low -- a creature
+         // walking off from sitting; but down no more than a step at once:
+         // dropped through to a floor found under its own, it walked on
+         // sunk to the waist)
+         if (curLoc.vec.z - desiredZ > 1.5f)
+         {
+            static int s_told = 0;
+            if (s_told++ < 20)
+               mprintf("%s: not dropped %.2f to the ground found (butt at %.2f, the ground at %.2f)\n",
+                       ObjWarnName(m_pMotor->GetObjID()), curLoc.vec.z - desiredZ, curLoc.vec.z, groundHeight);
+            desiredZ = curLoc.vec.z;
+         }
          if(fabs(desiredZ-curLoc.vec.z)>kVerticalTolerance)
          {
             mx_copy_vec(&buttPos,&curLoc.vec);
