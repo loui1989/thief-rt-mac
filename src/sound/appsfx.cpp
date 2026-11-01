@@ -820,6 +820,22 @@ static bool _sfx_start_play_impl(_sfx *fx, BOOL after_delay)
       snd_mprintf(("Binding %d: %s (%d)\n",_sfx_get_hnd_from_ptr(fx),tmpname,GetRefCount(fx->pRes)));
    }
 
+   // A schema marked to stream reads its sample's header as a WAV's: a fan
+   // mission's OGG Vorbis (Black Parade's voice lines, its music-like
+   // ambients) failed there and never played -- a conversation that waits
+   // for its line to end never went on. Decoded and played from memory, as
+   // every other OGG is.
+   if (fx->pRes && ((fx->flags | fx->parm.flag) & SFXFLG_STREAM) && fx->pRes->GetSize() >= 4)
+   {
+      char magic[4] = {0, 0, 0, 0};
+      fx->pRes->ExtractPartial(0, 3, magic);
+      if (memcmp(magic, "OggS", 4) == 0)
+      {
+         fx->flags &= ~SFXFLG_STREAM;
+         fx->parm.flag &= ~SFXFLG_STREAM;
+      }
+   }
+
    if (fx->pRes)
    {
       if (fx->flags & SFXFLG_STREAM)
