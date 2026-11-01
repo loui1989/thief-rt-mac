@@ -243,13 +243,32 @@ BOOL ValidateCreaturePosition(ObjID objID)
             ObjWarnName(objID), loc.x, loc.y, loc.z);
       else
       {
-         mprintf("%s in bad cret pos: %g,%g,%g\n",
-            ObjWarnName(objID), loc.x, loc.y, loc.z);
-         mprintf("   rad: ");
-         cPhysModel *pModel = g_PhysModels.Get(objID);
-         for (int i=0; i<pModel->NumSubModels(); i++)
-            mprintf("%g  ", ((cPhysSphereModel *)pModel)->GetRadius(i));
-         mprintf("\n");
+         // (several times a frame, for one sitting inside a wall all
+         // mission: told a few times for each creature, then no more)
+         static ObjID s_obj[64];
+         static int s_count[64];
+         static int s_used = 0;
+         int k;
+         for (k = 0; k < s_used && s_obj[k] != objID; k++)
+            ;
+         if (k == s_used && s_used < 64)
+         {
+            s_obj[k] = objID;
+            s_count[k] = 0;
+            s_used++;
+         }
+         int told = (k < 64) ? ++s_count[k] : 1000;
+         if (told <= 3)
+         {
+            mprintf("%s in bad cret pos: %g,%g,%g%s\n",
+               ObjWarnName(objID), loc.x, loc.y, loc.z,
+               told == 3 ? " (not told again)" : "");
+            mprintf("   rad: ");
+            cPhysModel *pModel = g_PhysModels.Get(objID);
+            for (int i=0; pModel && i<pModel->NumSubModels(); i++)
+               mprintf("%g  ", ((cPhysSphereModel *)pModel)->GetRadius(i));
+            mprintf("\n");
+         }
       }
       return FALSE;
    }
@@ -2139,6 +2158,18 @@ void cCreature::SlamPhysicsModels()
    if ((pModel = g_PhysModels.Get(m_ObjID)) == NULL)
       return;
 
+   // not a number: not given to physics (it fails its checks, and spreads
+   // to what it touches); the creature is put back first
+   if (!(m_sMultiped.global_pos.x == m_sMultiped.global_pos.x &&
+         m_sMultiped.global_pos.y == m_sMultiped.global_pos.y &&
+         m_sMultiped.global_pos.z == m_sMultiped.global_pos.z))
+   {
+      const Position *pPos = ObjPosGet(m_ObjID);
+      if (pPos == NULL)
+         return;
+      HealMultiped(pPos);
+   }
+
    PosPropLock++;
 
    gCrPosPropLock++;
@@ -2197,6 +2228,79 @@ void SetCretObjPos(ObjID objID, const mxs_vector *pos, const mxs_angvec *rot)
    PosPropLock--;
 }
 
+// Not a number anywhere in v (or out of the world)?
+static BOOL VecIsBad(const mxs_vector &v)
+{
+   return !(v.x == v.x && v.y == v.y && v.z == v.z) ||
+          fabs(v.x) >= MAX_WORLD_SIZE || fabs(v.y) >= MAX_WORLD_SIZE || fabs(v.z) >= MAX_WORLD_SIZE;
+}
+
+static BOOL QuatIsBad(const quat &q)
+{
+   return !(q.w == q.w && q.x == q.x && q.y == q.y && q.z == q.z);
+}
+
+static BOOL MatIsBad(const mxs_matrix &m)
+{
+   for (int i = 0; i < 3; i++)
+      if (!(m.vec[i].x == m.vec[i].x && m.vec[i].y == m.vec[i].y && m.vec[i].z == m.vec[i].z))
+         return TRUE;
+   return FALSE;
+}
+
+// A creature whose motion went to "not a number" (Black Parade's second
+// mission has a sitter whose x and y do, every frame, once it starts): its
+// motions' start points and its facing are put back to where the object
+// is, so the next frame works from real numbers instead of carrying the bad
+// ones on for the rest of the mission -- with physics checks failing and
+// logging several times a frame.
+void cCreature::HealMultiped(const Position *pPos)
+{
+   static int s_told = 0;
+   if (s_told++ < 10)
+   {
+      mps_motion_node *mn = (mps_motion_node *) mp_get_main_motion(&m_sMultiped);
+      if (mn && mn->handle >= 0 && mn->handle < mp_num_motions)
+         mprintf("%s: motion \"%s\" frame %g (flags %x bend %g stretch %g) went to not-a-number%s%s: put back\n",
+                 ObjWarnName(m_ObjID), mp_motion_list[mn->handle].info.name, mn->frame,
+                 mn->params.flags, mn->params.bend, mn->params.stretch,
+                 VecIsBad(mn->base_pos) ? "; its start point" : "",
+                 QuatIsBad(mn->base_orient) ? "; its start facing" : "");
+      else
+         mprintf("%s: position went to not-a-number with no motion playing: put back\n", ObjWarnName(m_ObjID));
+   }
+
+   mxs_matrix facing;
+   mx_ang2mat(&facing, &pPos->fac);
+   if (MatIsBad(m_sMultiped.global_orient))
+      mx_copy_mat(&m_sMultiped.global_orient, &facing);
+   mx_copy_vec(&m_sMultiped.global_pos, &pPos->loc.vec);
+
+   for (mps_stack_node *n = m_sMultiped.main_motion.head; n; n = n->next)
+   {
+      if (n->type != MN_MOTION)
+         continue;
+      mps_motion_node *mn = (mps_motion_node *) n;
+      if (VecIsBad(mn->base_pos))
+         mx_copy_vec(&mn->base_pos, &pPos->loc.vec);
+      if (QuatIsBad(mn->base_orient))
+         quat_from_matrix(&mn->base_orient, &facing);
+      if (!(mn->params.bend == mn->params.bend) || fabs(mn->params.bend) > 100.0f)
+         mn->params.bend = 0;
+      if (!(mn->params.stretch == mn->params.stretch) || fabs(mn->params.stretch) > 1000.0f)
+         mn->params.stretch = 1.0f;
+      if (VecIsBad(mn->offset))
+         mx_zero_vec(&mn->offset);
+   }
+
+   // joints: moved with the body to where it is
+   for (int i = 0; i < m_nJoints; i++)
+      if (VecIsBad(m_pJoints[i]))
+         mx_copy_vec(&m_pJoints[i], &pPos->loc.vec);
+   mx_copy_vec(&m_sMultiped.rel_xlat, &m_sMultiped.global_pos);
+   ComputeBoundingData();
+}
+
 BOOL cCreature::UpdateObjPosition()
 {
    mxs_angvec fac;
@@ -2234,6 +2338,8 @@ BOOL cCreature::UpdateObjPosition()
          if (s_told++ < 20)
             mprintf("%s flung to (%g %g %g) from (%g %g %g): kept where it was\n", ObjWarnName(m_ObjID),
                     np.x, np.y, np.z, pPos->loc.vec.x, pPos->loc.vec.y, pPos->loc.vec.z);
+         if (!(np.x == np.x && np.y == np.y && np.z == np.z))
+            HealMultiped(pPos);
          mx_copy_vec(&m_sMultiped.global_pos, &pPos->loc.vec);
          mxs_vector zero = {0, 0, 0};
          mxs_vector here = pPos->loc.vec;

@@ -169,6 +169,7 @@ public:
    void HackProcessCompletedMotions();
    void ResetLengths();
    void SlamPhysicsModels();
+   void HealMultiped(const struct Position *pPos); // motion state gone to not-a-number: put back
    void FlushRelativeState();
    virtual void FilterMotionFrameData(const mps_motion_info *mi, quat *rot, mxs_vector *xlat);
    virtual void PostUpdateFilter(const ulong dt);

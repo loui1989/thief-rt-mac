@@ -1188,6 +1188,19 @@ bool upload(uint64_t id, const RgMeshPrimitiveInfo &prim, bool firstPerson = fal
 // ---- captured objects -------------------------------------------------------
 
 // A triangle list lgd3d drew for the main view, in RTGL1 terms.
+// Where the ray tracer's capture time goes, for the performance log (the
+// "capture parts" line): summed over its window, then cleared.
+struct CaptureParts {
+   double draws = 0, ends = 0, faces = 0, match = 0, world = 0, models = 0, lights = 0;
+   double drawCalls = 0, fresh = 0;
+} g_capParts;
+struct PartTimer {
+   double &acc;
+   std::chrono::steady_clock::time_point t0 = std::chrono::steady_clock::now();
+   explicit PartTimer(double &a) : acc(a) {}
+   ~PartTimer() { acc += std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count(); }
+};
+
 struct CapturedPrim {
    std::vector<RgPrimitiveVertex> verts;
    std::string texture;   // RTGL1 name, "" for untextured
@@ -1385,6 +1398,7 @@ void compute_normals(CapturedPrim *prims, size_t count)
 // null for a model holding still.
 void steady_faces(CachedObject &c, const float *pose = nullptr)
 {
+   PartTimer partTimer(g_capParts.faces);
    for (const CapturedPrim &p : c.prims)
       if (!(p.flags & RG_MESH_PRIMITIVE_SHADOW_ONLY) && !p.sprite) {
          // (one look a texture, kept: a texture with a glowing part and a
@@ -1515,11 +1529,40 @@ void steady_faces(CachedObject &c, const float *pose = nullptr)
          return true;
       };
       auto away = [&](size_t i) { return (tris[i].from->flags & RG_MESH_PRIMITIVE_SHADOW_ONLY) != 0; };
+      // Each turned-away face is tried only against the seen ones near it
+      // (their boxes, along x, then y and z): against every face, a
+      // character of 800 cost some 300,000 tests every frame it moved, a
+      // millisecond each -- a street of people slowed the game right down.
+      std::vector<std::array<float, 6>> box(tris.size());
+      for (size_t i = 0; i < tris.size(); ++i) {
+         const RgPrimitiveVertex *v = &tris[i].from->verts[tris[i].at];
+         for (int k = 0; k < 3; ++k) {
+            box[i][k] = std::min({v[0].position[k], v[1].position[k], v[2].position[k]});
+            box[i][k + 3] = std::max({v[0].position[k], v[1].position[k], v[2].position[k]});
+         }
+      }
+      std::vector<uint32_t> seen;
+      float widest = 0.0f;
+      for (size_t j = 0; j < tris.size(); ++j)
+         if (fl[j].ok && !tris[j].shadowOnly && !away(j)) {
+            seen.push_back(uint32_t(j));
+            widest = std::max(widest, box[j][3] - box[j][0]);
+         }
+      std::sort(seen.begin(), seen.end(), [&](uint32_t x, uint32_t y) { return box[x][0] < box[y][0]; });
       for (size_t i = 0; i < tris.size(); ++i) {
          if (!fl[i].ok || tris[i].shadowOnly || !away(i))
             continue;
-         for (size_t j = 0; j < tris.size() && !tris[i].shadowOnly; ++j) {
-            if (j == i || !fl[j].ok || tris[j].shadowOnly || away(j))
+         // (as near as a face tilted the most the test allows could be: the
+         // planes 3 mm apart at the middle, up to a fifth of its size at its
+         // corners)
+         const float kNear = 0.01f + 0.2f * std::max({box[i][3] - box[i][0], box[i][4] - box[i][1], box[i][5] - box[i][2]});
+         const float from = box[i][0] - widest - kNear, to = box[i][3] + kNear;
+         auto first = std::lower_bound(seen.begin(), seen.end(), from,
+                                       [&](uint32_t x, float v) { return box[x][0] < v; });
+         for (auto it = first; it != seen.end() && box[*it][0] <= to && !tris[i].shadowOnly; ++it) {
+            const size_t j = *it;
+            if (box[j][3] < box[i][0] - kNear || box[j][1] > box[i][4] + kNear || box[j][4] < box[i][1] - kNear ||
+                box[j][2] > box[i][5] + kNear || box[j][5] < box[i][2] - kNear)
                continue;
             const float *ni = fl[i].n, *nj = fl[j].n;
             if (ni[0] * nj[0] + ni[1] * nj[1] + ni[2] * nj[2] > -0.985f)
@@ -1730,39 +1773,59 @@ void match_faces(CapturedPrim &p, const CapturedPrim &q)
    const size_t np = p.verts.size() / 3, nq = q.verts.size() / 3;
    if (!np || !nq)
       return;
-   std::unordered_map<uint64_t, std::vector<uint32_t>> byPlace, byMap;
-   byPlace.reserve(nq * 2);
-   byMap.reserve(nq * 2);
+   // the same faces, in the same order and turn, as last frame: as they are
+   if (np == nq && memcmp(p.verts.data(), q.verts.data(), p.verts.size() * sizeof(RgPrimitiveVertex)) == 0)
+      return;
+   // (sorted lists, not hash maps of lists: those were thousands of small
+   // allocations a model, every frame it moved)
+   using Keyed = std::pair<uint64_t, uint32_t>;
+   std::vector<Keyed> byPlace(nq), byMap(nq);
    std::vector<std::array<float, 3>> qMid(nq);
    for (size_t j = 0; j < nq; ++j) {
       const RgPrimitiveVertex *v = &q.verts[j * 3];
-      byPlace[place_key(v)].push_back(uint32_t(j));
-      byMap[map_key(v)].push_back(uint32_t(j));
+      byPlace[j] = {place_key(v), uint32_t(j)};
+      byMap[j] = {map_key(v), uint32_t(j)};
       for (int k = 0; k < 3; ++k)
          qMid[j][k] = (v[0].position[k] + v[1].position[k] + v[2].position[k]) / 3.0f;
    }
+   std::sort(byPlace.begin(), byPlace.end());
+   std::sort(byMap.begin(), byMap.end());
+   // the faces of a key, in their order last frame
+   struct Range {
+      const Keyed *b = nullptr, *e = nullptr;
+      const Keyed *begin() const { return b; }
+      const Keyed *end() const { return e; }
+   };
+   auto find = [](const std::vector<Keyed> &list, uint64_t key) {
+      auto lo = std::lower_bound(list.begin(), list.end(), Keyed{key, 0});
+      Range r;
+      r.b = r.e = list.data() + (lo - list.begin());
+      while (r.e != list.data() + list.size() && r.e->first == key)
+         ++r.e;
+      return r;
+   };
    std::vector<int32_t> slot(np, -1);
    std::vector<char> taken(nq, 0);
    size_t matched = 0;
    for (size_t i = 0; i < np; ++i) {
-      auto f = byPlace.find(place_key(&p.verts[i * 3]));
-      if (f == byPlace.end())
-         continue;
-      for (uint32_t j : f->second)
+      const Range f = find(byPlace, place_key(&p.verts[i * 3]));
+      for (const Keyed &kj : f) {
+         const uint32_t j = kj.second;
          if (!taken[j]) {
             taken[j] = 1;
             slot[i] = int32_t(j);
             ++matched;
             break;
          }
+      }
    }
    if (matched < np)
       for (size_t i = 0; i < np; ++i) {
          if (slot[i] >= 0)
             continue;
          const RgPrimitiveVertex *v = &p.verts[i * 3];
-         auto f = byMap.find(map_key(v));
-         if (f == byMap.end())
+         const Range f = find(byMap, map_key(v));
+         if (f.b == f.e)
             continue;
          float m[3];
          for (int k = 0; k < 3; ++k)
@@ -1770,7 +1833,8 @@ void match_faces(CapturedPrim &p, const CapturedPrim &q)
          int32_t best = -1;
          float bestD = 1e30f;
          int looked = 0;
-         for (uint32_t j : f->second) {
+         for (const Keyed &kj : f) {
+            const uint32_t j = kj.second;
             if (taken[j])
                continue;
             const float dx = qMid[j][0] - m[0], dy = qMid[j][1] - m[1], dz = qMid[j][2] - m[2];
@@ -1829,6 +1893,7 @@ void match_faces(CapturedPrim &p, const CapturedPrim &q)
 
 void match_previous(CachedObject &c)
 {
+   PartTimer partTimer(g_capParts.match);
    if (!c.prev.empty()) {
       // the same primitive as last frame: by texture and flags, in turn (as
       // object_prim_ids names them)
@@ -2001,6 +2066,7 @@ void upload_objects()
       for (const CapturedPrim &p : c.prims)
          g_perfTris += p.verts.size() / 3;
       if (c.fresh) {
+         g_capParts.fresh += 1;
          // (a model drawn in pieces: its faces made steady once it is all in)
          if (g_cfg.steadyFaces && !c.steadied)
             steady_faces(c);
@@ -3080,6 +3146,7 @@ void perf_frame(double t)
    }
    if (!g_perf.wasOn) {
       g_perf = Perf{};
+      g_capParts = CaptureParts{};
       g_perf.wasOn = true;
       g_perf.start = g_perf.windowStart = g_perf.last = t;
       g_perf.lastWait = g_ui.waitSum; g_perf.lastDraw = g_ui.drawSum;
@@ -3189,11 +3256,17 @@ void perf_frame(double t)
       fprintf(f, "\n  scene per frame: %.0f models (%.0f kept out of view), %.0f primitives, %.0fk model triangles; world %u of %zu pieces traced; %.0f lights traced of %u\n",
               g_perf.models / n, g_perf.kept / n, g_perf.prims / n, g_perf.tris / n / 1000.0,
               g_worldShownGroups, g_world.size(), g_perf.lights / n, g_lightsTotal);
+      const CaptureParts &cp = g_capParts;
+      fprintf(f, "  capture parts (ms per frame): draws %.2f (%.0f calls), models' ends %.2f, given to the path tracer: lights %.2f, world %.2f, models %.2f; "
+                 "of these, faces made steady %.2f, matched to last frame %.2f (%.0f models captured anew)\n",
+              cp.draws * ms, cp.drawCalls / n, cp.ends * ms, cp.lights * ms, cp.world * ms, cp.models * ms,
+              cp.faces * ms, cp.match * ms, cp.fresh / n);
       fclose(f);
    }
    g_perf.frames.clear();
    g_perf.clients.clear();
    g_perf.wait = g_perf.draw = g_perf.capture = g_perf.prep = 0;
+   g_capParts = CaptureParts{};
    g_perf.models = g_perf.prims = g_perf.tris = g_perf.kept = g_perf.lights = 0;
    g_perf.windowStart = t;
 }
@@ -4551,9 +4624,18 @@ void RenderRTSceneEnd(void)
    if (!g_active || !g_inScene)
       return;
    CaptureTimer timer;
-   flush_lights();
-   upload_world();
-   upload_objects();
+   {
+      PartTimer t(g_capParts.lights);
+      flush_lights();
+   }
+   {
+      PartTimer t(g_capParts.world);
+      upload_world();
+   }
+   {
+      PartTimer t(g_capParts.models);
+      upload_objects();
+   }
    // the material maps being made (texture_name), now and then
    if ((g_frameNumber & 63) == 0) {
       static size_t s_reported = 0;
@@ -4585,6 +4667,8 @@ void RenderRTDrawWorld(int primitive, const sRenderBackendVertex *v, const float
                        int count)
 {
    CaptureTimer timer;
+   PartTimer partTimer(g_capParts.draws);
+   g_capParts.drawCalls += 1;
    if (g_RenderRTShadowOnly && g_dropBackFaces)
       return;
    if (!g_inScene || primitive != kRenderBackendTriangles || count < 3)
@@ -4949,6 +5033,7 @@ void wall_offset(CachedObject &c)
 void RenderRTObjectEnd(void)
 {
    CaptureTimer timer;
+   PartTimer partTimer(g_capParts.ends);
    const uint32_t obj = g_currentObject;
    g_currentObject = 0;
    if (!obj || !g_inScene)

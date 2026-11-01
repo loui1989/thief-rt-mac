@@ -145,6 +145,43 @@ void LGAPI _CriticalMsg(const char * cond, const char * file, unsigned uLine)
     }
     fInAssert = TRUE;
 
+    // Carrying on past them (DARK_ASSERT_ACTION=ignore), one that fails
+    // every frame would write its message and a stack to three logs each
+    // time -- thousands of times a minute, a cost of its own: after 20 from
+    // one place, that place is not logged again.
+    {
+        const char * pszAction = getenv("DARK_ASSERT_ACTION");
+        if (pszAction && stricmp(pszAction, "ignore") == 0)
+        {
+            static const char * s_file[128];
+            static unsigned s_line[128];
+            static int s_count[128];
+            static int s_used = 0;
+            int k;
+            for (k = 0; k < s_used; k++)
+                if (s_line[k] == uLine && s_file[k] == file)
+                    break;
+            if (k == s_used && s_used < 128)
+            {
+                s_file[k] = file;
+                s_line[k] = uLine;
+                s_count[k] = 0;
+                s_used++;
+            }
+            if (k < 128)
+            {
+                int n = ++s_count[k];
+                if (n > 20)
+                {
+                    fInAssert = FALSE;
+                    return;
+                }
+                if (n == 20)
+                    mprintf("[%s@%d] failed 20 times: not logged again\n", pszTrimmedFile, uLine);
+            }
+        }
+    }
+
     if (pfnNotificationHandler)
         (*pfnNotificationHandler)(kCritMsgEnter);
 
