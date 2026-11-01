@@ -436,7 +436,7 @@ static BOOL g_MantleCrouch = FALSE;
 
 // One line in the log per mantle attempt that ends differently from the last
 // (the retry below checks every frame, so repeats are dropped).
-static void MantleLog(const char *what)
+static void MantleLog(const char *what, const char *detail = NULL)
 {
    static const char *s_last = NULL;
    static int s_lines = 0;
@@ -444,7 +444,28 @@ static void MantleLog(const char *what)
       return;
    s_last = what;
    ++s_lines;
-   fprintf(stderr, "Mantle: %s\n", what);
+   fprintf(stderr, "Mantle: %s%s%s\n", what, detail ? " -- " : "", detail ? detail : "");
+}
+
+// The ledge's height over the player's feet and the room above it, for the log.
+static const char *LedgeDetail(cPhysModel *pModel, const mxs_vector &ledge, const mxs_vector &dir)
+{
+   static char text[160];
+   Location start, end, hit;
+   ObjID hit_obj = 0;
+   mxs_vector at = ledge;
+   mx_scale_addeq_vec(&at, &dir, 0.5f);
+   at.z += 0.1f;
+   MakeLocationFromVector(&start, &at);
+   ComputeCellForLocation(&start);
+   MakeLocationFromVector(&end, &at);
+   end.vec.z += 8.0f;
+   float room = 8.0f;
+   if (PhysRaycast(start, end, &hit, &hit_obj, 0, kCollideOBB | kCollideTerrain) != kCollideNone)
+      room = hit.vec.z - ledge.z;
+   snprintf(text, sizeof(text), "ledge %.2f ft above the feet, %.2f ft of room over it (standing needs 6.4, crouched 4.0)",
+            ledge.z - pModel->GetLocationVec(PLAYER_FOOT).z, room);
+   return text;
 }
 
 void BreakMantle(ObjID objID)
@@ -585,36 +606,7 @@ BOOL CheckMantle(ObjID objID)
 
    Location start_loc, end_loc, hit_loc, hit_loc2;
 
-   mx_mk_vec(&ledge_offset, 0, 0, 3.5);
-
    mx_ang2mat(&orien, &pModel->GetRotation());
-
-   MakeHintedLocationFromVector(&start_loc, &pModel->GetLocationVec(PLAYER_HEAD), &pModel->GetLocation(PLAYER_HEAD));
-   MakeHintedLocationFromVector(&end_loc, &start_loc.vec, &start_loc);
-
-   mx_addeq_vec(&end_loc.vec, &ledge_offset);
-
-   // Cast up
-   #ifndef SHIP
-   if (config_is_defined("MantleSpew"))
-   {
-      mprintf("Casting up from %g %g %g\n", start_loc.vec.x, start_loc.vec.y, start_loc.vec.z);
-      mprintf("             to %g %g %g\n", end_loc.vec.x, end_loc.vec.y, end_loc.vec.z);
-   }
-   #endif
-
-   if (PhysRaycast(start_loc, end_loc, &hit_loc, &hit_obj, 0, kCollideOBB | kCollideTerrain) != kCollideNone)
-   {
-      #ifndef SHIP
-      if (config_is_defined("MantleSpew"))
-         mprintf("Mantle up failed\n");
-      #endif
-
-      MantleLog("no room above the head (ceiling within 3.5 ft)");
-      return FALSE;
-   }
-
-   MakeHintedLocationFromVector(&start_loc, &end_loc.vec, &start_loc);
 
    mx_copy_vec(&movement_dir, &orien.vec[0]);
    movement_dir.z = 0;
@@ -622,43 +614,59 @@ BOOL CheckMantle(ObjID objID)
       mx_normeq_vec(&movement_dir);
    mx_scaleeq_vec(&movement_dir, radius * 2);
 
-   mx_addeq_vec(&end_loc.vec, &movement_dir);
+   // Look for the ledge 3.5 ft above the head, as the original did, then
+   // lower: a window's opening is often only a few feet tall, so by the time
+   // the head is near its sill, 3.5 ft above it is wall again and the
+   // original probe never saw the opening.  The downward cast still reaches
+   // 3.5 ft below the head whichever height it starts at.
+   static const mxs_real probe_heights[] = {3.5f, 2.75f, 2.0f, 1.4f};
+   const char *why = "no ledge found within reach";
+   BOOL found_ledge = FALSE;
+   mxs_real probe_up = 3.5f;
 
-   // Cast forward
-   #ifndef SHIP
-   if (config_is_defined("MantleSpew"))
+   for (int p = 0; p < 4 && !found_ledge; ++p)
    {
-      mprintf("Casting forward from %g %g %g\n", start_loc.vec.x, start_loc.vec.y, start_loc.vec.z);
-      mprintf("                  to %g %g %g\n", end_loc.vec.x, end_loc.vec.y, end_loc.vec.z);
+      probe_up = probe_heights[p];
+      mx_mk_vec(&ledge_offset, 0, 0, probe_up);
+
+      MakeHintedLocationFromVector(&start_loc, &pModel->GetLocationVec(PLAYER_HEAD), &pModel->GetLocation(PLAYER_HEAD));
+      MakeHintedLocationFromVector(&end_loc, &start_loc.vec, &start_loc);
+      mx_addeq_vec(&end_loc.vec, &ledge_offset);
+
+      // Cast up
+      hit_obj = 0;
+      if (PhysRaycast(start_loc, end_loc, &hit_loc, &hit_obj, 0, kCollideOBB | kCollideTerrain) != kCollideNone)
+      {
+         why = "no room above the head";
+         continue;
+      }
+
+      // Cast forward
+      MakeHintedLocationFromVector(&start_loc, &end_loc.vec, &start_loc);
+      mx_addeq_vec(&end_loc.vec, &movement_dir);
+
+      hit_obj = 0;
+      if (PhysRaycast(start_loc, end_loc, &hit_loc, &hit_obj, 0, kCollideOBB | kCollideTerrain) != kCollideNone)
+      {
+         why = "wall in front above the head, no opening found";
+         continue;
+      }
+
+      // Cast downward, to 3.5 ft below the head
+      MakeHintedLocationFromVector(&start_loc, &end_loc.vec, &start_loc);
+      end_loc.vec.z -= probe_up + 3.5f;
+
+      hit_obj = 0;
+      if ((PhysRaycast(start_loc, end_loc, &hit_loc, &hit_obj, 0, kCollideOBB | kCollideTerrain) != kCollideNone) && CanMantleOnto(hit_obj))
+         found_ledge = TRUE;
+      else
+         why = "no ledge found within reach";
    }
-   #endif
 
-   hit_obj = 0;
-   if (PhysRaycast(start_loc, end_loc, &hit_loc, &hit_obj, 0, kCollideOBB | kCollideTerrain) != kCollideNone)
-   {
-      #ifndef SHIP
-      if (config_is_defined("MantleSpew"))
-         mprintf("Mantle forward failed\n");
-      #endif
+   if (!found_ledge)
+      MantleLog(why);
 
-      MantleLog("blocked 3.5 ft above the head (the wall goes on up)");
-      return FALSE;
-   }
-
-   MakeHintedLocationFromVector(&start_loc, &end_loc.vec, &start_loc);
-   mx_scale_addeq_vec(&end_loc.vec, &ledge_offset, -2.0);
-
-   // Cast downward
-   #ifndef SHIP
-   if (config_is_defined("MantleSpew"))
-   {
-      mprintf("Casting down from %g %g %g\n", start_loc.vec.x, start_loc.vec.y, start_loc.vec.z);
-      mprintf("               to %g %g %g\n", end_loc.vec.x, end_loc.vec.y, end_loc.vec.z);
-   }
-   #endif
-
-   hit_obj = 0;
-   if ((PhysRaycast(start_loc, end_loc, &hit_loc, &hit_obj, 0, kCollideOBB | kCollideTerrain) != kCollideNone) && CanMantleOnto(hit_obj))
+   if (found_ledge)
    {
       // Find forward surface
       MakeHintedLocationFromVector(&start_loc, &pModel->GetLocationVec(PLAYER_HEAD), &pModel->GetLocation());
@@ -747,13 +755,38 @@ BOOL CheckMantle(ObjID objID)
       mx_sub_vec(&delta, &target_pos, &pModel->GetLocationVec());
       if (!PhysObjValidPos(objID, &delta))
       {
+         // The spot just back from the wall can be blocked (a sill or frame
+         // standing out from it): try further back, then straight up from
+         // where the player is now.
+         static const mxs_real back[] = {0.25f, 0.5f};
+         for (int k = 0; k < 3; ++k)
+         {
+            mxs_vector alt = target_pos;
+            if (k < 2)
+               mx_scale_addeq_vec(&alt, &movement_dir, -back[k]);
+            else
+            {
+               alt.x = pModel->GetLocationVec().x;
+               alt.y = pModel->GetLocationVec().y;
+            }
+            mx_sub_vec(&delta, &alt, &pModel->GetLocationVec());
+            if (PhysObjValidPos(objID, &delta))
+            {
+               target_pos = alt;
+               pModel->SetMantlingTargVec(target_pos);
+               break;
+            }
+         }
+      }
+      if (!PhysObjValidPos(objID, &delta))
+      {
          #ifndef SHIP
          if (config_is_defined("MantleSpew"))
             mprintf("Aborting mantle, can't fit in target position\n");
          #endif
 
          // nothing has been started yet: just drop the target
-         MantleLog("can't reach the ledge's lip");
+         MantleLog("can't reach the ledge's lip", LedgeDetail(pModel, hit_loc.vec, movement_dir));
          pModel->SetMantlingState(0);
          return FALSE;
       }
@@ -794,7 +827,7 @@ BOOL CheckMantle(ObjID objID)
         {
            delta = delta_full;
            mx_scale_addeq_vec(&delta, &movement_dir, f);
-           delta.z += -PLAYER_FOOT_POS - 0.32f;
+           delta.z += -PLAYER_FOOT_POS - 0.40f;
            if (PhysPlayerValidPosCrouched(objID, &delta))
            {
               fits = TRUE;
@@ -810,7 +843,7 @@ BOOL CheckMantle(ObjID objID)
             mprintf("Aborting mantle, can't fit in target position\n");
          #endif
 
-         MantleLog("no room on the ledge, standing or crouched");
+         MantleLog("no room on the ledge, standing or crouched", LedgeDetail(pModel, hit_loc.vec, movement_dir));
          g_MantleCrouch = FALSE;
          pModel->SetMantlingState(0);
          return FALSE;
@@ -821,11 +854,10 @@ BOOL CheckMantle(ObjID objID)
       Label grunt = {"garclimb"};
       SchemaPlay(&grunt, NULL, NULL);
 
-      MantleLog(g_MantleCrouch ? "mantling, crouched" : "mantling");
+      MantleLog(g_MantleCrouch ? "mantling, crouched" : "mantling", LedgeDetail(pModel, hit_loc.vec, movement_dir));
       return TRUE;
    }
 
-   MantleLog("no ledge found within reach");
    return FALSE;
 }
 
