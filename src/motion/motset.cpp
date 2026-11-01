@@ -968,6 +968,12 @@ void MotCompRotCallback(mps_motion_info *mi,mps_comp_motion *cm,float frame, qua
       memcpy(data,&q[iframe],sizeof(quat));
    else
       quat_slerp(data,&q[iframe],&q[iframe+1],frame-iframe);
+   // A rotation is a quaternion of length 1. Some fan missions' motions
+   // store them up to a fifth longer or shorter (Black Parade's SitFloorIn):
+   // the joint was stretched or shrunk with it, and the creature's facing,
+   // built from them frame after frame, grew without end -- to infinity,
+   // then "not a number", the sitters stuck T-posing in the floor.
+   quat_normalize(data);
 
    if (g_mot_quat_debug &&
        ((quat_mag(data) > 1.001)||(quat_mag(data) < 0.999)))

@@ -6,6 +6,7 @@
 // $Header: r:/t2repos/thief2/src/sim/wrloop.cpp,v 1.73 2000/03/18 15:20:54 adurant Exp $
 
 #include <wrloop.h>
+#include <platform_services.h>
 #include <chrono>
 #include <stdio.h>
 
@@ -692,6 +693,8 @@ void ReadWR(PortalReadWrite func)
    
    for (ci = 0; ci < wr_num_cells; ci++)
    {
+      if ((ci & 31) == 0)
+         PlatformLoadProgress("world");   // (seconds of it in a big mission)
       // alloc and read the portal cell
       wr_cell[ci] = (PortalCell*) wrAlloc(sizeof(PortalCell));
       p = wr_cell[ci];

@@ -64,4 +64,8 @@ EXTERN void quat_identity(quat * q);
 // has unit magnitude.
 EXTERN float quat_mag(quat * q);
 
+// Scale to unit length (a rotation); one gone to nothing, infinity or "not a
+// number" becomes the identity. Returns FALSE if it had to.
+EXTERN bool quat_normalize(quat * q);
+
 #endif

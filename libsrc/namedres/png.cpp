@@ -335,11 +335,13 @@ uint8* ResPngReadPalette(IStoreStream*, IResMemOverride* pResMem)
 
 // (the time images take to read, for the ray tracer's slow-frame log)
 extern "C" double g_ResImageReadSeconds;
+extern "C" void PlatformLoadProgress(const char *stage);
 grs_bitmap* ResPngReadImage(IStoreStream* pStream,
                             IResMemOverride* pResMem)
 {
    const auto t0 = std::chrono::steady_clock::now();
    grs_bitmap* bm = ResPngReadImageImpl(pStream, pResMem);
    g_ResImageReadSeconds += std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
+   PlatformLoadProgress("images");   // (a mission's hundreds of HD textures)
    return bm;
 }

@@ -218,12 +218,19 @@ HRESULT cLoopDispatch::SendMessage(eLoopMessage message, tLoopMessageData hData,
 		if (timeHook || timeRare)
 			hookStart = std::chrono::steady_clock::now();
 
+		// (a mission or a saved game loading, client by client: the window
+		// kept answering and a loading bar shown -- PlatformLoadProgress)
+		if (message == kMsgLoad)
+			PlatformLoadProgress("+database");
+
 		eLoopMessageResult clientResult{};
 		if (m_ProfileSet & message)
 			clientResult = LoopProfileSend(pClient, message, hData);
 		else
 			clientResult = pClient->ReceiveMessage(message, hData);
 
+		if (message == kMsgLoad)
+			PlatformLoadProgress("+database");
 		if (timeHook)
 			timeHook((const char*)pszClient, (unsigned)message,
 			         std::chrono::duration<double>(std::chrono::steady_clock::now() - hookStart).count());

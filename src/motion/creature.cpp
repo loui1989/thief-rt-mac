@@ -2003,6 +2003,7 @@ BOOL cCreature::MoveButt(const mxs_vector *pButtPos, const mxs_angvec *pAngles, 
    mx_sub_vec(&d,&new_butt_pos,&old);
 
    quat_from_matrix(&dQ,&mat);
+   quat_normalize(&dQ);
    mps=m_sMultiped.main_motion.head;
    while(mps)
    {
@@ -2016,6 +2017,7 @@ BOOL cCreature::MoveButt(const mxs_vector *pButtPos, const mxs_angvec *pAngles, 
          //         mx_addeq_vec(&((mps_motion_node *)mps)->base_pos,&d);
          quat_copy(&tmp,&((mps_motion_node *)mps)->base_orient);
          quat_mul(&((mps_motion_node *)mps)->base_orient,&dQ,&tmp);
+         quat_normalize(&((mps_motion_node *)mps)->base_orient);
       }
       mps=mps->next;
    }
@@ -2298,7 +2300,7 @@ void cCreature::HealMultiped(const Position *pPos)
       mps_motion_node *mn = (mps_motion_node *) n;
       if (VecIsBad(mn->base_pos))
          mx_copy_vec(&mn->base_pos, &pPos->loc.vec);
-      if (QuatIsBad(mn->base_orient))
+      if (QuatIsBad(mn->base_orient) || !quat_normalize(&mn->base_orient))
          quat_from_matrix(&mn->base_orient, &facing);
       if (!(mn->params.bend == mn->params.bend) || fabs(mn->params.bend) > 100.0f)
          mn->params.bend = 0;

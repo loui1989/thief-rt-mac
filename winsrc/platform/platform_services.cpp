@@ -447,6 +447,13 @@ int PlatformGetClipboardText(char *text, int capacity)
 
 void PlatformSetTextInputActive(BOOL) {}
 
+void (*g_PlatformLoadProgressHook)(const char *stage) = NULL;
+void PlatformLoadProgress(const char *stage)
+{
+   if (g_PlatformLoadProgressHook)
+      g_PlatformLoadProgressHook(stage);
+}
+
 BOOL PlatformGetCurrentDirectory(char *path, int capacity)
 {
    DWORD length;

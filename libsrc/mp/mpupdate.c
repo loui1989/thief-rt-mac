@@ -314,6 +314,9 @@ uint mp_update(multiped * mp, float dt,ulong app_flags)
          }
       }
 
+      // (the main motion's and the overlays' rotations blended: each kept
+      // a rotation, the root above all -- the creature's facing)
+      quat_normalize(&mp_net_rot[ROOT_JOINT_ID(mp)]);
       mp_apply_motion(mp, mp_net_rot, &net_xlat, -1);
    }
 
@@ -715,13 +718,17 @@ void mp_change_heading(multiped * mp, float dt)
    {
       int ramp_index = (int) floor(mp->th_time / mp->th_duration * 255.0);
       t = mp_ramp_table[ramp_index];
+      quat_normalize(&mp->target_heading);
       quat_scale(&q1, &mp->target_heading, t);
       quat_mul(&q2, &mp_net_rot[ROOT_JOINT_ID(mp)], &q1);
+      quat_normalize(&q2);
       quat_copy(&mp_net_rot[ROOT_JOINT_ID(mp)], &q2);
    }
    else
    {
+      quat_normalize(&mp->target_heading);
       quat_mul(&q1, &mp_net_rot[ROOT_JOINT_ID(mp)], &mp->target_heading);
+      quat_normalize(&q1);
       quat_copy(&mp_net_rot[ROOT_JOINT_ID(mp)], &q1);
       quat_copy(&mm->base_orient, &q1);
       mp->th_duration = -1;

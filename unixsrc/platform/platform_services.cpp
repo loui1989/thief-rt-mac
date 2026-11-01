@@ -513,6 +513,14 @@ int PlatformGetClipboardText(char *text, int capacity)
 #endif
 }
 
+void (*g_PlatformLoadProgressHook)(const char *stage) = nullptr;
+
+void PlatformLoadProgress(const char *stage)
+{
+   if (g_PlatformLoadProgressHook)
+      g_PlatformLoadProgressHook(stage);
+}
+
 void PlatformSetTextInputActive(BOOL active)
 {
 #if defined(DARK_SDL_HOST)

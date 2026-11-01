@@ -71,6 +71,7 @@
 #include <render_rt.h>
 #include "rt_backend_internal.h"
 #include "rt_font.h"
+extern "C" void PlatformLoadProgress(const char *stage);   // (platform_services.h)
 extern "C" float portal_rt_cell_walk(int cell);   // portal.c: feet walked, 0 on screen, < 0 out of reach
 
 extern "C" const char *DarkContentFMPath(void);
@@ -801,8 +802,10 @@ void preload_textures()
       return;
    size_t made = 0;
    for (RtTexture *t : started) {
-      while (t->job && t->job->state.load() < 2)
+      while (t->job && t->job->state.load() < 2) {
+         PlatformLoadProgress("textures");   // (the window answers meanwhile)
          std::this_thread::sleep_for(std::chrono::milliseconds(2));
+      }
       ++made;
    }
    const auto t1 = std::chrono::steady_clock::now();
@@ -3927,6 +3930,8 @@ void draw_frame(bool sceneDrawn)
 } // namespace
 
 namespace darkrt {
+
+bool FrameInProgress() { return g_active && g_frameStarted; }
 
 void Present(int drawableWidth, int drawableHeight, bool vsync)
 {

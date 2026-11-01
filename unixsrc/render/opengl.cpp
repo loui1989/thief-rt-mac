@@ -24,6 +24,11 @@
 #include <cstdlib>
 #include <cstring>
 #include <vector>
+#include <chrono>
+#include <cmath>
+#include <thread>
+#include <string>
+#include <platform_services.h>
 #pragma pack(pop)
 
 #include <kb.h>
@@ -40,6 +45,7 @@ extern "C" void DarkInputKey(uchar scan, int down);
 extern "C" void DarkInputMouse(short x, short y, uchar type, uchar buttons, char wheel);
 extern "C" void DarkInputMouseRelative(int x, int y, uchar buttons);
 
+namespace { void load_finish(); void load_progress(const char *stage); void set_load_thread(); }
 static void present_legacy_frame(const void *pixels, int width, int height,
    int rowBytes, int depth, const uint8_t *palette);
 
@@ -81,6 +87,10 @@ unsigned g_unsupportedSwapIntervals;
 unsigned g_applicationFrameDepth;
 bool g_presentPending;
 const void *g_deferredPixels;
+// the canvas last given to the screen (the loading bar is drawn over it)
+const void *g_lastPixels;
+const uint8_t *g_lastPalette;
+int g_lastWidth, g_lastHeight, g_lastRowBytes, g_lastDepth;
 const uint8_t *g_deferredPalette;
 int g_deferredWidth, g_deferredHeight, g_deferredRowBytes, g_deferredDepth;
 bool g_samplerWrap[2];
@@ -623,11 +633,14 @@ bool capture_frame(const char *path)
 
 bool DarkRenderOpen(int width, int height, const char *title)
 {
+   g_PlatformLoadProgressHook = load_progress;   // (the loading bar, below)
+   set_load_thread();
    if (g_context || g_rt) {
       // A logical mode change can replace the display device and its backing
       // pixel vector during an application frame. Do not retain a pointer to
       // the preceding mode's canvas.
       g_deferredPixels = nullptr;
+      g_lastPixels = nullptr;
       g_width = width; g_height = height;
       DarkRenderSetTitle(title);
       SDL_GetWindowSize(g_window, &g_clientWidth, &g_clientHeight);
@@ -771,6 +784,9 @@ void DarkRenderClose(void)
    g_presentPending = false;
    g_resizePending = false;
    g_deferredPixels = nullptr;
+   g_lastPixels = nullptr;
+   g_PlatformLoadProgressHook = nullptr;
+   load_finish();
    SDL_QuitSubSystem(SDL_INIT_VIDEO | SDL_INIT_EVENTS);
    if (g_trace) { fclose(g_trace); g_trace = nullptr; }
 }
@@ -1006,6 +1022,10 @@ void DarkRenderSetRelativeMouse(bool enabled)
 static void present_legacy_frame(const void *pixels, int width, int height,
    int rowBytes, int depth, const uint8_t *palette)
 {
+   if (pixels) {
+      g_lastPixels = pixels; g_lastPalette = palette; g_lastWidth = width;
+      g_lastHeight = height; g_lastRowBytes = rowBytes; g_lastDepth = depth;
+   }
 #ifdef DARK_RT
    if (g_rt) {
       if (!pixels) return;
@@ -1097,6 +1117,161 @@ static void present_legacy_frame(const void *pixels, int width, int height,
    }
    g_presentPending = true;
 }
+
+// ---- the loading bar -------------------------------------------------------
+// While a mission or a saved game loads, the engine runs for seconds without
+// presenting (its screen updates wait for the end of the application frame
+// the load runs in): the window looked frozen and macOS called it not
+// responding. PlatformLoadProgress, called through the load, pumps the
+// window's events and, a few times a second, puts the last screen up again
+// with a bar along its foot. The bar moves with the time the last load took
+// (remembered between runs), easing toward the end, so it never stops.
+namespace {
+using LoadClock = std::chrono::steady_clock;
+LoadClock::time_point g_loadStart, g_loadLast, g_loadDrawn;
+bool g_loadActive = false;
+std::thread::id g_loadThread;   // the window's (set when it opens)
+double g_loadExpected = 0;   // seconds; 0 not read yet
+std::vector<uint8_t> g_loadCanvas;
+
+std::string load_time_path()
+{
+   const char *home = getenv("HOME");
+   if (!home || !*home)
+      return "load_time.txt";
+#if defined(__APPLE__)
+   return std::string(home) + "/Library/Application Support/Dark Engine Restored/load_time.txt";
+#else
+   return std::string(home) + "/.config/dark-engine-restored/load_time.txt";
+#endif
+}
+
+void load_finish()
+{
+   if (!g_loadActive)
+      return;
+   g_loadActive = false;
+   const double took = std::chrono::duration<double>(g_loadLast - g_loadStart).count();
+   if (took < 1.0)
+      return;
+   // a running average: one slow first load (caches cold) does not stick
+   g_loadExpected = g_loadExpected > 0 ? 0.5 * g_loadExpected + 0.5 * took : took;
+   if (FILE *f = fopen(load_time_path().c_str(), "w")) {
+      fprintf(f, "%.2f\n", g_loadExpected);
+      fclose(f);
+   }
+}
+
+uint8_t nearest_index(const uint8_t *pal, int r, int g, int b)
+{
+   int best = 0, bestD = 1 << 30;
+   for (int i = 1; i < 256; ++i) {
+      const int dr = pal[i * 3] - r, dg = pal[i * 3 + 1] - g, db = pal[i * 3 + 2] - b;
+      const int d = dr * dr + dg * dg + db * db;
+      if (d < bestD) { bestD = d; best = i; }
+   }
+   return uint8_t(best);
+}
+
+void draw_load_bar(float fraction)
+{
+   const bool deferred = g_deferredPixels != nullptr;
+   const void *src = deferred ? g_deferredPixels : g_lastPixels;
+   if (!src)
+      return;
+   const int w = deferred ? g_deferredWidth : g_lastWidth;
+   const int h = deferred ? g_deferredHeight : g_lastHeight;
+   const int rowBytes = deferred ? g_deferredRowBytes : g_lastRowBytes;
+   const int depth = deferred ? g_deferredDepth : g_lastDepth;
+   const uint8_t *pal = deferred ? g_deferredPalette : g_lastPalette;
+   if (w <= 0 || h <= 0 || rowBytes <= 0 || (depth != 8 && depth != 16) || (depth == 8 && !pal))
+      return;
+   g_loadCanvas.assign(static_cast<const uint8_t *>(src),
+                       static_cast<const uint8_t *>(src) + size_t(rowBytes) * h);
+   // along the foot of the screen: a dark track, a warm fill, a lighter edge
+   static const int kRgb[3][3] = {{24, 22, 18}, {196, 160, 96}, {120, 104, 76}};
+   uint16_t c16[3];
+   uint8_t c8[3] = {};
+   for (int k = 0; k < 3; ++k) {
+      c16[k] = uint16_t(((kRgb[k][0] >> 3) << 11) | ((kRgb[k][1] >> 2) << 5) | (kRgb[k][2] >> 3));
+      if (depth == 8)
+         c8[k] = nearest_index(pal, kRgb[k][0], kRgb[k][1], kRgb[k][2]);
+   }
+   const int x0 = w / 8, x1 = w - w / 8, bh = std::max(4, h / 90);
+   const int y0 = h - h / 14 - bh, y1 = y0 + bh;
+   const int fill = x0 + int(float(x1 - x0) * std::clamp(fraction, 0.0f, 1.0f));
+   for (int y = y0 - 1; y <= y1; ++y) {
+      if (y < 0 || y >= h)
+         continue;
+      uint8_t *row = g_loadCanvas.data() + size_t(y) * rowBytes;
+      for (int x = x0 - 1; x <= x1; ++x) {
+         if (x < 0 || x >= w)
+            continue;
+         const bool edge = y == y0 - 1 || y == y1 || x == x0 - 1 || x == x1;
+         const int kind = edge ? 2 : (x < fill ? 1 : 0);
+         if (depth == 8)
+            row[x] = c8[kind];
+         else
+            reinterpret_cast<uint16_t *>(row)[x] = c16[kind];
+      }
+   }
+   const bool scene = g_scene;
+   g_scene = false;   // (the canvas alone: no scene behind it is traced yet)
+   present_legacy_frame(g_loadCanvas.data(), w, h, rowBytes, depth, pal);
+   g_presentPending = true;
+   swap_presented_frame();
+   g_scene = scene;
+   // (the bar's copy is not the engine's canvas: not kept as the last one)
+   g_lastPixels = src;
+}
+
+void set_load_thread() { g_loadThread = std::this_thread::get_id(); }
+
+void load_progress(const char *stage)
+{
+   // (images are read on other threads too: the window is the main thread's)
+   if (std::this_thread::get_id() != g_loadThread)
+      return;
+   const auto now = LoadClock::now();
+   // A load is begun by the engine's load messages ("+..." stages); the rest
+   // (world cells, images read, the path tracer's textures) only carry one
+   // on -- the same reads happen in play too.
+   const bool begins = stage && stage[0] == '+';
+   if (g_loadActive && now - g_loadLast > std::chrono::seconds(4))
+      load_finish();
+   if (!g_loadActive) {
+      if (!begins)
+         return;
+      g_loadActive = true;
+      g_loadStart = now;
+      g_loadDrawn = now;
+      if (g_loadExpected <= 0) {
+         g_loadExpected = 12.0;
+         if (FILE *f = fopen(load_time_path().c_str(), "r")) {
+            double v = 0;
+            if (fscanf(f, "%lf", &v) == 1 && v > 0.5 && v < 600)
+               g_loadExpected = v;
+            fclose(f);
+         }
+      }
+   }
+   g_loadLast = now;
+   if (now - g_loadDrawn < std::chrono::milliseconds(66))
+      return;
+   g_loadDrawn = now;
+   SDL_PumpEvents();   // the window answers (no spinning beach ball)
+   const double t = std::chrono::duration<double>(now - g_loadStart).count();
+   if (t < 0.4)
+      return;   // a quick one: no bar flashed up
+#ifdef DARK_RT
+   if (g_rt && darkrt::FrameInProgress())
+      return;   // (the path tracer's own frame is being built: events only)
+#endif
+   // ~85% at the time the last load took, then on toward the end
+   const double fraction = 1.0 - std::exp(-t / std::max(0.5, g_loadExpected / 1.9));
+   draw_load_bar(float(fraction));
+}
+} // namespace
 
 void DarkRenderPresent(const void *pixels, int width, int height, int rowBytes,
                        int depth, const uint8_t *palette)

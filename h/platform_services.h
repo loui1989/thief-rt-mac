@@ -108,6 +108,13 @@ EXTERN void PlatformExitProcess(int status);
 EXTERN BOOL PlatformSetClipboardText(const char *text);
 EXTERN int PlatformGetClipboardText(char *text, int capacity);
 EXTERN void PlatformSetTextInputActive(BOOL active);
+// Called often while a mission or a saved game loads (between the loop
+// clients' load work, each world cell, each image read): keeps the window
+// answering and shows a loading bar over the screen (no more than ~15 times
+// a second; nothing for a load under half a second). stage: a short name.
+EXTERN void PlatformLoadProgress(const char *stage);
+// the renderer's side of it (set by the renderer when it opens)
+EXTERN void (*g_PlatformLoadProgressHook)(const char *stage);
 EXTERN BOOL PlatformGetCurrentDirectory(char *path, int capacity);
 EXTERN BOOL PlatformGetExecutableDirectory(char *path, int capacity);
 // Runs one child synchronously with an explicit argument vector and working

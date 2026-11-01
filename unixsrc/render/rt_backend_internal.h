@@ -48,6 +48,8 @@ void SetCanvas(const void *pixels, int width, int height, int rowBytes,
                const Rect &viewport);
 // Draws the frame. drawable: the whole window in pixels.
 void Present(int drawableWidth, int drawableHeight, bool vsync);
+// A frame of the path tracer's is being built (no other may be presented).
+bool FrameInProgress();
 // The settings panel (Cmd+, or F10). True if the key was used and must not
 // reach the game. scancode/mods: SDL's.
 bool HandleKey(int scancode, int mods, bool down, bool repeat);

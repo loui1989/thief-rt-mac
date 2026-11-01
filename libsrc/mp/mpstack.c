@@ -170,7 +170,11 @@ void mp_evaluate_motion(multiped * mp, mps_motion_node * m, quat * rot,
       }
 
       // Apply current base rotation to initial motion orientation.
+      // (each kept a rotation: a facing a little longer than one, multiplied
+      // in every frame and every turn, grew to infinity -- see quat_normalize)
+      quat_normalize(&m->base_orient);
       quat_mul(&q1, &rot[ROOT_JOINT_ID(mp)], &m->base_orient);
+      quat_normalize(&q1);
       quat_copy(&rot[ROOT_JOINT_ID(mp)], &q1);
 
       // Get translation from motion start, in case we didn't start at the beginning.

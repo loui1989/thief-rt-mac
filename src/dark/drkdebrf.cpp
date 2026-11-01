@@ -5,6 +5,8 @@
 
 // $Header: r:/t2repos/thief2/src/dark/drkdebrf.cpp,v 1.22 2000/03/23 21:33:06 adurant Exp $
 #include <appagg.h>
+#include <platform_services.h>
+#include <chrono>
 #include <drkdebrf.h>
 
 #include <cursors.h>
@@ -975,8 +977,22 @@ public:
          }
       }
 
-      // pump events
-      pGameShell->PumpEvents(kPumpAll);             
+      // pump events -- some thirty times a second, not at every read: the
+      // world's cells are read a few bytes at a time (each polygon's light
+      // map apart), and pumping all events hundreds of thousands of times
+      // took seconds of a big mission's load
+      {
+         static auto s_lastPump = std::chrono::steady_clock::now();
+         const auto now = std::chrono::steady_clock::now();
+         if (now - s_lastPump >= std::chrono::milliseconds(33))
+         {
+            s_lastPump = now;
+            pGameShell->PumpEvents(kPumpAll);
+            // and the dials (drawn above) shown: the screen's updates
+            // otherwise waited for the end of the load (PlatformLoadProgress)
+            PlatformLoadProgress("+mission file");
+         }
+      }
    }
 
 
