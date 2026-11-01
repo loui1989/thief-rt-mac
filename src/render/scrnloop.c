@@ -34,6 +34,32 @@
 // Must be last header
 #include <dbmem.h>
 
+// The palette a true-colour picture gives when asked for one (see
+// ResPngReadPalette): a 3-3-2 colour cube, standing in for none.
+static BOOL PaletteIsTrueColourStandIn(const uchar *pal)
+{
+   int i;
+   for (i = 0; i < 256; ++i)
+      if (pal[i * 3] != (uchar)(((i >> 5) & 7) * 255 / 7) ||
+          pal[i * 3 + 1] != (uchar)(((i >> 2) & 7) * 255 / 7) ||
+          pal[i * 3 + 2] != (uchar)((i & 3) * 255 / 3))
+         return FALSE;
+   return TRUE;
+}
+
+// the game's own palette (pal\\darkpal, or default_game_palette)
+static IRes *BindGamePalette(IResMan *pResMan)
+{
+   char name[32] = "darkpal";
+   IRes *pRes;
+   config_get_raw("default_game_palette", name, sizeof(name) - 1);
+   name[sizeof(name) - 1] = '\0';
+   pRes = IResMan_Bind(pResMan, name, RESTYPE_PALETTE, NULL, "pal", 0);
+   if (pRes == NULL && strcmp(name, "darkpal") != 0)
+      pRes = IResMan_Bind(pResMan, "darkpal", RESTYPE_PALETTE, NULL, "pal", 0);
+   return pRes;
+}
+
 BOOL gScrnLoopSetModeFailed = FALSE; 
 static BOOL gScreenPreservedForNestedMode = FALSE;
 
@@ -131,6 +157,28 @@ eLoopMessageResult LGAPI ScrnManLoopFunc(void* context, eLoopMessage msg, tLoopM
             if (pRes)
             {
                void *palette = IRes_Lock(pRes);
+               if (palette && PaletteIsTrueColourStandIn((const uchar *)palette))
+               {
+                  // A panel whose background a mission replaced with a true-colour
+                  // picture (Black Parade's loadout): the picture has no palette,
+                  // and the 8-bit pieces drawn over it (the loadout's buy arrows)
+                  // came out in the stand-in's colours -- cyan and red. They were
+                  // drawn for the game's own palette: that one.
+                  IRes *pGame = BindGamePalette(pResMan);
+                  if (pGame)
+                  {
+                     void *gamePal = IRes_Lock(pGame);
+                     if (gamePal)
+                     {
+                        IRes_Unlock(pRes);
+                        SafeRelease(pRes);
+                        pRes = pGame;
+                        palette = gamePal;
+                     }
+                     else
+                        SafeRelease(pGame);
+                  }
+               }
                if (palette)
                {
                   ScrnNewPalette(palette,0,256);
