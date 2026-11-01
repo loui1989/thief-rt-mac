@@ -124,6 +124,10 @@ void RenderRTPrepBegin(void);
 // this (60, 100 or 120); 0 when not set.
 int RenderRTFrameCap(void);
 void RenderRTPrepEnd(void);
+// Within the preparations: the time since the last mark (or their start) is
+// put to this part of them (0 the world, 1 the lights found, 2 their reach,
+// 3 the objects' lights, 4 models out of view), for the performance log.
+void RenderRTPrepMark(int part);
 int RenderRTPointLighting(const float pos[3], float *value);
 void RenderRTNoteLighting(float original, float traced);
 

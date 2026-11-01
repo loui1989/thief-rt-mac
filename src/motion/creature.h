@@ -150,6 +150,7 @@ public:
 
    int GetType() { return m_CreatureType; };
    mxs_vector &GetJoint(int joint) { return m_pJoints[joint]; };
+   int GetNumJoints() const { return m_pJoints ? m_nJoints : 0; };
    mxs_matrix &GetJointOrient(int joint) { return m_pOrients[joint]; };
    
    const sCreatureDesc *GetCreatureDesc();

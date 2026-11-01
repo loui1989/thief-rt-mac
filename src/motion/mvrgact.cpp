@@ -387,7 +387,12 @@ void cGroundActionManeuver::Execute()
          // ground found wrong, it was put a floor lower and got up sunk to the
          // waist (Black Parade's floor sitters). Kept at its height; and no
          // creature dropped more than a step in one go.
-         if (curLoc->vec.z < desiredZ - 1.0f || curLoc->vec.z - desiredZ > 1.5f)
+         // (Sitting or lying is told by its pose: one whose butt is low but
+         // whose pose stands -- sunk -- is put back up on its feet.)
+         float poseHeight = 0;
+         const BOOL lowPose = MvrGetPoseButtHeight(m_pMotor->GetObjID(), &poseHeight) &&
+                              poseHeight < 0.7f * (desiredZ - groundHeight);
+         if ((curLoc->vec.z < desiredZ - 1.0f && lowPose) || curLoc->vec.z - desiredZ > 1.5f)
          {
             static int s_told = 0;
             if (s_told++ < 20)

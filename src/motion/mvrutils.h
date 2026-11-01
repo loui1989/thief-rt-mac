@@ -58,6 +58,7 @@ EXTERN void MvrSetTerrStandingOffset(ObjID standingObj, mxs_vector *pOffset);
 EXTERN int  MvrRandomIntInRange(int low, int high);
 
 EXTERN BOOL MvrGetEndButtHeight(const IMotor *pMotor, int motionNum, float *pHeight);
+EXTERN BOOL MvrGetPoseButtHeight(ObjID obj, float *pHeight);
 
 EXTERN void MvrUtilsRegisterDefaultObjFlags(ObjID obj);
 EXTERN void MvrUtilsUnRegisterDefaultObjFlags(ObjID obj);

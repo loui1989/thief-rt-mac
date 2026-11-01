@@ -2131,9 +2131,13 @@ static void portal_rt_begin(float zoom, int cell)
    RenderRTFog(portal_frame_fog_rgb, portal_fog_on ? portal_frame_fog_dist : 0.0f);
    RenderRTPrepBegin();
    portal_rt_submit_world();
+   RenderRTPrepMark(0);
    portal_rt_find_lights(cell);
+   RenderRTPrepMark(1);
    portal_rt_compute_reach(cell, 90.0f / 0.3048f);
+   RenderRTPrepMark(2);
    objlight_rt_submit();
+   RenderRTPrepMark(3);
    RenderRTPrepEnd();
 }
 #endif
@@ -2415,6 +2419,7 @@ cleanup:
       const int rt_suppressed = RenderRTSuppressCapture(0);
       RenderRTPrepBegin();
       RenderRTGameDrawExtraObjects();
+      RenderRTPrepMark(4);
       RenderRTPrepEnd();
       RenderRTSuppressCapture(rt_suppressed);
    }

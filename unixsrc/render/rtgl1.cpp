@@ -1263,6 +1263,8 @@ RgTransform identity_transform()
    return RgTransform{{{1, 0, 0, 0}, {0, 1, 0, 0}, {0, 0, 1, 0}}};
 }
 
+double g_uploadLibrarySecs = 0;   // time inside rgUploadMeshPrimitive (the "capture parts" line)
+
 bool upload(uint64_t id, const RgMeshPrimitiveInfo &prim, bool firstPerson = false)
 {
    auto mesh = RgMeshInfo{
@@ -1276,7 +1278,10 @@ bool upload(uint64_t id, const RgMeshPrimitiveInfo &prim, bool firstPerson = fal
       .animationTime = 0.0f,
       .localLightsIntensity = 1.0f,
    };
-   if (rt.rgUploadMeshPrimitive(&mesh, &prim) == RG_RESULT_SUCCESS) {
+   const auto t0 = std::chrono::steady_clock::now();
+   const bool ok = rt.rgUploadMeshPrimitive(&mesh, &prim) == RG_RESULT_SUCCESS;
+   g_uploadLibrarySecs += std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
+   if (ok) {
       ++g_framePrims;
       return true;
    }
@@ -1292,6 +1297,8 @@ bool upload(uint64_t id, const RgMeshPrimitiveInfo &prim, bool firstPerson = fal
 struct CaptureParts {
    double draws = 0, ends = 0, faces = 0, match = 0, world = 0, models = 0, lights = 0;
    double drawCalls = 0, fresh = 0;
+   double hashes = 0;   // models' ends hashing what was drawn
+   double prep[5] = {};              // RenderRTPrepMark's parts
 } g_capParts;
 struct PartTimer {
    double &acc;
@@ -3258,6 +3265,7 @@ void perf_frame(double t)
    if (!g_perf.wasOn) {
       g_perf = Perf{};
       g_capParts = CaptureParts{};
+      g_uploadLibrarySecs = 0;
       g_perf.wasOn = true;
       g_perf.start = g_perf.windowStart = g_perf.last = t;
       g_perf.lastWait = g_ui.waitSum; g_perf.lastDraw = g_ui.drawSum;
@@ -3372,12 +3380,17 @@ void perf_frame(double t)
                  "of these, faces made steady %.2f, matched to last frame %.2f (%.0f models captured anew)\n",
               cp.draws * ms, cp.drawCalls / n, cp.ends * ms, cp.lights * ms, cp.world * ms, cp.models * ms,
               cp.faces * ms, cp.match * ms, cp.fresh / n);
+      fprintf(f, "  more parts (ms per frame): inside the path tracer's library %.2f; models' ends hashing %.2f; "
+                 "rt prep: world %.2f, lights found %.2f, their reach %.2f, objects' lights %.2f, models out of view %.2f\n",
+              g_uploadLibrarySecs * 1000.0 / n, cp.hashes * ms, cp.prep[0] * ms, cp.prep[1] * ms, cp.prep[2] * ms,
+              cp.prep[3] * ms, cp.prep[4] * ms);
       fclose(f);
    }
    g_perf.frames.clear();
    g_perf.clients.clear();
    g_perf.wait = g_perf.draw = g_perf.capture = g_perf.prep = 0;
    g_capParts = CaptureParts{};
+   g_uploadLibrarySecs = 0;
    g_perf.models = g_perf.prims = g_perf.tris = g_perf.kept = g_perf.lights = 0;
    g_perf.windowStart = t;
 }
@@ -4598,12 +4611,20 @@ int RenderRTFrameCap(void) { return g_active ? g_cfg.frameCap : 0; }
 
 int RenderRTDetectionWanted(void) { return g_active && g_cfg.rtDetection && g_frameNumber > 2 ? 1 : 0; }
 
-static std::chrono::steady_clock::time_point s_prepStart;
+static std::chrono::steady_clock::time_point s_prepStart, s_prepMark;
 static int s_prepDepth = 0;
 void RenderRTPrepBegin(void)
 {
    if (s_prepDepth++ == 0)
-      s_prepStart = std::chrono::steady_clock::now();
+      s_prepMark = s_prepStart = std::chrono::steady_clock::now();
+}
+void RenderRTPrepMark(int part)
+{
+   if (s_prepDepth <= 0 || part < 0 || part >= 5)
+      return;
+   const auto now = std::chrono::steady_clock::now();
+   g_capParts.prep[part] += std::chrono::duration<double>(now - s_prepMark).count();
+   s_prepMark = now;
 }
 void RenderRTPrepEnd(void)
 {
@@ -5218,7 +5239,9 @@ void RenderRTObjectEnd(void)
       c.whole = g_currentWhole;
       // (in any order: the game draws a model's faces in an order that
       // changes as they turn toward or away from the camera)
+      const auto th = std::chrono::steady_clock::now();
       const uint64_t h = hash_prims_unordered(g_currentCapture);
+      g_capParts.hashes += std::chrono::duration<double>(std::chrono::steady_clock::now() - th).count();
       // a model that has not changed since it was last made ready: as it was
       // (sorting its faces and finding its normals again each frame cost
       // milliseconds a frame in a busy street)

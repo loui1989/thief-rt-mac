@@ -3853,13 +3853,39 @@ next_coll_obj:
          {
             if ((contact_count = SphrSpherecastStatic(&start, &end, ((cPhysSphereModel *)pModel)->GetRadius(i), 1)) > 0)
             {
-               // Find the earliest contact time
-               pContact = &gaSphrContact[0];
-               for (j=1; j<contact_count; j++)
+               // Find the earliest contact time -- leaving out a floor under
+               // the sphere (contact straight below its centre, the centre
+               // staying above it). A creature's height is kept by its
+               // motions and its ground snapping, not here: the slide below
+               // only works sideways, so a floor contact was "collided" with
+               // on every try, and after the last one the creature was put
+               // back where it was -- in every direction, every frame. The
+               // butt sphere reaches the floor only when a motion takes a
+               // creature down to sit or lie (Black Parade's floor sitters):
+               // it froze there, then got up stuck to the waist in the floor.
+               pContact = NULL;
+               for (j=0; j<contact_count; j++)
                {
-                  if (gaSphrContact[j].time < pContact->time)
+                  mxs_vector up;
+                  mx_sub_vec(&up, &gaSphrContact[j].point_on_ray, &gaSphrContact[j].point_in_world);
+                  const mxs_real len = mx_mag_vec(&up);
+                  if (len > 0.001f && up.z > 0.9f * len &&
+                      end.vec.z > gaSphrContact[j].point_in_world.z + 0.1f)
+                  {
+                     static int s_told = 0;
+                     if (s_told < 8 && iterations == 0)
+                     {
+                        ++s_told;
+                        mprintf("%s: its sphere %d on the floor (at %.2f) not taken as a collision\n",
+                                ObjWarnName(objID), i, gaSphrContact[j].point_in_world.z);
+                     }
+                     continue;   // (a floor)
+                  }
+                  if (pContact == NULL || gaSphrContact[j].time < pContact->time)
                      pContact = &gaSphrContact[j];
                }
+               if (pContact == NULL)
+                  contact_count = 0;
             }
          }
          else

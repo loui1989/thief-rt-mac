@@ -350,6 +350,22 @@ BOOL MvrGetRawMovement(const IMotor *pMotor, const int motionNum, sMotionPhys &p
    return MvrGetEndButtHeight(pMotor, motionNum, &phys.buttZOffset);
 }
 
+// How far the creature's butt is above its lowest joint, as it stands now
+// (in the pose its last motion left it in): a little for one sitting or lying,
+// about its standing butt height for one on its feet. FALSE if it has no joints.
+BOOL MvrGetPoseButtHeight(ObjID obj, float *pHeight)
+{
+   cCreature *pCreature = CreatureFromObj(obj);
+   if (!pCreature || pCreature->GetNumJoints() <= 0)
+      return FALSE;
+   float lowest = 1e30f;
+   for (int i = 0; i < pCreature->GetNumJoints(); i++)
+      if (pCreature->GetJoint(i).z < lowest)
+         lowest = pCreature->GetJoint(i).z;
+   *pHeight = pCreature->GetMultiped()->global_pos.z - lowest;
+   return TRUE;
+}
+
 BOOL MvrGetEndButtHeight(const IMotor *pMotor, int motionNum, float *pHeight)
 {
 // @HACK: don't want this really.  Want end offset computed by motion processor
