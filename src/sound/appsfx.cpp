@@ -3,6 +3,9 @@
 
 #include <string.h>
 #include <chrono>
+#include <set>
+#include <string>
+#include <stdio.h>
 
 #include <dynarray.h>
 #include <math.h>
@@ -777,6 +780,27 @@ double SfxNowMs(void)
 
 static bool _sfx_start_play_impl(_sfx *fx, BOOL after_delay);
 
+// Why a sound did not play, in the log: once for each sound and reason.
+static void SfxRefused(const char *name, const char *why, IRes *res)
+{
+   static std::set<std::string> s_told;
+   static int s_lines = 0;
+   std::string key = std::string(name ? name : "?") + "|" + why;
+   if (s_lines >= 300 || !s_told.insert(key).second)
+      return;
+   ++s_lines;
+   unsigned char head[16] = {0};
+   long size = 0;
+   if (res)
+   {
+      size = res->GetSize();
+      if (size >= 16)
+         res->ExtractPartial(0, 15, head);
+   }
+   fprintf(stderr, "Sound: \"%s\" not played: %s (resource %ld bytes, starts %.4s)\n",
+           name ? name : "?", why, size, head[0] ? (const char *)head : "----");
+}
+
 static bool _sfx_start_play(_sfx *fx, BOOL after_delay)
 {
    const double t0 = SfxNowMs();
@@ -877,6 +901,7 @@ static bool _sfx_start_play_impl(_sfx *fx, BOOL after_delay)
             bHaveDataSource = true;
          else
          {
+            SfxRefused(tmpname, "could not be read (lock failed)", fx->pRes);
             Warning(("sfx_start_play: couldn't Lock %s\n", tmpname));
             fx->pRes->Release();
             fx->pRes = NULL;
@@ -884,7 +909,10 @@ static bool _sfx_start_play_impl(_sfx *fx, BOOL after_delay)
       }
    }
    else
+   {
+      SfxRefused(tmpname, "no such sound file found", NULL);
       Warning(("sfx_start_play: couldn't Prep %s\n", tmpname));
+   }
 
    if (bHaveDataSource)
    {
@@ -979,6 +1007,7 @@ static bool _sfx_start_play_impl(_sfx *fx, BOOL after_delay)
          }
          else
          {
+            SfxRefused(tmpname, (fx->parm.flag & SFXFLG_LOOP) ? "the mixer would not play it (looped)" : "the mixer would not play it", fx->pRes);
             snd_mprintf(("_sfx_start_play: couldnt play sound sample for %s (aftrdlay = %d)\n",tmpname,after_delay));
             // if this is the frame we called into appsfx
             // i.e. the frame that SFX_PlayRaw or whatever was called
@@ -996,6 +1025,9 @@ static bool _sfx_start_play_impl(_sfx *fx, BOOL after_delay)
       } 
       else
       {
+         SfxRefused(tmpname, (fx->parm.flag & SFXFLG_STREAM) ? "no sound source could be made of it (streamed)" :
+                             (fx->parm.flag & SFXFLG_LOOP) ? "no sound source could be made of it (looped)" :
+                             "no sound source could be made of it", fx->pRes);
 #if defined(DBG_ON) || defined(MPRINT_TRACK) || defined(PLAYTEST)
          mprintf("_sfx_start_play: couldnt create %s\n",tmpname);
 #endif         
@@ -1717,6 +1749,8 @@ int SFX_Play_Raw(int type, sfx_parm *parm, const char *sfx_name)
 int SFX_Play_Obj(int type, sfx_parm *parm, const char *sfx_name, int objid)
 {
    int hnd=SFX_Get();
+   if (hnd==SFX_NO_HND)
+      SfxRefused(sfx_name, "no free sound handle", NULL);
 #ifndef SHIP
    if (!ObjExists(objid))
    {
@@ -1745,6 +1779,8 @@ int SFX_Play_Obj(int type, sfx_parm *parm, const char *sfx_name, int objid)
 int SFX_Play_Vec(int type, sfx_parm *parm, const char *sfx_name, mxs_vector *vector)
 {
    int hnd=SFX_Get();
+   if (hnd==SFX_NO_HND)
+      SfxRefused(sfx_name, "no free sound handle", NULL);
    if (hnd!=SFX_NO_HND)
    {
       _sfx *newfx=&fxlist[hnd];
