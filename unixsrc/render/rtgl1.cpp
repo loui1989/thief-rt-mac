@@ -1356,6 +1356,7 @@ struct CachedObject {
    // match_previous)
    std::vector<CapturedPrim> prev;
    bool prevTaken = false;  // prev is last given prims, swapped in (not copied) with this capture
+   bool splitGiven = false; // last given split round a flame (c.split), not as c.prims
    bool fresh = false;      // captured anew this frame (not as it was)
    bool steadied = false;   // steady_faces done on this frame's capture
    // a torch round its flame's light: its faces next to the flame let the
@@ -1789,7 +1790,13 @@ extern "C" int highlit_obj;                 // objlight.c: the object in reach (
 extern "C" float objlight_highlight_level;  // how much the game lights it up (highlight_level)
 namespace {
 
-void upload_captured(uint64_t id, const CapturedPrim &p, bool passLight = false)
+// Thief's own RTGL1 (patches/rtgl1-lib/0016): a primitive given with this flag
+// has the same vertices and indices as when last given under its id -- the
+// path tracer keeps what it found from them then (a key and a cell, from every
+// vertex) instead of finding it again. (A library without the patch ignores it.)
+constexpr RgMeshPrimitiveFlags kRtPrimUnchanged = 1u << 29;
+
+void upload_captured(uint64_t id, const CapturedPrim &p, bool passLight = false, bool unchanged = false)
 {
    // a torch's own model sits around its light: as a shadow caster it put
    // the light out (lit or doused, the room looked the same)
@@ -1818,7 +1825,8 @@ void upload_captured(uint64_t id, const CapturedPrim &p, bool passLight = false)
       .sType = RG_STRUCTURE_TYPE_MESH_PRIMITIVE_INFO,
       .pNext = nullptr,
       .flags = p.flags | shading | glowFlags |
-               (passLight ? RgMeshPrimitiveFlags(RG_MESH_PRIMITIVE_NO_SHADOW) : 0u),
+               (passLight ? RgMeshPrimitiveFlags(RG_MESH_PRIMITIVE_NO_SHADOW) : 0u) |
+               (unchanged ? kRtPrimUnchanged : 0u),
       .primitiveIndexInMesh = 0,
       .pVertices = p.verts.data(),
       .vertexCount = uint32_t(p.verts.size()),
@@ -2208,6 +2216,7 @@ void upload_objects()
                              ? std::clamp(objlight_highlight_level, 0.0f, 1.0f) * 0.7f
                              : 0.0f;
       if (c.passLight && c.flameInside && g_cfg.torchShadows) {
+         const bool splitKept = c.splitValid && !wasFresh && c.splitGiven;
          if (!c.splitValid) {
             // the faces within 12 cm of the flame (the cup it burns in) let
             // its light out; the rest cast shadows
@@ -2239,15 +2248,18 @@ void upload_objects()
          }
          const std::vector<uint64_t> ids = object_prim_ids(obj, c.split);
          for (size_t i = 0; i < c.split.size(); ++i)
-            upload_captured(ids[i], c.split[i], i < c.splitNear);
+            upload_captured(ids[i], c.split[i], i < c.splitNear, splitKept);
+         c.splitGiven = true;
       } else {
          // (named again only when its primitives change: a vector and a map
          // made for each of hundreds of models every frame)
          if (wasFresh || c.ids.size() != c.prims.size())
             c.ids = object_prim_ids(obj, c.prims);
          const std::vector<uint64_t> &ids = c.ids;
+         // (as given last time it was given, unless captured anew since)
          for (size_t i = 0; i < c.prims.size(); ++i)
-            upload_captured(ids[i], c.prims[i], c.passLight);
+            upload_captured(ids[i], c.prims[i], c.passLight, !wasFresh && !c.splitGiven);
+         c.splitGiven = false;
       }
       g_uploadHighlight = 0.0f;
       ++it;
@@ -2289,6 +2301,7 @@ struct WorldGroup {
    std::vector<Poly> polys;
    float bmin[3] = {1e30f, 1e30f, 1e30f}, bmax[3] = {-1e30f, -1e30f, -1e30f};   // meters
    bool shown = false;               // given to the path tracer last frame
+   bool given = false;               // given to it since the world was made (unchanged since)
 };
 constexpr float kWorldChunk = 24.0f;      // meters
 constexpr float kWorldReach = 60.0f;      // meters walked from the camera (as Raze RT)
@@ -2407,7 +2420,10 @@ void upload_world()
          .classicLight = 1.0f,
          .emissiveGi = 0.0f,
       };
+      if (g.given)
+         prim.flags |= kRtPrimUnchanged;
       upload(0x100000000ull + i, prim);
+      g.given = true;
       tris += g.indices.size() / 3;
       if (flags & RG_MESH_PRIMITIVE_ALPHA_TESTED)
          cutTris += g.indices.size() / 3;
