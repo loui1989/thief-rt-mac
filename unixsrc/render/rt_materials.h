@@ -241,6 +241,11 @@ books/*          none
 bitmap/*         none
 mesh/txt*/*      skin
 
+# boarded-up, shuttered and empty windows: no glass, only wood
+*/rwind*         wood
+*/win325s*      wood
+*/winwd64s*     wood
+
 # windows: lit panes glow; stained glass is glass
 *glass*          glass
 *glpries*        glass
@@ -249,7 +254,6 @@ mesh/txt*/*      skin
 */rose*          glass
 */win[0-9]*      window
 */win[0-9]*l     window
-*/rwind*         window
 */window*        window
 */winwal*        window
 */cfwin*         window
