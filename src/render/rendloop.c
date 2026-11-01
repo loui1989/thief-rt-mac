@@ -5,6 +5,7 @@
 
 // $Header: r:/t2repos/thief2/src/render/rendloop.c,v 1.95 2000/02/18 17:25:53 MAT Exp $
 
+#include <render_rt.h>
 #include <lg.h>
 #include <loopapi.h>
 #include <stdio.h>
@@ -424,6 +425,11 @@ extern BOOL (*pSkyRenderCallback)(void);
 // return FALSE if new-style sky is NOT to be rendered, and old one should be used.
 static BOOL RenderNewSky(void)
 {
+   // The path tracer draws its own sky and leaves the sky polygons out:
+   // the enhanced sky (clouds, stars, moon) drawn under it was only work,
+   // and its clouds crashed loading Black Parade's second mission.
+   if (RenderRTActive())
+      return FALSE;
    if (SkyRendererUseEnhanced())
    {
       SkyRendererRender();
