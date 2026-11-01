@@ -3705,8 +3705,91 @@ char  cur_motion_id;
 // This always applies a scale factor to stretch the motion based on
 // creature size.  Stretch parameters computed by maneuvers should take
 // this into account.
+// Each creature's last motions, with where its butt was as each began: a
+// creature found sunk into the floor (Black Parade's sitters) logs them.
+struct sMotHistory { ObjID obj; int motion[8]; float z[8]; int second; int n; };
+static sMotHistory g_MotHistory[256];   // (plain arrays: this file is built packed)
+static int g_MotHistoryUsed = 0;
+static sMotHistory *MotHistoryFor(ObjID obj)
+{
+   for (int i = 0; i < g_MotHistoryUsed; i++)
+      if (g_MotHistory[i].obj == obj)
+         return &g_MotHistory[i];
+   sMotHistory *h = &g_MotHistory[g_MotHistoryUsed < 256 ? g_MotHistoryUsed++ : (obj & 255)];
+   memset(h, 0, sizeof(*h));
+   h->obj = obj;
+   h->second = -1;
+   return h;
+}
+
+void cCreature::SunkCheck()
+{
+   static int s_lines = 0;
+   if (s_lines >= 12 || IsBallistic() || m_nJoints <= 0)
+      return;
+   // once a second for each creature
+   sMotHistory *hist = MotHistoryFor(m_ObjID);
+   const int second = (int)(GetSimTime() / 1000);
+   if (hist->second == second)
+      return;
+   hist->second = second;
+   const mxs_vector &butt = m_sMultiped.global_pos;
+   Location start, end, hit;
+   ObjID hitObj;
+   MakeLocationFromVector(&start, &butt);
+   start.vec.z += 2.5f;
+   MakeLocationFromVector(&end, &butt);
+   end.vec.z -= 11.0f;
+   if (PhysRaycast(start, end, &hit, &hitObj, 0, kCollideTerrain) == kCollideNone)
+      return;
+   float lowest = 1e30f;
+   int lowestJoint = -1;
+   for (int i = 0; i < m_nJoints; i++)
+      if (m_pJoints[i].z < lowest)
+      {
+         lowest = m_pJoints[i].z;
+         lowestJoint = i;
+      }
+   if (lowest > hit.vec.z - 0.5f)
+      return;   // nothing well under the floor
+   ++s_lines;
+   mprintf("%s sunk into the floor: floor at %.2f, butt at %.2f (%.2f above it), its lowest joint %d at %.2f; object at %.2f; "
+           "creature type %d, scale %.2f\n",
+           ObjWarnName(m_ObjID), hit.vec.z, butt.z, butt.z - hit.vec.z, lowestJoint, lowest,
+           ObjPosGet(m_ObjID) ? ObjPosGet(m_ObjID)->loc.vec.z : 0.0f, m_CreatureType,
+           m_scalePhys);
+   for (mps_stack_node *n = m_sMultiped.main_motion.head; n; n = n->next)
+      if (n->type == MN_MOTION)
+      {
+         mps_motion_node *mn = (mps_motion_node *) n;
+         const int num = MP_MOTNUM_FROM_NODE_HANDLE(mn->handle);
+         mprintf("   playing \"%s\" frame %g (start %d), base z %.2f, offset z %.2f, flags %x vstretch %g vinc %g\n",
+                 num < mp_num_motions ? mp_motion_list[num].info.name : "?", mn->frame, mn->start_frame,
+                 mn->base_pos.z, mn->offset.z, mn->params.flags, mn->params.vstretch, mn->params.vinc);
+      }
+   for (int k = 0; k < hist->n && k < 7; k++)
+   {
+      const int num = hist->motion[k];
+      mprintf("   earlier: \"%s\" begun with the butt at %.2f\n",
+              (num >= 0 && num < mp_num_motions) ? mp_motion_list[num].info.name : "?", hist->z[k]);
+   }
+}
+
 void cCreature::StartMotionWithParam(const int motionNum, mps_motion_param *pParam, ulong flags, int startFrame)
 {
+   {
+      // (the history SunkCheck logs: the last seven, oldest first)
+      sMotHistory *h = MotHistoryFor(m_ObjID);
+      if (h->n == 7)
+      {
+         memmove(h->motion, h->motion + 1, 6 * sizeof(int));
+         memmove(h->z, h->z + 1, 6 * sizeof(float));
+         h->n = 6;
+      }
+      h->motion[h->n] = motionNum;
+      h->z[h->n] = m_sMultiped.global_pos.z;
+      h->n++;
+   }
    mps_start_info info;
    mps_motion_param defParam;
 
@@ -4020,6 +4103,7 @@ void cCreature::Update(const ulong timeDelta)
 
    // Only run a single frame for now...
    moved = SubFrameUpdate(timeDelta);
+   SunkCheck();
 
    if(moved)
    {
