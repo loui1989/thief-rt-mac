@@ -54,6 +54,12 @@
 #include <twqscrpt.h>
 #include <weapscpt.h>
 #include "../../../src/physics/phscrpt.h"
+#include "../../../src/physics/phmtscpt.h"
+#include <atkscrpt.h>
+#include <bodscrpt.h>
+#include <mtscrpt.h>
+#include "../../../src/dark/pickscrm.h"
+#include "../../../src/dark/diffscrm.h"
 #include <2d.h>
 #include <fcolor.h>
 #include <grscale.h>
@@ -1115,6 +1121,70 @@ static SQInteger NativeGetMessage(HSQUIRRELVM vm)
       SetSlotInteger(vm, -1, "Type", tweq->Type);
       SetSlotInteger(vm, -1, "Op", tweq->Op);
       SetSlotInteger(vm, -1, "Dir", tweq->Dir);
+   }
+   // (NewDark's fields: a conversation that waits for the line it played
+   // to end reads its schema's name from a SchemaDone)
+   else if (MessageIs(message, "SchemaDone"))
+   {
+      const sSchemaDoneMsg* done = static_cast<const sSchemaDoneMsg*>(message);
+      SetSlotString(vm, -1, "name", done->name);
+      SetSlotInteger(vm, -1, "targetObject", done->targetObject);
+      sq_pushstring(vm, "coordinates", -1); PushVector(vm, done->coordinates); sq_newslot(vm, -3, SQFalse);
+   }
+   else if (MessageIs(message, "SoundDone"))
+   {
+      const sSoundDoneMsg* done = static_cast<const sSoundDoneMsg*>(message);
+      SetSlotString(vm, -1, "name", done->name);
+      SetSlotInteger(vm, -1, "targetObject", done->targetObject);
+      sq_pushstring(vm, "coordinates", -1); PushVector(vm, done->coordinates); sq_newslot(vm, -3, SQFalse);
+   }
+   else if (MessageIs(message, "QuestChange"))
+   {
+      const sQuestMsg* quest = static_cast<const sQuestMsg*>(message);
+      SetSlotString(vm, -1, "m_pName", quest->m_pName ? quest->m_pName : "");
+      SetSlotInteger(vm, -1, "m_oldValue", quest->m_oldValue);
+      SetSlotInteger(vm, -1, "m_newValue", quest->m_newValue);
+   }
+   else if (MessageIs(message, "MovingTerrainWaypoint"))
+   {
+      const sMovingTerrainMsg* mt = static_cast<const sMovingTerrainMsg*>(message);
+      SetSlotInteger(vm, -1, "waypoint", mt->waypoint);
+   }
+   else if (MessageIs(message, "WaypointReached"))
+   {
+      const sWaypointMsg* wp = static_cast<const sWaypointMsg*>(message);
+      SetSlotInteger(vm, -1, "moving_terrain", wp->moving_terrain);
+   }
+   else if (MessageIs(message, "MediumTransition"))
+   {
+      const sMediumTransMsg* medium = static_cast<const sMediumTransMsg*>(message);
+      SetSlotInteger(vm, -1, "nFromType", medium->nFromType);
+      SetSlotInteger(vm, -1, "nToType", medium->nToType);
+   }
+   else if (MessageIs(message, "MotionStart") || MessageIs(message, "MotionEnd") ||
+            MessageIs(message, "MotionFlagReached"))
+   {
+      const sBodyMsg* body = static_cast<const sBodyMsg*>(message);
+      SetSlotInteger(vm, -1, "ActionType", (SQInteger)body->ActionType);
+      SetSlotString(vm, -1, "MotionName", body->MotionName);
+      SetSlotInteger(vm, -1, "FlagValue", (SQInteger)body->FlagValue);
+   }
+   else if (MessageIs(message, "StartWindup") || MessageIs(message, "StartAttack") ||
+            MessageIs(message, "EndAttack"))
+   {
+      const sAttackMsg* attack = static_cast<const sAttackMsg*>(message);
+      SetSlotInteger(vm, -1, "weapon", attack->weapon);
+   }
+   else if (MessageIs(message, "PickStateChange"))
+   {
+      const sPickStateScrMsg* pick = static_cast<const sPickStateScrMsg*>(message);
+      SetSlotInteger(vm, -1, "PrevState", pick->prevstate);
+      SetSlotInteger(vm, -1, "NewState", pick->currentstate);
+   }
+   else if (MessageIs(message, "Difficulty"))
+   {
+      const sDiffScrMsg* diff = static_cast<const sDiffScrMsg*>(message);
+      SetSlotInteger(vm, -1, "difficulty", diff->difficulty);
    }
    else if (MessageEndsWith(message, "Stimulus"))
    {
