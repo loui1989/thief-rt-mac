@@ -6852,9 +6852,73 @@ DECLARE_TIMER(PHYS_Total, Average);
 
 static LazyAggMember(INetManager) gpNetMan;
 
+// The player wanting to move (walking: the physics' control velocity) and
+// not moving, for more than a second and a half: logged once each time, with
+// what the player is touching -- a player pinned where he stood ("veering
+// back and couldn't move at all") left nothing in the log to say why.
+static void PlayerStuckWatch(long dt_msec)
+{
+   static float s_stuck = 0.0f;
+   static BOOL s_told = FALSE;
+   static int s_episodes = 0;
+   static mxs_vector s_last;
+   static BOOL s_have = FALSE;
+   if (!g_PhysicsOn || !PlayerObjectExists())
+      return;
+   ObjID player = PlayerObject();
+   cPhysModel *pModel = g_PhysModels.Get(player);
+   if (!pModel)
+      return;
+   const mxs_vector &here = pModel->GetLocationVec();
+   mxs_vector want;
+   mx_zero_vec(&want);
+   if (pModel->IsVelocityControlled() || pModel->IsAxisVelocityControlled())
+      mx_copy_vec(&want, &pModel->GetControls()->GetControlVelocity());
+   const float wantSpeed = sqrtf(want.x * want.x + want.y * want.y);
+   float moved = 0.0f;
+   if (s_have)
+      moved = sqrtf((here.x - s_last.x) * (here.x - s_last.x) + (here.y - s_last.y) * (here.y - s_last.y) +
+                    (here.z - s_last.z) * (here.z - s_last.z));
+   s_last = here;
+   s_have = TRUE;
+   const float dt = dt_msec / 1000.0f;
+   // (moving at under a tenth of the speed wanted)
+   if (wantSpeed > 2.0f && moved < 0.1f * wantSpeed * dt)
+      s_stuck += dt;
+   else
+   {
+      if (s_told && s_stuck > 0)
+         mprintf("Player stuck: moving again after %.1f s\n", s_stuck);
+      s_stuck = 0.0f;
+      s_told = FALSE;
+      return;
+   }
+   if (s_stuck < 1.5f || s_told || s_episodes >= 20)
+      return;
+   s_told = TRUE;
+   ++s_episodes;
+   const mxs_vector &vel = pModel->GetVelocity();
+   mprintf("Player stuck: wants to move at %.1f ft/s (%.1f %.1f %.1f) but has not for %.1f s; at (%.2f %.2f %.2f), "
+           "velocity (%.2f %.2f %.2f), %s%s%s%s, position %s\n",
+           wantSpeed, want.x, want.y, want.z, s_stuck, here.x, here.y, here.z, vel.x, vel.y, vel.z,
+           pModel->IsSleeping() ? "asleep, " : "", pModel->GetDynamics()->Frozen() ? "frozen, " : "",
+           pModel->IsLocationControlled() ? "location held, " : "",
+           PhysObjIsMantling(player) ? "mantling" : "not mantling",
+           PhysObjValidPos(player, NULL) ? "valid" : "INSIDE something");
+   for (int i = 0; i < pModel->NumSubModels(); i++)
+   {
+      cPhysSubModelInst *pContact;
+      if (GetObjectContacts(player, i, pModel, &pContact))
+         for (; pContact; pContact = pContact->GetNext())
+            mprintf("   submodel %d touches %s\n", i, ObjWarnName(pContact->GetObjID()));
+   }
+}
+
 void PhysUpdate(long dt_msec)
 {
    AUTO_TIMER(PHYS_Total);
+
+   PlayerStuckWatch(dt_msec);
 
    static int accum_ms = 0;
 
