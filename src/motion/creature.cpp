@@ -3707,7 +3707,7 @@ char  cur_motion_id;
 // this into account.
 // Each creature's last motions, with where its butt was as each began: a
 // creature found sunk into the floor (Black Parade's sitters) logs them.
-struct sMotHistory { ObjID obj; int motion[8]; float z[8]; int second; int n; };
+struct sMotHistory { ObjID obj; int motion[8]; float z[8]; int second; int n; BOOL told; };
 static sMotHistory g_MotHistory[256];   // (plain arrays: this file is built packed)
 static int g_MotHistoryUsed = 0;
 static sMotHistory *MotHistoryFor(ObjID obj)
@@ -3750,8 +3750,9 @@ void cCreature::SunkCheck()
          lowest = m_pJoints[i].z;
          lowestJoint = i;
       }
-   if (lowest > hit.vec.z - 0.5f)
-      return;   // nothing well under the floor
+   if (lowest > hit.vec.z - 0.5f || hist->told)
+      return;   // nothing well under the floor (or told once already)
+   hist->told = TRUE;
    ++s_lines;
    mprintf("%s sunk into the floor: floor at %.2f, butt at %.2f (%.2f above it), its lowest joint %d at %.2f; object at %.2f; "
            "creature type %d, scale %.2f\n",

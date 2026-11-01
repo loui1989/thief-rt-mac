@@ -148,15 +148,51 @@ BOOL MvrFindGroundHeight(ObjID obj, Location *loc, mxs_real *pHeight, ObjID *pGr
 
       if (PhysRaycast(*loc, toLoc, &hitLoc, &hitObj, 0.0, kCollideOBB | kCollideTerrain) == kCollideNone)
       {
-         Warning(("Unable to find ground under %g %g %g\n", loc->vec.x, loc->vec.y, loc->vec.z));
-
-         *pGroundObj = OBJ_NULL;
-         *pHeight = 0;
          retval = FALSE;
       }
    }
 
-   if (retval)
+   // No ground under the butt, or none within a creature's height: the butt
+   // has gone below the floor it stands on (a fan mission's sit-on-the-floor
+   // motions lower it further than Thief's creatures stand tall), and the
+   // ground found was the floor of the room below -- or none. The creature
+   // was put there as it stood up to walk: sunk to the waist, or through the
+   // floor. Looked for again from a little above the butt, where that is
+   // open, and that floor taken if it is one the creature could be on.
+   if (!retval || loc->vec.z - hitLoc.vec.z > 6.0f)
+   {
+      static const float kAbove[2] = {3.0f, 1.5f};
+      for (int k = 0; k < 2; k++)
+      {
+         Location fromLoc, upHit;
+         ObjID upObj;
+         MakeLocation(&fromLoc, loc->vec.x, loc->vec.y, loc->vec.z + kAbove[k]);
+         if (CellFromLoc(&fromLoc) == CELL_INVALID)
+            continue;
+         MakeLocation(&toLoc, loc->vec.x, loc->vec.y, loc->vec.z - 6.0f);
+         if (PhysRaycast(fromLoc, toLoc, &upHit, &upObj, 0.0, kCollideOBB | kCollideTerrain) != kCollideNone &&
+             upHit.vec.z > loc->vec.z - 6.0f)
+         {
+            static int s_told = 0;
+            if (s_told++ < 10)
+               mprintf("%s: ground found above its butt (%.2f, the butt at %.2f): its butt was below the floor\n",
+                       ObjWarnName(obj), upHit.vec.z, loc->vec.z);
+            hitLoc = upHit;
+            hitObj = upObj;
+            retval = TRUE;
+         }
+         break;
+      }
+   }
+
+   if (!retval)
+   {
+      Warning(("Unable to find ground under %g %g %g\n", loc->vec.x, loc->vec.y, loc->vec.z));
+
+      *pGroundObj = OBJ_NULL;
+      *pHeight = 0;
+   }
+   else
    {
       *pGroundObj = hitObj;
       *pHeight=hitLoc.vec.z;
