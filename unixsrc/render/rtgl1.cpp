@@ -135,6 +135,8 @@ struct Settings {
    float minRoughness = 0.7f; // no surface glossier than this (1: no glossy highlights)
    int debugView = 0;         // 0 off, 1 shadow visibility, 2 direct diffuse, 3 specular, 4 bounce
    float waterAlpha = 0.55f;
+   float underwaterClarity = 1.0f;   // how far one sees under water (x 14-22 m to 5%)
+   float underwaterHaze = 1.0f;      // the water's own teal glow in the distance (0 off: black)
    float scale = 0.5f;      // render scale for upscale modes 0 and 5
    bool fps = false;
    bool vsync = true;
@@ -209,6 +211,8 @@ void load_settings()
       else if (k == "steady_faces") g_cfg.steadyFaces = value != 0;
       else if (k == "torch_shadows") g_cfg.torchShadows = value != 0;
       else if (k == "wall_offset") g_cfg.wallOffset = value != 0;
+      else if (k == "underwater_clarity") g_cfg.underwaterClarity = std::clamp(value, 0.2f, 5.0f);
+      else if (k == "underwater_haze") g_cfg.underwaterHaze = std::clamp(value, 0.0f, 4.0f);
       else if (k == "heat_haze") g_cfg.heatHaze = std::clamp(value, 0.0f, 3.0f);
       else if (k == "light_soft") g_cfg.lightSoft = std::clamp(value, 0.0f, 4.0f);
       else if (k == "light_fix") g_cfg.lightFix = value != 0;
@@ -1367,6 +1371,70 @@ void steady_faces(CachedObject &c, const float *pose = nullptr)
          tris[i].shadowOnly = true;   // the same way, a duplicate: shadow-only too
          (void)d;
       }
+   // Two faces back to back in one plane but cut into triangles another
+   // way (a sign's printed front and its plain back, a box scaled flat):
+   // the corners differ, so the rule above missed them, and both were seen
+   // -- the path tracer hit the one or the other, and the denoiser blended
+   // them into a grey smear. The one the game turned away from the camera
+   // (captured shadow-only) only casts shadows where the other covers it.
+   if (tris.size() <= 800) {
+      struct Flat { float n[3], c[3], p[4][3]; bool ok; };
+      std::vector<Flat> fl(tris.size());
+      for (size_t i = 0; i < tris.size(); ++i) {
+         const Tri &t = tris[i];
+         Flat &f = fl[i];
+         const float l = std::sqrt(t.n[0] * t.n[0] + t.n[1] * t.n[1] + t.n[2] * t.n[2]);
+         f.ok = l > 1e-10f;
+         if (!f.ok)
+            continue;
+         const RgPrimitiveVertex *v = &t.from->verts[t.at];
+         for (int k = 0; k < 3; ++k) {
+            f.n[k] = t.n[k] / l;
+            f.c[k] = (v[0].position[k] + v[1].position[k] + v[2].position[k]) / 3.0f;
+         }
+         // test points: the middle and toward each corner
+         for (int j = 0; j < 3; ++j)
+            for (int k = 0; k < 3; ++k)
+               f.p[j][k] = 0.6f * v[j].position[k] + 0.2f * v[(j + 1) % 3].position[k] + 0.2f * v[(j + 2) % 3].position[k];
+         for (int k = 0; k < 3; ++k)
+            f.p[3][k] = f.c[k];
+      }
+      auto inside = [&](const float *q, size_t j) {
+         const RgPrimitiveVertex *v = &tris[j].from->verts[tris[j].at];
+         const float *n = fl[j].n;
+         for (int e = 0; e < 3; ++e) {
+            const float *a = v[e].position, *bb = v[(e + 1) % 3].position;
+            const float u[3] = {bb[0] - a[0], bb[1] - a[1], bb[2] - a[2]};
+            const float w[3] = {q[0] - a[0], q[1] - a[1], q[2] - a[2]};
+            const float x[3] = {u[1] * w[2] - u[2] * w[1], u[2] * w[0] - u[0] * w[2], u[0] * w[1] - u[1] * w[0]};
+            const float ul = std::sqrt(u[0] * u[0] + u[1] * u[1] + u[2] * u[2]);
+            if ((x[0] * n[0] + x[1] * n[1] + x[2] * n[2]) / std::max(ul, 1e-6f) < -0.001f)
+               return false;
+         }
+         return true;
+      };
+      auto away = [&](size_t i) { return (tris[i].from->flags & RG_MESH_PRIMITIVE_SHADOW_ONLY) != 0; };
+      for (size_t i = 0; i < tris.size(); ++i) {
+         if (!fl[i].ok || tris[i].shadowOnly || !away(i))
+            continue;
+         for (size_t j = 0; j < tris.size() && !tris[i].shadowOnly; ++j) {
+            if (j == i || !fl[j].ok || tris[j].shadowOnly || away(j))
+               continue;
+            const float *ni = fl[i].n, *nj = fl[j].n;
+            if (ni[0] * nj[0] + ni[1] * nj[1] + ni[2] * nj[2] > -0.985f)
+               continue;
+            const float d = (fl[i].c[0] - fl[j].c[0]) * nj[0] + (fl[i].c[1] - fl[j].c[1]) * nj[1] +
+                            (fl[i].c[2] - fl[j].c[2]) * nj[2];
+            if (std::fabs(d) > 0.003f)
+               continue;
+            for (int s = 0; s < 4; ++s)
+               if (inside(fl[i].p[s], j)) {
+                  tris[i].shadowOnly = true;
+                  break;
+               }
+         }
+      }
+   }
    // a moving model: then in the order that does not change as it moves
    if (pose)
       std::stable_sort(tris.begin(), tris.end(), [&](const Tri &x, const Tri &y) {
@@ -3169,6 +3237,16 @@ void draw_frame(bool sceneDrawn)
    double current = now_seconds() - s_start;
    // Thief's skies are night skies. RTGL1's default sky colour is a bright
    // grey that lit every outdoor surface like daylight. Linking this struct
+   // Under water, the camera's medium absorbs by waterColor per metre
+   // (RTGL1 Media.h): the murky 0.22/0.42/0.38 let 1-7% through at 3 m, a
+   // black soup. The view under water: to 5% at 14 m (red) to 22 m (green),
+   // and the water's own haze (the volume below) where it fades.
+   RgFloat3D waterColor = {{0.22f, 0.42f, 0.38f}};
+   if (g_underwater) {
+      const float reach[3] = {14.0f, 22.0f, 20.0f};
+      for (int i = 0; i < 3; ++i)
+         waterColor.data[i] = std::pow(0.05f, 1.0f / (reach[i] * g_cfg.underwaterClarity));
+   }
    // replaces all of RTGL1's sky defaults, so every field is set.
    // RTGL1 uses its defaults only for a struct that is not linked, so the
    // linked ones repeat its defaults (DrawFrameInfo.h) and change only ours.
@@ -3182,8 +3260,8 @@ void draw_frame(bool sceneDrawn)
       .thinMediaWidth = 0.1f,
       .waterWaveSpeed = 0.4f,
       .waterWaveNormalStrength = 0.6f,
-      // Thief's water: a murky green-blue
-      .waterColor = {{0.22f, 0.42f, 0.38f}},
+      // Thief's water: a murky green-blue (clearer seen from in it)
+      .waterColor = waterColor,
       .acidColor = {{0.0f, 0.66f, 0.55f}},
       .acidDensity = 10.0f,
       .waterWaveTextureDerivativesMultiplier = 1.0f,
@@ -3260,6 +3338,20 @@ void draw_frame(bool sceneDrawn)
       for (int i = 0; i < 3; ++i)
          volAmbient.data[i] = lin(g_fogRgb[i]) * g_cfg.sky;
    }
+   // Under water: the water itself as a haze, teal, thickening over 16 m
+   // and lit by the lamps (light through the surface shows as shafts), so
+   // the far side of a pool fades into water, not into black.
+   const bool waterHaze = g_underwater && g_cfg.underwaterHaze > 0.0f;
+   if (waterHaze) {
+      const float D = 16.0f * g_cfg.underwaterClarity;
+      volFar = std::clamp(D, 12.0f, 300.0f);
+      const float tau = 1.6f * volFar / D;
+      volNear = 0.4f * tau / 0.064f;
+      volFarDens = 1.6f * tau / 0.064f;
+      const float teal[3] = {0.004f, 0.011f, 0.010f};
+      for (int i = 0; i < 3; ++i)
+         volAmbient.data[i] = teal[i] * g_cfg.underwaterHaze;
+   }
    // Heat haze (Raze RT 0172, shader 0018): the air over a torch, a brazier,
    // a fire shimmers. The shimmer is the screen's waves effect, turned to
    // this by the shared shaders; where the heat is goes with the smoke puffs,
@@ -3322,7 +3414,7 @@ void draw_frame(bool sceneDrawn)
       .pNext = &smoke,
       // RTGL1's default is on, with a bright ambient haze: costly, and it
       // greyed Thief's darkness. Optional, lit by the lamps when on.
-      .enable = g_cfg.volumetric || fogOn,
+      .enable = g_cfg.volumetric || fogOn || waterHaze,
       .maxHistoryLength = 8.0f,
       .useSimpleDepthBased = false,
       .volumetricFar = volFar,
