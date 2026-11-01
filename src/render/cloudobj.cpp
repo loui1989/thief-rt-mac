@@ -585,8 +585,9 @@ static inline void ComputeTJoints()
       TJointConfigs[i] = new sTJointPoly[g_CloudObj.nGlowTiles*2];
    }
 
+   // (all of each config's polygons: only the first was cleared)
    for (i = 0; i < 8; i++)
-      memset(TJointConfigs[i], 0, sizeof(sTJointPoly));
+      memset(TJointConfigs[i], 0, sizeof(sTJointPoly) * NumTJointPolys[i]);
 
    MakeTopTJoints(0, 0, TRUE, 0, 1);
    MakeRightTJoints(0, 1, TRUE, 0, 0);
@@ -1391,15 +1392,30 @@ static inline void RenderTJointConfig(int nSubTileX, int nSubTileY, int nConfig,
             y = nSubTileY+pPolyPoint->y;
          }
 
-         nIx = y*pPolyPoint->nXSize+x;
+         // The deck's arrays as they are now: the T-joint table kept the
+         // ones it was made with, freed and made again when the next
+         // mission set its sky up (a crash loading Black Parade's second
+         // mission, writing through a freed point list).
+         r3s_phandle *pList = pPolyPoint->bIsGlow ? glow_vlist : vlist;
+         float *pListUs = pPolyPoint->bIsGlow ? pGlowUs : pUs;
+         float *pListVs = pPolyPoint->bIsGlow ? pGlowVs : pVs;
+         float *pListAlphas = pPolyPoint->bIsGlow ? pGlowAlphas : pAlphas;
+         mxs_vector *pListColors = pPolyPoint->bIsGlow ? pGlowPointColors : pPointColors;
+         const int nXSize = pPolyPoint->bIsGlow ? nGlowPointUs : nPointsPerSide;
+         if (!pList || !pListUs || !pListVs || !pListAlphas || !pListColors)
+            return;
 
-         Points[j] = pPolyPoint->vlist[nIx];
-         Points[j]->grp.u = pPolyPoint->pUs[x];
-         Points[j]->grp.v = pPolyPoint->pVs[y];
-         ((goddamn_stupid_r3s_point *)(Points[j]))->grp.i = pPolyPoint->pPointColors[nIx].x;
-         ((goddamn_stupid_r3s_point *)(Points[j]))->grp.h = pPolyPoint->pPointColors[nIx].y;
-         ((goddamn_stupid_r3s_point *)(Points[j]))->grp.d = pPolyPoint->pPointColors[nIx].z;
-         ((goddamn_stupid_r3s_point *)(Points[j]))->grp.a = pPolyPoint->pAlphas[nIx];
+         nIx = y*nXSize+x;
+
+         Points[j] = pList[nIx];
+         if (!Points[j])
+            return;
+         Points[j]->grp.u = pListUs[x];
+         Points[j]->grp.v = pListVs[y];
+         ((goddamn_stupid_r3s_point *)(Points[j]))->grp.i = pListColors[nIx].x;
+         ((goddamn_stupid_r3s_point *)(Points[j]))->grp.h = pListColors[nIx].y;
+         ((goddamn_stupid_r3s_point *)(Points[j]))->grp.d = pListColors[nIx].z;
+         ((goddamn_stupid_r3s_point *)(Points[j]))->grp.a = pListAlphas[nIx];
 
          if (pPolyPoint->bCheckUWrap && (Points[j]->grp.u < 0.0001))
             Points[j]->grp.u = 1;
