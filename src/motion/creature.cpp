@@ -661,6 +661,8 @@ void CreaturePosPropUnlock()
    gCrPosPropLock--;
 }
 
+static BOOL MotHistoryTracing(ObjID obj);   // (the height trace, below)
+
 // @YO OVER HERE
 void LGAPI CrPosPropListener(sPropertyListenMsg* msg, PropListenerData data)
    // Listener for the position property.
@@ -697,6 +699,9 @@ void LGAPI CrPosPropListener(sPropertyListenMsg* msg, PropListenerData data)
    const float dx = to.x - own.x, dy = to.y - own.y;
    const BOOL heightKept = !pCreature->IsBallistic() && pCreature->IsPlayingMotion() &&
                            fabs(dz) > 0.02f && fabs(dz) < 1.5f && dx * dx + dy * dy < 1.0f;
+   if (MotHistoryTracing(msg->obj))
+      mprintf("height %s moved from outside: %.2f %.2f %.2f -> %.2f %.2f %.2f%s\n", ObjWarnName(msg->obj),
+              own.x, own.y, own.z, to.x, to.y, to.z, heightKept ? " (its height kept)" : "");
    if (heightKept)
    {
       static ObjID s_obj[16];
@@ -3754,9 +3759,17 @@ char  cur_motion_id;
 // creature found sunk into the floor (Black Parade's sitters) logs them.
 struct sMotHistory { ObjID obj; int motion[8]; float z[8]; int second; int n; BOOL told;
                      // the height its motion has it at (HoldMotionHeight)
-                     BOOL tracking; int trackMot; float expectZ; BOOL heldTold; };
+                     BOOL tracking; int trackMot; float expectZ; BOOL heldTold;
+                     int traceLeft, traced; };   // (the height trace: subframes still to log)
 static sMotHistory g_MotHistory[256];   // (plain arrays: this file is built packed)
 static int g_MotHistoryUsed = 0;
+static BOOL MotHistoryTracing(ObjID obj)
+{
+   for (int i = 0; i < g_MotHistoryUsed; i++)
+      if (g_MotHistory[i].obj == obj)
+         return g_MotHistory[i].traceLeft > 0;
+   return FALSE;
+}
 static sMotHistory *MotHistoryFor(ObjID obj)
 {
    for (int i = 0; i < g_MotHistoryUsed; i++)
@@ -3854,6 +3867,15 @@ void cCreature::TrackMotionHeight(float zBefore)
       mp_get_xlat_at_frame(&total, num, last > 0 ? last : 0);
       h->tracking = fabs(total.z) > 1.0f;
       h->expectZ = zNow;
+      // the first two such motions of the first few creatures playing them,
+      // and what follows: their height subframe by subframe (the log)
+      static int s_creatures = 0;
+      if (h->tracking && h->traced < 2 && (h->traced > 0 || s_creatures < 4))
+      {
+         if (h->traced++ == 0)
+            ++s_creatures;
+         h->traceLeft = 240;
+      }
       return;
    }
    h->expectZ += zNow - zBefore;
@@ -4349,6 +4371,7 @@ BOOL cCreature::SubFrameUpdate(const ulong dt)
       TIMER_Start(CREAT_HackMpUpdate);
       flags=HackMpUpdate(&m_sMultiped, (float)dt,NULL,m_MotorState.focus);
       TIMER_MarkStop(CREAT_HackMpUpdate);
+      const float zMp = m_sMultiped.global_pos.z;
       TrackMotionHeight(zBefore);
 
       mxs_vector new_pos;
@@ -4367,7 +4390,24 @@ BOOL cCreature::SubFrameUpdate(const ulong dt)
          MoveButt(&new_pos, &orient, TRUE);
       }
       TIMER_MarkStop(CREAT_UpdatePhysics);
+      const float zPhys = m_sMultiped.global_pos.z;
       HoldMotionHeight();
+      {
+         sMotHistory *h = MotHistoryFor(m_ObjID);
+         if (h->traceLeft > 0)
+         {
+            --h->traceLeft;
+            mps_motion_node *mn = (mps_motion_node *) mp_get_main_motion(&m_sMultiped);
+            const int num = mn ? (int) MP_MOTNUM_FROM_NODE_HANDLE(mn->handle) : -1;
+            int nodes = 0;
+            for (mps_stack_node *n = m_sMultiped.main_motion.head; n; n = n->next)
+               ++nodes;
+            mprintf("height %s %s f%.1f (%d nodes, %lu ms): start %.2f, motion %.2f, physics %.2f, now %.2f%s%.2f\n",
+                    ObjWarnName(m_ObjID), (num >= 0 && num < mp_num_motions) ? mp_motion_list[num].info.name : "?",
+                    mn ? mn->frame : -1.0f, nodes, (unsigned long) dt, zBefore, zMp, zPhys, m_sMultiped.global_pos.z,
+                    h->tracking ? ", motion's " : ", untracked ", h->tracking ? h->expectZ : 0.0f);
+         }
+      }
 
       ValidateCreaturePosition(m_ObjID);
    }

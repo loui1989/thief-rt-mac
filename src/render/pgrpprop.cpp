@@ -995,6 +995,8 @@ static BOOL getAttachmentLocation(Location *loc, ParticleGroup *pg)
    return TRUE;
 }
 
+EXTERN BOOL CreatureExists(const ObjID objID);
+
 static void PosPropListener(ObjID obj, const ObjPos *pos, void *data)
 {
    if (OBJ_IS_ABSTRACT(obj))
@@ -1008,6 +1010,20 @@ static void PosPropListener(ObjID obj, const ObjPos *pos, void *data)
    for (; !query->Done(); query->Next())
    {
       source = query.GetSource();
+      // A creature with a particle group of its own (a mission's effect
+      // given to the character itself, not to an object attached to it):
+      // the character is not carried to where its particles are attached --
+      // it walks by its motions. Black Parade's Clodorus was put back, frame
+      // after frame, where he sat: he got up sunk in the floor and bobbed
+      // as he tried to walk.
+      if (CreatureExists(source))
+      {
+         static int s_told = 0;
+         if (s_told++ < 8)
+            mprintf("%s: a creature with particles attached to %s -- not moved to them\n",
+                    ObjWarnName(source), ObjWarnName(obj));
+         continue;
+      }
 
       if (getAttachmentLocation(&loc, ObjGetParticleGroup(source)))
          ObjPosUpdate(source, &loc.vec, &pos->fac);
