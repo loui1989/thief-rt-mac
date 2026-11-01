@@ -2178,6 +2178,11 @@ void cCreature::SlamPhysicsModels()
 // Only to be called internall by creature system
 void SetCretObjPos(ObjID objID, const mxs_vector *pos, const mxs_angvec *rot)
 {
+   // (outside the world: not moved -- the assertion below stopped the game)
+   if (!(pos->x > -MAX_WORLD_SIZE && pos->x < MAX_WORLD_SIZE &&
+         pos->y > -MAX_WORLD_SIZE && pos->y < MAX_WORLD_SIZE &&
+         pos->z > -MAX_WORLD_SIZE && pos->z < MAX_WORLD_SIZE))
+      return;
    // check position is valid
    AssertMsg3(pos->x>-MAX_WORLD_SIZE&&pos->x<MAX_WORLD_SIZE&&\
       pos->y>-MAX_WORLD_SIZE&&pos->y<MAX_WORLD_SIZE,\
@@ -2198,6 +2203,45 @@ BOOL cCreature::UpdateObjPosition()
 
    fac.tz = GetHeadingAngle(&m_sMultiped.global_orient);
    fac.tx = fac.ty = 0;
+
+   // A creature flung off into the void: one stuck in the world's geometry
+   // (Black Parade's Dahlquist, sitting in a wall) hit by a thrown flower
+   // was pushed out with a velocity that doubled every frame -- hundreds of
+   // feet, then hundreds of thousands, and the game stopped on an assertion.
+   // No creature moves tens of feet in one update: it stays where it was,
+   // and its physics is stopped.
+   {
+      const Position *pPos = ObjPosGet(m_ObjID);
+      const mxs_vector &np = m_sMultiped.global_pos;
+      BOOL bad = !(np.x == np.x && np.y == np.y && np.z == np.z) ||
+                 fabs(np.x) >= MAX_WORLD_SIZE || fabs(np.y) >= MAX_WORLD_SIZE ||
+                 fabs(np.z) >= MAX_WORLD_SIZE;
+      if (!bad && pPos && g_SimRunning)
+      {
+         mxs_vector d;
+         mx_sub_vec(&d, &np, &pPos->loc.vec);
+         // (a script's teleport moves it far too, but not at this speed)
+         mxs_vector vel = {0, 0, 0};
+         if (mx_mag2_vec(&d) > 40.0f * 40.0f && PhysObjHasPhysics(m_ObjID))
+         {
+            PhysGetVelocity(m_ObjID, &vel);
+            bad = mx_mag2_vec(&vel) > 150.0f * 150.0f;
+         }
+      }
+      if (bad && pPos)
+      {
+         static int s_told = 0;
+         if (s_told++ < 20)
+            mprintf("%s flung to (%g %g %g) from (%g %g %g): kept where it was\n", ObjWarnName(m_ObjID),
+                    np.x, np.y, np.z, pPos->loc.vec.x, pPos->loc.vec.y, pPos->loc.vec.z);
+         mx_copy_vec(&m_sMultiped.global_pos, &pPos->loc.vec);
+         mxs_vector zero = {0, 0, 0};
+         mxs_vector here = pPos->loc.vec;
+         PhysSetVelocity(m_ObjID, &zero);
+         PhysSetRotationalVelocity(m_ObjID, &zero);
+         PhysSetModLocation(m_ObjID, &here);
+      }
+   }
 
    SetCretObjPos(m_ObjID,&m_sMultiped.global_pos,&fac);
 
