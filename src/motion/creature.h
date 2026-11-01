@@ -171,7 +171,9 @@ public:
    void ResetLengths();
    void SlamPhysicsModels();
    void HealMultiped(const struct Position *pPos); // motion state gone to not-a-number: put back
-   void SunkCheck();   // logs a creature found sunk into the floor (and its motions)
+   void SunkCheck();
+   void TrackMotionHeight(float zBefore);   // a motion going well up or down: the height it has the butt at
+   void HoldMotionHeight();                 // ... and the butt put back there   // logs a creature found sunk into the floor (and its motions)
    void FlushRelativeState();
    virtual void FilterMotionFrameData(const mps_motion_info *mi, quat *rot, mxs_vector *xlat);
    virtual void PostUpdateFilter(const ulong dt);

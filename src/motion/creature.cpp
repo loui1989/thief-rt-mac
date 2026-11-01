@@ -3752,7 +3752,9 @@ char  cur_motion_id;
 // this into account.
 // Each creature's last motions, with where its butt was as each began: a
 // creature found sunk into the floor (Black Parade's sitters) logs them.
-struct sMotHistory { ObjID obj; int motion[8]; float z[8]; int second; int n; BOOL told; };
+struct sMotHistory { ObjID obj; int motion[8]; float z[8]; int second; int n; BOOL told;
+                     // the height its motion has it at (HoldMotionHeight)
+                     BOOL tracking; int trackMot; float expectZ; BOOL heldTold; };
 static sMotHistory g_MotHistory[256];   // (plain arrays: this file is built packed)
 static int g_MotHistoryUsed = 0;
 static sMotHistory *MotHistoryFor(ObjID obj)
@@ -3819,6 +3821,75 @@ void cCreature::SunkCheck()
       mprintf("   earlier: \"%s\" begun with the butt at %.2f\n",
               (num >= 0 && num < mp_num_motions) ? mp_motion_list[num].info.name : "?", hist->z[k]);
    }
+}
+
+// A motion that takes a creature well up or down -- sitting down on the
+// floor, getting up, lying down: through it, the creature's butt is kept at
+// the height the motion has it at. Other things (its physics, its sphere on
+// the floor, objects attached to it, ground snapping) held a floor sitter at
+// sitting height while its motion stood it up: it got up sunk to the waist,
+// walked off so, and sat down again (Black Parade's Clodorus, in a loop).
+// TrackMotionHeight follows the motion's own rise and fall (what HackMpUpdate
+// moved the butt by), HoldMotionHeight puts the butt back there after the rest.
+void cCreature::TrackMotionHeight(float zBefore)
+{
+   sMotHistory *h = MotHistoryFor(m_ObjID);
+   mps_motion_node *mn = (mps_motion_node *) mp_get_main_motion(&m_sMultiped);
+   const int num = mn ? (int) MP_MOTNUM_FROM_NODE_HANDLE(mn->handle) : -1;
+   if (num < 0 || num >= mp_num_motions || IsBallistic() ||
+       (mn->params.flags & (MP_VINC | MP_VSTRETCH)) || mp_motion_list[num].info.type != MT_CAPTURE ||
+       mp_motion_list[num].num_components <= 0 ||
+       (GetStandingObj() != OBJ_NULL && IsMovingTerrainMoving(GetStandingObj())))
+   {
+      h->tracking = FALSE;
+      return;
+   }
+   const float zNow = m_sMultiped.global_pos.z;
+   if (!h->tracking || h->trackMot != num)
+   {
+      // (a motion begun: only one that goes a good way up or down)
+      h->trackMot = num;
+      mxs_vector total;
+      const int last = (int) mp_motion_list[num].info.num_frames - 1;
+      mp_get_xlat_at_frame(&total, num, last > 0 ? last : 0);
+      h->tracking = fabs(total.z) > 1.0f;
+      h->expectZ = zNow;
+      return;
+   }
+   h->expectZ += zNow - zBefore;
+}
+
+void cCreature::HoldMotionHeight()
+{
+   sMotHistory *h = MotHistoryFor(m_ObjID);
+   if (!h->tracking)
+      return;
+   const float off = m_sMultiped.global_pos.z - h->expectZ;
+   if (fabs(off) <= 0.02f)
+      return;
+   if (fabs(off) > 6.0f)
+   {
+      h->tracking = FALSE;   // (put somewhere else altogether: as it is)
+      return;
+   }
+   if (!h->heldTold)
+   {
+      static int s_lines = 0;
+      h->heldTold = TRUE;
+      if (s_lines++ < 16)
+      {
+         mps_motion_node *mn = (mps_motion_node *) mp_get_main_motion(&m_sMultiped);
+         mprintf("%s: its butt put back to its motion's height for %s (%.2f, held at %.2f)\n", ObjWarnName(m_ObjID),
+                 (mn && MP_MOTNUM_FROM_NODE_HANDLE(mn->handle) < (uint) mp_num_motions)
+                    ? mp_motion_list[MP_MOTNUM_FROM_NODE_HANDLE(mn->handle)].info.name : "?",
+                 h->expectZ, m_sMultiped.global_pos.z);
+      }
+   }
+   mxs_vector to = m_sMultiped.global_pos;
+   to.z = h->expectZ;
+   mxs_angvec orient;
+   mx_mat2ang(&orient, &m_sMultiped.global_orient);
+   MoveButt(&to, &orient, TRUE);
 }
 
 void cCreature::StartMotionWithParam(const int motionNum, mps_motion_param *pParam, ulong flags, int startFrame)
@@ -4274,9 +4345,11 @@ BOOL cCreature::SubFrameUpdate(const ulong dt)
    else
    {
 
+      const float zBefore = m_sMultiped.global_pos.z;
       TIMER_Start(CREAT_HackMpUpdate);
       flags=HackMpUpdate(&m_sMultiped, (float)dt,NULL,m_MotorState.focus);
       TIMER_MarkStop(CREAT_HackMpUpdate);
+      TrackMotionHeight(zBefore);
 
       mxs_vector new_pos;
       mx_copy_vec(&new_pos, &m_sMultiped.global_pos);
@@ -4294,6 +4367,7 @@ BOOL cCreature::SubFrameUpdate(const ulong dt)
          MoveButt(&new_pos, &orient, TRUE);
       }
       TIMER_MarkStop(CREAT_UpdatePhysics);
+      HoldMotionHeight();
 
       ValidateCreaturePosition(m_ObjID);
    }

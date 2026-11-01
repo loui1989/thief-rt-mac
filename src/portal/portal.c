@@ -1709,6 +1709,27 @@ static void portal_rt_submit_world(void)
    serial = portal_rt_world_serial();
    if (RenderRTWorldWanted(serial)) {
       float xyz[3 * 256], uv[2 * 256];
+      // A water surface with no texture (texture 0, as Black Parade's
+      // canals) borrows the mission's commonest water texture, drawn as the
+      // rest of its water is (through its medium's palette).
+      static unsigned short water_count[PORTAL_RT_MAX_TEXTURE_IDS];
+      int water_tex = -1;
+      memset(water_count, 0, sizeof(water_count));
+      for (c = 0; c < wr_num_cells; ++c) {
+         PortalCell *r = WR_CELL(c);
+         int p;
+         if (!r)
+            continue;
+         for (p = r->num_polys - r->num_portal_polys; p < r->num_render_polys; ++p) {
+            const int t = r->render_list[p].texture_id;
+            if (!portal_rt_is_sky(t) && t < PORTAL_RT_MAX_TEXTURE_IDS && portal_get_texture(t) &&
+                water_count[t] < 65535) {
+               ++water_count[t];
+               if (water_tex < 0 || water_count[t] > water_count[water_tex])
+                  water_tex = t;
+            }
+         }
+      }
       memset(portal_rt_texture_seen, 0, sizeof(portal_rt_texture_seen));
       portal_rt_max_texture_id = -1;
       RenderRTWorldBegin(serial);
@@ -1728,20 +1749,23 @@ static void portal_rt_submit_world(void)
             r3s_texture tex;
             mxs_real u_scale = 1.0f, v_scale = 1.0f, u_base, v_base;
             mxs_real uvdot, u2, v2;
+            int tid = ri->texture_id;
             if (n < 3 || n > 256)
                continue;
+            if (p >= first_portal && portal_rt_is_sky(tid) && water_tex >= 0)
+               tid = water_tex;
             // (a water surface -- a medium boundary -- is never a sky, though
             // its texture number may be 0: Black Parade's canals, drawn as
             // openings onto the sky, invisible. Without a texture of its own,
             // the path tracer's water.)
             if (p >= first_portal)
                flags |= kRenderRTWorldWater;
-            else if (portal_rt_is_sky(ri->texture_id))
+            else if (portal_rt_is_sky(tid))
                flags |= kRenderRTWorldSky;
             if (pc->flags & RENDER_DOESNT_LIGHT)
                flags |= kRenderRTWorldFullbright;
-            tex = ((flags & kRenderRTWorldSky) || portal_rt_is_sky(ri->texture_id))
-                     ? NULL : portal_get_texture(ri->texture_id);
+            tex = ((flags & kRenderRTWorldSky) || portal_rt_is_sky(tid))
+                     ? NULL : portal_get_texture(tid);
             if (tex) {
                int tw, th;
                if (ResImageTerrainScale(tex, &tw, &th)) {
@@ -1778,7 +1802,10 @@ static void portal_rt_submit_world(void)
                du = mx_dot_vec(&delta, &ri->tex_u);
                dv = mx_dot_vec(&delta, &ri->tex_v);
                if (u2 <= 0.0f || v2 <= 0.0f) {
-                  uv[i*2] = uv[i*2+1] = 0.0f;
+                  // (no mapping of its own -- a borrowed water texture: laid
+                  // flat, a tile every 4 feet)
+                  uv[i*2] = (tid != ri->texture_id) ? w->x * 0.25f : 0.0f;
+                  uv[i*2+1] = (tid != ri->texture_id) ? w->y * 0.25f : 0.0f;
                } else if (uvdot == 0.0f) {
                   uv[i*2]   = du * u_scale / u2 + u_base;
                   uv[i*2+1] = dv * v_scale / v2 + v_base;
@@ -1794,7 +1821,7 @@ static void portal_rt_submit_world(void)
             {
                // the texture's tile_factor (its .mtl), as lgd3d draws it
                float su, sv;
-               r3s_texture ttex = portal_get_texture(ri->texture_id);
+               r3s_texture ttex = portal_get_texture(tid);
                if (ttex && ResImageMaterialTile(ttex, &su, &sv))
                   for (i = 0; i < n; ++i) {
                      uv[i*2] *= su;
@@ -1805,14 +1832,14 @@ static void portal_rt_submit_world(void)
                const PortalPlane *pl = &r->plane_list[pc->planeid];
                RenderRTWorldPolygonFacing(pl->normal.x, pl->normal.y, pl->normal.z);
             }
-            RenderRTWorldPolygon(ri->texture_id, flags, n, xyz, uv);
-            if (!(flags & kRenderRTWorldSky) && !portal_rt_is_sky(ri->texture_id) &&
-                ri->texture_id < PORTAL_RT_MAX_TEXTURE_IDS) {
+            RenderRTWorldPolygon(tid, flags, n, xyz, uv);
+            if (!(flags & kRenderRTWorldSky) && !portal_rt_is_sky(tid) &&
+                tid < PORTAL_RT_MAX_TEXTURE_IDS) {
                // 2: a water surface, drawn through its medium's palette
-               portal_rt_texture_seen[ri->texture_id] =
+               portal_rt_texture_seen[tid] =
                   (flags & kRenderRTWorldWater) ? 2 : 1;
-               if (ri->texture_id > portal_rt_max_texture_id)
-                  portal_rt_max_texture_id = ri->texture_id;
+               if (tid > portal_rt_max_texture_id)
+                  portal_rt_max_texture_id = tid;
             }
          }
       }

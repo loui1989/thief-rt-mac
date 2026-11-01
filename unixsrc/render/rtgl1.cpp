@@ -2352,12 +2352,20 @@ void upload_world()
       if ((g.flags & kRenderRTWorldTransparent) && tex && tex->cutout)
          flags |= RG_MESH_PRIMITIVE_ALPHA_TESTED;
       float alpha = 1.0f;
+      float tint[3] = {1.0f, 1.0f, 1.0f};
       if (g.flags & kRenderRTWorldWater) {
          flags &= ~RgMeshPrimitiveFlags(RG_MESH_PRIMITIVE_ALPHA_TESTED);
-         // (a water surface with no texture of its own -- texture 0, as
-         // Black Parade's canals: the path tracer's own water, else nothing
-         // showed but the bed below)
-         if (g_cfg.water == 1 || !tex) {
+         if (!tex && g_cfg.water != 1) {
+            // a water surface with no texture of its own (texture 0, as
+            // Black Parade's canals, where the mission has no other water to
+            // borrow one from): murky green-blue water. (The path tracer's
+            // own water showed as a flat grey sheet.)
+            flags |= RG_MESH_PRIMITIVE_TRANSLUCENT;
+            tint[0] = 0.10f;
+            tint[1] = 0.17f;
+            tint[2] = 0.15f;
+            alpha = 0.8f;
+         } else if (g_cfg.water == 1) {
             flags |= RG_MESH_PRIMITIVE_WATER;    // RTGL1's reflective/refractive water
          } else if (g_cfg.water == 0) {
             // Thief's water texture through its medium's palette (portal.c),
@@ -2384,7 +2392,7 @@ void upload_world()
          .indexCount = uint32_t(g.indices.size()),
          .pTextureName = texName,
          .textureFrame = 0,
-         .color = pack_color(1, 1, 1, alpha),
+         .color = pack_color(tint[0], tint[1], tint[2], alpha),
          // (a glowing texture -- a lit window -- also lights its surroundings)
          .emissive = (g.flags & kRenderRTWorldFullbright) ? 0.25f
                      : (flags & (RG_MESH_PRIMITIVE_TRANSLUCENT | RG_MESH_PRIMITIVE_SKY)) ? 0.0f
