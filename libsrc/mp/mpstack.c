@@ -6,6 +6,7 @@
 #include <fix.h>
 #include <math.h>
 #include <multiped.h>
+#include <mprintf.h>
 
 // NOTE: this should not be used to index into any arrays on multiped itself
 #define ROOT_JOINT_ID(m_) ((m_)->num_joints)
@@ -91,6 +92,41 @@ void mp_evaluate_stack(multiped * mp, quat * rot, mxs_vector * xlat)
 //
 // This deals with leaf nodes.
 // 
+// Where a creature's motion first goes to "not a number" (Black Parade's
+// sitters: their x and y every frame): each stage of the evaluation checked,
+// the first few logged with the motion and its state.
+int mp_nan_reports = 0;
+static int mp_bad_f(float v) { return !(v == v) || v > 1e20f || v < -1e20f; }
+static int mp_bad_v(const mxs_vector *v) { return mp_bad_f(v->x) || mp_bad_f(v->y) || mp_bad_f(v->z); }
+static int mp_bad_q(const quat *q) { return mp_bad_f(q->w) || mp_bad_f(q->x) || mp_bad_f(q->y) || mp_bad_f(q->z); }
+void mp_nan_check(multiped *mp, mps_motion_node *m, const char *stage, quat *rot, mxs_vector *xlat)
+{
+   int j, badJoint = -1;
+   if (mp_nan_reports >= 30)
+      return;
+   if (rot)
+      for (j = 0; j <= mp->num_joints; j++)
+         if (mp_bad_q(&rot[j])) { badJoint = j; break; }
+   if (badJoint < 0 && !(xlat && mp_bad_v(xlat)))
+      return;
+   ++mp_nan_reports;
+   if (m && m->handle >= 0 && (m->handle & ~(MP_END_FLAG | MP_KILL_FLAG)) < mp_num_motions)
+   {
+      mps_motion *mo = mp_motion_list + (m->handle & ~(MP_END_FLAG | MP_KILL_FLAG));
+      mprintf("Motion not-a-number after %s: \"%s\" frame %g (start %d, of %g), joint %d (root %d)%s; "
+              "flags %x duration x%g bend %g stretch %g; base (%g %g %g) facing q(%g %g %g %g), offset (%g %g %g), "
+              "global (%g %g %g)\n",
+              stage, mo->info.name, m->frame, m->start_frame, mo->info.num_frames, badJoint, mp->num_joints,
+              (xlat && mp_bad_v(xlat)) ? ", translation" : "", m->params.flags, m->params.duration_scalar,
+              m->params.bend, m->params.stretch, m->base_pos.x, m->base_pos.y, m->base_pos.z,
+              m->base_orient.w, m->base_orient.x, m->base_orient.y, m->base_orient.z,
+              m->offset.x, m->offset.y, m->offset.z, mp->global_pos.x, mp->global_pos.y, mp->global_pos.z);
+   }
+   else
+      mprintf("Motion not-a-number after %s: joint %d%s, global (%g %g %g)\n", stage, badJoint,
+              (xlat && mp_bad_v(xlat)) ? ", translation" : "", mp->global_pos.x, mp->global_pos.y, mp->global_pos.z);
+}
+
 void mp_evaluate_motion(multiped * mp, mps_motion_node * m, quat * rot, 
                         mxs_vector * xlat)
 {
@@ -121,6 +157,7 @@ void mp_evaluate_motion(multiped * mp, mps_motion_node * m, quat * rot,
       {
          m->handle |= MP_END_FLAG;
       }
+      mp_nan_check(mp, m, "its data", rot, xlat);
 
       if (m->params.flags & MP_MIRROR)
       {
@@ -138,6 +175,7 @@ void mp_evaluate_motion(multiped * mp, mps_motion_node * m, quat * rot,
 
       // Get translation from motion start, in case we didn't start at the beginning.
       mx_subeq_vec(xlat, &m->offset);
+      mp_nan_check(mp, m, "its start facing and offset", rot, xlat);
 
       if (m->params.flags & MP_BEND)
       {
@@ -182,11 +220,13 @@ void mp_evaluate_motion(multiped * mp, mps_motion_node * m, quat * rot,
 
       // Now that we have the translational offset, rotate it by the motion's
       // base orientation.
+      mp_nan_check(mp, m, "bend and stretch", rot, xlat);
       quat_to_matrix(&root_mat, &m->base_orient);
       mx_mat_muleq_vec(&root_mat, xlat);
 
       mx_addeq_vec(xlat, &m->base_pos);
       mx_subeq_vec(xlat, &mp->global_pos);
+      mp_nan_check(mp, m, "its start point", rot, xlat);
    }
    else
    {

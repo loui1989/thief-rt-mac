@@ -1956,6 +1956,21 @@ BOOL cCreature::MoveButt(const mxs_vector *pButtPos, const mxs_angvec *pAngles, 
 
    ConfigSpew("CreaturePosTrace",("%d moveButt: to %g, %g, %g, %x, mph=%d\n",m_ObjID,pButtPos->x,pButtPos->y,pButtPos->z,pAngles->tz,updatePhysics));
 
+   // told to move to "not a number" (by whatever moves it: logged, for the
+   // sitters of Black Parade's second mission): not moved
+   if (!(pButtPos->x == pButtPos->x && pButtPos->y == pButtPos->y && pButtPos->z == pButtPos->z))
+   {
+      static int s_told = 0;
+      if (s_told++ < 10)
+      {
+         mps_motion_node *mn = (mps_motion_node *) mp_get_main_motion(&m_sMultiped);
+         mprintf("%s told to move to not-a-number (motion %s): not moved\n", ObjWarnName(m_ObjID),
+                 (mn && MP_MOTNUM_FROM_NODE_HANDLE(mn->handle) < (uint)mp_num_motions)
+                    ? mp_motion_list[MP_MOTNUM_FROM_NODE_HANDLE(mn->handle)].info.name : "none");
+      }
+      return FALSE;
+   }
+
    mxs_vector new_butt_pos = *pButtPos;
 
    mx_copy_vec(&old,&m_sMultiped.global_pos);

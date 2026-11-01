@@ -304,9 +304,14 @@ uint mp_update(multiped * mp, float dt,ulong app_flags)
       }
       //mp_analyze_map(mp);
 
-      if (mp->th_duration >= 0)
       {
-         mp_change_heading(mp, dt);
+         extern void mp_nan_check(multiped *mp, mps_motion_node *m, const char *stage, quat *rot, mxs_vector *xlat);
+         mp_nan_check(mp, mp_get_main_motion(mp), "the motions combined", mp_net_rot, &net_xlat);
+         if (mp->th_duration >= 0)
+         {
+            mp_change_heading(mp, dt);
+            mp_nan_check(mp, mp_get_main_motion(mp), "a heading change", mp_net_rot, &net_xlat);
+         }
       }
 
       mp_apply_motion(mp, mp_net_rot, &net_xlat, -1);
