@@ -1,4 +1,10 @@
 #include <stdio.h>
+#include <ctype.h>
+#include <string.h>
+#ifndef _WIN32
+#include <dirent.h>
+#include <sys/stat.h>
+#endif
 #include <search.h>
 #include <storeman.h>
 #include <pathutil.h>
@@ -686,7 +692,12 @@ void cSearchPath::SetupSingleStore(const char* pStorePath, int fRecurse)
 			pData.pThisPath = this;
 			pData.pRootPath = pStorePath;
 
+#ifndef SEARCH_TEST_SKIP_ENUM
 			pStore->EnumerateLevel(StorageSetupCallback, FALSE, fRecurse == 2, &pData);
+#endif
+#ifndef _WIN32
+			AddMissedSubfolders(pNode, pStorePath);
+#endif
 		}
 	}
 }
@@ -717,6 +728,94 @@ void cSearchPath::Dump(const char* pProbe)
 	}
 	fprintf(stderr, "Search path %p: %d folders (looking for %s)\n", (void*)this, n, pProbe ? pProbe : "-");
 }
+
+#ifndef _WIN32
+// A folder's subfolders, listed by the file system: on the Mac the folder
+// store's own listing added none of a fan mission's snd/<folder>/ (its
+// sounds were never found, though the same code finds them on Linux), while
+// an archive's were. Any it missed are added here, after the ones it found.
+// (Plain C strings: this file is compiled under the engine's structure
+// packing, and the standard containers broke under it.)
+static void NormPath(char* s)
+{
+	for (char* p = s; *p; ++p)
+	{
+		if (*p == '\\')
+			*p = '/';
+		*p = (char)tolower((unsigned char)*p);
+	}
+	size_t n = strlen(s);
+	while (n && s[n - 1] == '/')
+		s[--n] = 0;
+}
+
+void cSearchPath::AddMissedSubfolders(PathStorageNode* pParentNode, const char* pStorePath)
+{
+	const char* full = pParentNode->pStore->GetFullPathName();
+	if (!full || !*full)
+		return;
+	char base[512];
+	snprintf(base, sizeof(base), "%s", full);
+	for (char* p = base; *p; ++p)
+		if (*p == '\\')
+			*p = '/';
+	struct stat st;
+	if (stat(base, &st) != 0 || !S_ISDIR(st.st_mode))
+		return;   // (an archive: its own listing is complete)
+	DIR* dir = opendir(base);
+	if (!dir)
+		return;
+	const size_t bl = strlen(base);
+	int listed = 0, added = 0;
+	for (auto* pNode = pParentNode->pNext; pNode; pNode = pNode->pNext)
+		++listed;
+	while (struct dirent* ent = readdir(dir))
+	{
+		if (ent->d_name[0] == '.')
+			continue;
+		char sub[768];
+		snprintf(sub, sizeof(sub), "%s%s%s", base, (bl && base[bl - 1] == '/') ? "" : "/", ent->d_name);
+		struct stat ss;
+		if (stat(sub, &ss) != 0 || !S_ISDIR(ss.st_mode))
+			continue;
+		// already there (the store's own listing found it)?
+		char want[768];
+		snprintf(want, sizeof(want), "%s", sub);
+		NormPath(want);
+		bool have = false;
+		for (auto* pNode = pParentNode->pNext; pNode && !have; pNode = pNode->pNext)
+		{
+			const char* n = pNode->pStore->GetFullPathName();
+			if (!n)
+				continue;
+			char got[768];
+			snprintf(got, sizeof(got), "%s", n);
+			NormPath(got);
+			have = strcmp(got, want) == 0;
+		}
+		if (have)
+			continue;
+		const size_t pl = strlen(pStorePath);
+		const char lastCh = pl ? pStorePath[pl - 1] : 0;
+		const char* sep = (lastCh == '\\' || strchr(pStorePath, '\\')) ? "\\" : "/";
+		char FullPath[768];
+		snprintf(FullPath, sizeof(FullPath), "%s%s%s%s", pStorePath,
+		         (pl && lastCh != '/' && lastCh != '\\') ? sep : "", ent->d_name, sep);
+		PathStorageNode* before = m_pLastNode;
+		SetupSingleStore(FullPath, FALSE);
+		if (m_pLastNode != before)
+			++added;
+	}
+	closedir(dir);
+	if (added)
+	{
+		static int s_told = 0;
+		if (s_told++ < 20)
+			fprintf(stderr, "Search path: %s: %d subfolders listed by its store, %d more found directly\n",
+			        full, listed, added);
+	}
+}
+#endif
 
 void cSearchPath::ClearStorages()
 {

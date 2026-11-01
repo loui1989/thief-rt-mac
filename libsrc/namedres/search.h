@@ -46,6 +46,9 @@ public:
 	void DoIterate(const char* pContext, tSearchPathIterateCallback callback, void* pClientData);
 	void SetupSingleStore(const char* pStorePath, int fRecurse);
 	void Dump(const char* pProbe);
+#ifndef _WIN32
+	void AddMissedSubfolders(struct PathStorageNode* pParentNode, const char* pStorePath);
+#endif
 	void SetGlobalContextPath(ISearchPath* pContext);
 
 private:
