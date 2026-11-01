@@ -313,6 +313,92 @@ RtTexture *g_bound[2] = {};
 int g_blend = kRenderBackendBlendOpaque;
 bool g_alphaTest = false;
 
+// The colour under a see-through texel is never meant to be seen, but the
+// path tracer's filtering blends it into the edge of what is: an 8-bit
+// texture's see-through colour 0 is often magenta (Black Parade's lily
+// pads: a violet rim round every leaf), a PNG's often white or black. Each
+// see-through texel takes the colour of the solid ones next to it, spread
+// outward a few texels (for the smaller mip levels), the rest the solid
+// part's average. (Only texels wholly see-through: a pane's half see-through
+// colour is seen.)
+void bleed_edges(std::vector<uint8_t> &rgba, int w, int h)
+{
+   const size_t n = size_t(w) * h;
+   std::vector<uint8_t> done(n);   // 1: has a colour to give; 2: queued
+   double sum[3] = {0, 0, 0};
+   size_t solid = 0;
+   for (size_t i = 0; i < n; ++i)
+      if (rgba[i * 4 + 3] > 0) {   // (half see-through: its colour is seen, kept)
+         done[i] = 1;
+         for (int k = 0; k < 3; ++k)
+            sum[k] += rgba[i * 4 + k];
+         ++solid;
+      }
+   if (solid == 0 || solid == n)
+      return;
+   // the see-through texels next to a solid one, then next to those...
+   auto queue_around = [&](size_t i, std::vector<size_t> &q) {
+      const int x = int(i % size_t(w)), y = int(i / size_t(w));
+      for (int dy = -1; dy <= 1; ++dy)
+         for (int dx = -1; dx <= 1; ++dx) {
+            const int xx = x + dx, yy = y + dy;
+            if (xx < 0 || yy < 0 || xx >= w || yy >= h)
+               continue;
+            const size_t j = size_t(yy) * w + xx;
+            if (done[j] == 0) {
+               done[j] = 2;
+               q.push_back(j);
+            }
+         }
+   };
+   std::vector<size_t> front, next;
+   for (size_t i = 0; i < n; ++i)
+      if (done[i] == 1) {
+         const int x = int(i % size_t(w)), y = int(i / size_t(w));
+         bool rim = false;
+         for (int dy = -1; dy <= 1 && !rim; ++dy)
+            for (int dx = -1; dx <= 1 && !rim; ++dx) {
+               const int xx = x + dx, yy = y + dy;
+               rim = xx >= 0 && yy >= 0 && xx < w && yy < h && done[size_t(yy) * w + xx] == 0;
+            }
+         if (rim)
+            queue_around(i, front);
+      }
+   for (int pass = 0; pass < 8 && !front.empty(); ++pass) {
+      for (size_t i : front) {
+         const int x = int(i % size_t(w)), y = int(i / size_t(w));
+         int c[3] = {0, 0, 0}, m = 0;
+         for (int dy = -1; dy <= 1; ++dy)
+            for (int dx = -1; dx <= 1; ++dx) {
+               const int xx = x + dx, yy = y + dy;
+               if ((dx | dy) == 0 || xx < 0 || yy < 0 || xx >= w || yy >= h)
+                  continue;
+               const size_t j = size_t(yy) * w + xx;
+               if (done[j] != 1)
+                  continue;
+               for (int k = 0; k < 3; ++k)
+                  c[k] += rgba[j * 4 + k];
+               ++m;
+            }
+         if (m)
+            for (int k = 0; k < 3; ++k)
+               rgba[i * 4 + k] = uint8_t(c[k] / m);
+      }
+      next.clear();
+      for (size_t i : front)
+         done[i] = 1;   // filled: a colour to give the next ring
+      for (size_t i : front)
+         queue_around(i, next);
+      front.swap(next);
+   }
+   for (size_t i : front)
+      done[i] = 0;
+   for (size_t i = 0; i < n; ++i)
+      if (!done[i])
+         for (int k = 0; k < 3; ++k)
+            rgba[i * 4 + k] = uint8_t(sum[k] / double(solid));
+}
+
 void copy_pixels(RtTexture &t, int width, int height, const void *rgba, int rowBytes)
 {
    settle_job(t);   // (a job reads the pixels)
@@ -334,6 +420,8 @@ void copy_pixels(RtTexture &t, int width, int height, const void *rgba, int rowB
    }
    t.hasAlpha = alpha;
    t.cutout = cutout;
+   if (alpha)
+      bleed_edges(t.rgba, width, height);
    t.white = width == 1 && height == 1 && t.rgba[0] == 255 && t.rgba[1] == 255 &&
              t.rgba[2] == 255 && t.rgba[3] == 255;
    t.dirty = true;
