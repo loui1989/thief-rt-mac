@@ -220,6 +220,7 @@ class tile        0.55 0.00 0.50 0.80
 class glass       0.30 0.00 0.00 1.50
 class window      0.55 0.00 0.30 1.20 2.0
 class metal       0.45 0.80 0.50 0.35
+class blade       0.20 0.90 0.15 1.00
 class rust        0.85 0.45 0.90 0.00
 class wood        0.75 0.00 0.60 0.00
 class plaster     0.90 0.00 0.35 0.00
@@ -266,6 +267,9 @@ mesh/txt*/*      skin
 *greenmar*       marble
 *tile*           tile
 *mosaic*         tile
+# the player's sword: a polished steel blade
+*/swordbl*       blade
+*/bladesp*       blade
 *rust*           rust
 *iron*           metal
 *bronz*          metal
