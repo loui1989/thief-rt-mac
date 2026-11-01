@@ -118,6 +118,7 @@ struct Settings {
    int flicker = 0;           // flickering lights: 0 smoothed, 1 as the game, 2 nearly steady
    bool smoothModels = false; // models shaded smooth (their normals blended across edges)
    float ambient = 1.0f;      // the level's ambient light, as a faint glow of every surface
+   float windowLight = 1.0f; // lit windows' own light (0 off)
    int candidates = 12;       // lights tried per pixel and per bounce (RTGL1: no rays, ALU only)
    int evMin = 3;             // eye adaptation's darkest exposure (EV; Blood RT 5, RTGL1 0)
    int response = 0;          // how fast lighting changes show: 0 calm (Blood RT), 1 quick, 2 instant
@@ -203,6 +204,7 @@ void load_settings()
       else if (k == "flicker") g_cfg.flicker = std::clamp(int(value), 0, 2);
       else if (k == "smooth_models") g_cfg.smoothModels = value != 0;
       else if (k == "light_candidates") g_cfg.candidates = std::clamp(int(value), 4, 32);
+      else if (k == "window_light") g_cfg.windowLight = std::clamp(float(value), 0.0f, 4.0f);
       else if (k == "ev_min") g_cfg.evMin = std::clamp(int(value), 0, 7);
       else if (k == "light_response") g_cfg.response = std::clamp(int(value), 0, 2);
       else if (k == "rt_detection") g_cfg.rtDetection = value != 0;
@@ -248,6 +250,7 @@ void save_settings()
            int(g_cfg.lightCull), g_cfg.flicker, g_cfg.ambient, int(g_cfg.smoothModels),
            int(g_cfg.fixturesPass), int(g_cfg.lightFix), g_cfg.response, g_cfg.evMin,
            g_cfg.candidates, int(g_cfg.steadyFaces), int(g_cfg.lightFade), int(g_cfg.bloom), int(g_cfg.rtDetection), g_cfg.reach, g_cfg.outputHeight, int(g_cfg.perfLog), g_cfg.frameCap, g_cfg.fog, int(g_cfg.materials), g_cfg.bump, g_cfg.parallax, int(g_cfg.polish), g_cfg.crevice, g_cfg.fixtureLight);
+   fprintf(f, "window_light = %.2f\n", g_cfg.windowLight);
    fclose(f);
 }
 
@@ -302,6 +305,9 @@ struct RtTexture {
    // its colour on average where it is not see-through (a flame picture's
    // orange), with pixelHash
    float mean[3] = {1, 1, 1};
+   // a lit window's: how much of it is lit pane, and the pane's colour (0..1)
+   float paneFrac = -1.0f;
+   float paneRgb[3] = {1, 1, 1};
 };
 
 void settle_job(RtTexture &t);
@@ -1042,10 +1048,12 @@ struct PendingLight {
    uint32_t id;
    float pos[3], rgb[3], dir[3];
    float radius, inner, outer, peak, score = 0;
+   float size = 0;        // the source's radius in metres (0: the setting's)
    bool reaches = true;   // shines on a cell near the camera or in view
    float walk = -2.0f;    // metres from the camera through the openings; -1 out of reach, -2 not known
 };
 std::vector<PendingLight> g_pendingLights;
+constexpr uint32_t kWindowLightIds = 0x01000000u;   // lit windows' lights (build_window_lights)
 // lights a lamp's glowing glass (or a flame's bowl) was seen at: a lamp, so
 // it lights its surroundings as well as the cone the mapper gave it
 std::unordered_set<uint32_t> g_fixtureLights;
@@ -2238,6 +2246,10 @@ struct WorldGroup {
    std::vector<RgPrimitiveVertex> verts;
    std::vector<uint32_t> indices;
    std::vector<int> cells;           // the cells its polygons are in
+   // each polygon's middle, the way it faces (toward its room) and its area
+   // (metres): a lit window's light is put in front of it
+   struct Poly { float c[3], n[3], area; };
+   std::vector<Poly> polys;
    float bmin[3] = {1e30f, 1e30f, 1e30f}, bmax[3] = {-1e30f, -1e30f, -1e30f};   // meters
    bool shown = false;               // given to the path tracer last frame
 };
@@ -2245,6 +2257,8 @@ constexpr float kWorldChunk = 24.0f;      // meters
 constexpr float kWorldReach = 60.0f;      // meters walked from the camera (as Raze RT)
 constexpr float kWorldNear = 20.0f;       // meters in a straight line: always (shadows, reflections)
 int g_worldCell = -1;
+float g_nextFacing[3] = {0, 0, 1};
+bool g_nextFacingSet = false;
 uint32_t g_worldShownGroups = 0;
 uint32_t g_worldSerial = 0;
 bool g_worldValid = false;
@@ -4615,7 +4629,7 @@ int RenderRTPointLighting(const float pos[3], float *value)
    const float kScale = 1.7320508f * 9.0f / (32.0f * 9.8425f * 4.0f);
    float total = 0.0f;
    for (const PendingLight &L : g_lastLights) {
-      if (L.peak <= 0.5f)
+      if (L.peak <= 0.5f || L.id >= kWindowLightIds)
          continue;
       const RgFloat3D lp = to_rt(L.pos);
       const float lumens = L.peak * 4.0f * g_cfg.light;
@@ -5334,8 +5348,18 @@ void RenderRTWorldBegin(uint32_t serial)
 
 void RenderRTWorldCell(int cell) { g_worldCell = cell; }
 
+void RenderRTWorldPolygonFacing(float nx, float ny, float nz)
+{
+   g_nextFacing[0] = nx;
+   g_nextFacing[1] = ny;
+   g_nextFacing[2] = nz;
+   g_nextFacingSet = true;
+}
+
 void RenderRTWorldPolygon(int textureId, int flags, int count, const float *xyz, const float *uv)
 {
+   const bool facingSet = g_nextFacingSet;
+   g_nextFacingSet = false;
    if (count < 3)
       return;
    // its block of the mission, by its first corner
@@ -5369,6 +5393,19 @@ void RenderRTWorldPolygon(int textureId, int flags, int count, const float *xyz,
    const float len = std::sqrt(nx * nx + ny * ny + nz * nz);
    if (len > 0) { nx /= len; ny /= len; nz /= len; }
    const RgNormalPacked32 normal = rt.rgUtilPackNormal ? rt.rgUtilPackNormal(nx, ny, nz) : 0;
+   if (facingSet && len > 0) {
+      WorldGroup::Poly wp{};
+      for (int i = 0; i < count; ++i) {
+         const RgFloat3D q = to_rt(xyz + i * 3);
+         for (int k = 0; k < 3; ++k)
+            wp.c[k] += q.data[k] / float(count);
+      }
+      for (int k = 0; k < 3; ++k)
+         wp.n[k] = g_nextFacing[k];
+      // (the Newell normal's length is twice the area, in Dark units squared)
+      wp.area = 0.5f * len * kMetersPerUnit * kMetersPerUnit;
+      g.polys.push_back(wp);
+   }
    const uint32_t base = uint32_t(g.verts.size());
    for (int i = 0; i < count; ++i) {
       RgPrimitiveVertex v{};
@@ -5591,7 +5628,9 @@ void upload_light(const PendingLight &L)
    // a softened fire's sphere swallowed its own torch (and the torch's
    // shadow went soft again).
    float radius = lightRadius(L);
-   if (!g_flameLights.count(L.id) && g_cfg.lightSoft > 0.0f)
+   if (L.size > 0.0f)
+      radius = L.size;
+   else if (!g_flameLights.count(L.id) && g_cfg.lightSoft > 0.0f)
       radius = std::max(radius, std::min(1.2f, 0.012f * g_cfg.lightSoft * std::sqrt(std::max(lumens, 0.0f))));
    if (!lampSpot && L.inner >= 0.0f && (dir[0] != 0 || dir[1] != 0 || dir[2] != 0)) {
       const float l = std::sqrt(dir[0] * dir[0] + dir[1] * dir[1] + dir[2] * dir[2]);
@@ -5779,6 +5818,120 @@ void smooth_flicker()
 // Only the lights that matter near the camera are given to it: ranked by
 // brightness over distance squared, a light chosen last frame favoured so the
 // set does not flicker between frames.
+// Lit windows' light. A lit window (a "window" class texture with a glowing
+// pane) glowed, but its light reached the street only through the path
+// tracer's bounce rays -- next to nothing. Each one -- its polygons near
+// each other, facing alike, one window -- is given a soft spotlight just in
+// front of it, out into the room or street it faces, as strong as its lit
+// pane is large and in the pane's colour. (Not counted in the light gem: the
+// game's own windows never lit the player.)
+std::vector<PendingLight> g_windowLights;
+size_t g_windowLitTextures = size_t(-1);
+uint32_t g_windowWorldSerial = 0;
+
+void pane_stats(RtTexture &t)
+{
+   t.paneFrac = 0.0f;
+   const size_t n = size_t(t.width) * t.height;
+   if (n == 0 || t.rgba.size() < n * 4)
+      return;
+   double sum[3] = {0, 0, 0};
+   size_t lit = 0;
+   for (size_t i = 0; i < n; ++i) {
+      const uint8_t *a = &t.rgba[i * 4];
+      if (!rtmat::lit_pane(a))
+         continue;
+      for (int k = 0; k < 3; ++k)
+         sum[k] += a[k];
+      ++lit;
+   }
+   t.paneFrac = float(lit) / float(n);
+   if (lit) {
+      const float hi = float(std::max({sum[0], sum[1], sum[2]}));
+      for (int k = 0; k < 3; ++k)
+         t.paneRgb[k] = hi > 0 ? float(sum[k]) / hi : 1.0f;
+   }
+}
+
+void build_window_lights()
+{
+   // again when the world changes or another window texture's maps are done
+   // (they are made off the main thread: a window glows once its are in)
+   size_t litTextures = 0;
+   for (const WorldGroup &g : g_world) {
+      auto t = g_worldTextures.find(g.textureId);
+      if (t != g_worldTextures.end() && t->second && t->second->glows && t->second->cls &&
+          t->second->cls->window)
+         ++litTextures;
+   }
+   if (litTextures == g_windowLitTextures && g_windowWorldSerial == g_worldSerial)
+      return;
+   g_windowLitTextures = litTextures;
+   g_windowWorldSerial = g_worldSerial;
+   g_windowLights.clear();
+   struct Window { float c[3], n[3], area; };
+   for (const WorldGroup &g : g_world) {
+      if (g.flags & (kRenderRTWorldSky | kRenderRTWorldWater))
+         continue;
+      auto f = g_worldTextures.find(g.textureId);
+      if (f == g_worldTextures.end() || !f->second)
+         continue;
+      RtTexture &t = *f->second;
+      if (!t.glows || !t.cls || !t.cls->window)
+         continue;
+      if (t.paneFrac < 0.0f)
+         pane_stats(t);
+      if (t.paneFrac <= 0.0f)
+         continue;
+      // a window's polygons together (a pane and its arch, its halves)
+      std::vector<Window> windows;
+      for (const WorldGroup::Poly &p : g.polys) {
+         Window *into = nullptr;
+         for (Window &w : windows) {
+            const float dx = w.c[0] - p.c[0], dy = w.c[1] - p.c[1], dz = w.c[2] - p.c[2];
+            if (dx * dx + dy * dy + dz * dz < 1.2f * 1.2f &&
+                w.n[0] * p.n[0] + w.n[1] * p.n[1] + w.n[2] * p.n[2] > 0.95f) {
+               into = &w;
+               break;
+            }
+         }
+         if (!into) {
+            windows.push_back(Window{{p.c[0], p.c[1], p.c[2]}, {p.n[0], p.n[1], p.n[2]}, p.area});
+            continue;
+         }
+         const float a = into->area + p.area;
+         for (int k = 0; k < 3; ++k)
+            into->c[k] = (into->c[k] * into->area + p.c[k] * p.area) / std::max(a, 1e-6f);
+         into->area = a;
+      }
+      for (const Window &w : windows) {
+         const float lit = w.area * t.paneFrac;   // square metres of lit pane
+         if (lit < 0.04f)
+            continue;
+         PendingLight L{};
+         // (a little in front of the pane, out of the wall's shadow)
+         for (int k = 0; k < 3; ++k) {
+            L.pos[k] = (w.c[k] + w.n[k] * 0.3f) / kMetersPerUnit;
+            L.dir[k] = w.n[k];
+         }
+         // a fill light's strength (Dark's 20-60) for a pane of a square metre or two
+         L.peak = std::min(120.0f, 30.0f * lit);
+         for (int k = 0; k < 3; ++k)
+            L.rgb[k] = t.paneRgb[k] * L.peak;
+         L.inner = 0.6f;    // ~53 degrees: full strength
+         L.outer = 0.08f;   // ~85 degrees: out to the wall it is in
+         L.radius = 0;
+         L.size = std::clamp(0.35f * std::sqrt(w.area), 0.12f, 0.6f);
+         uint32_t h = 2166136261u;
+         for (int k = 0; k < 3; ++k)
+            h = (h ^ uint32_t(int32_t(std::lround(w.c[k] * 20.0f)))) * 16777619u;
+         L.id = kWindowLightIds | (h & 0x00ffffffu);
+         g_windowLights.push_back(L);
+      }
+   }
+   fprintf(stderr, "RT: lit windows: %zu lights from %zu lit window textures\n", g_windowLights.size(), litTextures);
+}
+
 void flush_lights()
 {
    if (g_freezeLights) {
@@ -5787,6 +5940,16 @@ void flush_lights()
       g_pendingLights.clear();
       g_dimPending.clear();
       return;
+   }
+   if (g_cfg.windowLight > 0.0f && g_worldValid) {
+      if ((g_frameNumber % 30) == 0 || g_windowWorldSerial != g_worldSerial)
+         build_window_lights();
+      for (PendingLight L : g_windowLights) {
+         L.peak *= g_cfg.windowLight;
+         for (float &c : L.rgb)
+            c *= g_cfg.windowLight;
+         g_pendingLights.push_back(L);
+      }
    }
    g_lightsTotal = uint32_t(g_pendingLights.size());
    smooth_flicker();

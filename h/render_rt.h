@@ -100,6 +100,9 @@ void RenderRTWorldBegin(uint32_t serial);
 void RenderRTWorldCell(int cell);
 void RenderRTWorldPolygon(int textureId, int flags, int count,
                           const float *xyz, const float *uv);
+// the way the next polygon faces (its plane's normal: toward the room it is
+// seen from), before RenderRTWorldPolygon
+void RenderRTWorldPolygonFacing(float nx, float ny, float nz);
 void RenderRTWorldEnd(void);
 // Every frame: the backend texture (RenderBackendCreateTexture handle)
 // currently showing for a world texture id (animated textures change).

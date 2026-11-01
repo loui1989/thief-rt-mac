@@ -1796,6 +1796,10 @@ static void portal_rt_submit_world(void)
                      uv[i*2+1] *= sv;
                   }
             }
+            {
+               const PortalPlane *pl = &r->plane_list[pc->planeid];
+               RenderRTWorldPolygonFacing(pl->normal.x, pl->normal.y, pl->normal.z);
+            }
             RenderRTWorldPolygon(ri->texture_id, flags, n, xyz, uv);
             if (!(flags & kRenderRTWorldSky) && ri->texture_id < PORTAL_RT_MAX_TEXTURE_IDS) {
                // 2: a water surface, drawn through its medium's palette
