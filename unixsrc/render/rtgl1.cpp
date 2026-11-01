@@ -1430,25 +1430,31 @@ uint64_t hash_prims(const std::vector<CapturedPrim> &prims)
 // sharper creases (box corners, the two faces of a thin part) hard.
 void compute_normals(CapturedPrim *prims, size_t count)
 {
-   struct Tri { float n[3]; };
-   std::vector<Tri> tris;
-   std::unordered_map<uint64_t, std::vector<uint32_t>> at;   // position -> corners
+   // The corners at each place are found by sorting (place, corner) pairs:
+   // a map of lists made a heap allocation for every place of every moving
+   // character every frame -- milliseconds a frame in a crowd. (The same
+   // corners, summed in the same order: the same normals.)
+   static std::vector<float> faceN, unitN;               // per triangle: area-weighted, unit
+   static std::vector<std::pair<uint32_t, uint32_t>> corners;   // (prim, vertex)
+   static std::vector<std::pair<uint64_t, uint32_t>> places;    // (place, corner)
    auto key = [](const float *p) {
       auto q = [](float x) { return uint64_t(uint32_t(int32_t(std::lround(x * 1024.0f))) & 0x1fffffu); };
       return q(p[0]) | (q(p[1]) << 21) | (q(p[2]) << 42);
    };
-   std::vector<std::pair<uint32_t, uint32_t>> corners;   // (prim, vertex)
+   faceN.clear();
+   corners.clear();
+   places.clear();
    for (size_t pi = 0; pi < count; ++pi) {
       std::vector<RgPrimitiveVertex> &v = prims[pi].verts;
       for (size_t t = 0; t + 2 < v.size(); t += 3) {
          const float *a = v[t].position, *b = v[t + 1].position, *c = v[t + 2].position;
          const float e1[3] = {b[0] - a[0], b[1] - a[1], b[2] - a[2]};
          const float e2[3] = {c[0] - a[0], c[1] - a[1], c[2] - a[2]};
-         Tri tri{{e1[1] * e2[2] - e1[2] * e2[1], e1[2] * e2[0] - e1[0] * e2[2],
-                  e1[0] * e2[1] - e1[1] * e2[0]}};
-         tris.push_back(tri);
+         faceN.push_back(e1[1] * e2[2] - e1[2] * e2[1]);
+         faceN.push_back(e1[2] * e2[0] - e1[0] * e2[2]);
+         faceN.push_back(e1[0] * e2[1] - e1[1] * e2[0]);
          for (int k = 0; k < 3; ++k) {
-            at[key(v[t + k].position)].push_back(uint32_t(corners.size()));
+            places.emplace_back(key(v[t + k].position), uint32_t(corners.size()));
             corners.emplace_back(uint32_t(pi), uint32_t(t + k));
          }
       }
@@ -1459,27 +1465,36 @@ void compute_normals(CapturedPrim *prims, size_t count)
          out[k] = l > 1e-12f ? n[k] / l : (k == 2 ? 1.0f : 0.0f);
       return l > 1e-12f;
    };
-   std::vector<float> unitN(tris.size() * 3);
-   for (size_t i = 0; i < tris.size(); ++i)
-      unit(tris[i].n, &unitN[i * 3]);
+   const size_t nTris = faceN.size() / 3;
+   unitN.resize(nTris * 3);
+   for (size_t i = 0; i < nTris; ++i)
+      unit(&faceN[i * 3], &unitN[i * 3]);
+   std::sort(places.begin(), places.end());
    const float kCos = 0.5f;
-   for (size_t ci = 0; ci < corners.size(); ++ci) {
-      const size_t ti = ci / 3;
-      const float *mine = &unitN[ti * 3];
-      RgPrimitiveVertex &dst = prims[corners[ci].first].verts[corners[ci].second];
-      float sum[3] = {0, 0, 0};
-      for (uint32_t other : at[key(dst.position)]) {
-         const size_t oi = other / 3;
-         const float *on = &unitN[oi * 3];
-         if (oi != ti && mine[0] * on[0] + mine[1] * on[1] + mine[2] * on[2] < kCos)
-            continue;
-         for (int k = 0; k < 3; ++k)
-            sum[k] += tris[oi].n[k];   // area weighted
+   for (size_t g0 = 0; g0 < places.size();) {
+      size_t g1 = g0 + 1;
+      while (g1 < places.size() && places[g1].first == places[g0].first)
+         ++g1;
+      for (size_t i = g0; i < g1; ++i) {
+         const uint32_t ci = places[i].second;
+         const size_t ti = ci / 3;
+         const float *mine = &unitN[ti * 3];
+         float sum[3] = {0, 0, 0};
+         for (size_t j = g0; j < g1; ++j) {
+            const size_t oi = places[j].second / 3;
+            const float *on = &unitN[oi * 3];
+            if (oi != ti && mine[0] * on[0] + mine[1] * on[1] + mine[2] * on[2] < kCos)
+               continue;
+            for (int k = 0; k < 3; ++k)
+               sum[k] += faceN[oi * 3 + k];   // area weighted
+         }
+         float n[3];
+         if (!unit(sum, n))
+            memcpy(n, mine, sizeof(n));
+         RgPrimitiveVertex &dst = prims[corners[ci].first].verts[corners[ci].second];
+         dst.normalPacked = rt.rgUtilPackNormal ? rt.rgUtilPackNormal(n[0], n[1], n[2]) : 0;
       }
-      float n[3];
-      if (!unit(sum, n))
-         memcpy(n, mine, sizeof(n));
-      dst.normalPacked = rt.rgUtilPackNormal ? rt.rgUtilPackNormal(n[0], n[1], n[2]) : 0;
+      g0 = g1;
    }
 }
 

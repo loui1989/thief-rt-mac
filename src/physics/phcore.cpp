@@ -3827,6 +3827,11 @@ next_coll_obj:
    BOOL sliding = TRUE;
    BOOL collided = FALSE;
    int  iterations = 0;
+   // what the motion asked for, and the last thing collided with (for the log)
+   const mxs_vector wanted_delta = movement_delta;
+   ObjID      last_with = OBJ_NULL;
+   int        last_submod = -1, last_terrain = 0;
+   mxs_vector last_normal = {0, 0, 0};
 
    while (sliding && (iterations < MAX_ITERATIONS))
    {
@@ -4044,12 +4049,18 @@ next_coll_obj:
          if (clsnList[clsnIndex].pClsn->GetType() & kPC_Terrain)
          {
             normal = clsnList[clsnIndex].pClsn->GetNormal();
+            last_terrain = 1;
+            last_with = OBJ_NULL;
          }
          else
          {
             cPhysClsn *pClsn = clsnList[clsnIndex].pClsn;
             PhysGetObjsNorm(pClsn->GetModel(), pClsn->GetSubModId(), pClsn->GetModel2(), pClsn->GetSubModId2(), normal);
+            last_terrain = 0;
+            last_with = pClsn->GetModel2() ? pClsn->GetModel2()->GetObjID() : OBJ_NULL;
          }
+         last_submod = clsnList[clsnIndex].pClsn->GetSubModId();
+         last_normal = normal;
 
          normal.z = 0;
          if (mx_mag2_vec(&normal) > 0.0001)
@@ -4105,7 +4116,27 @@ next_coll_obj:
 
    if (iterations == MAX_ITERATIONS)
    {
+      // No way found around what it ran into: it stays where it was -- but
+      // only across. Its height is its motion's (and its ground keeping's):
+      // the sideways slide above cannot get it off something under or over
+      // it, so held at its height too, a creature sitting down on the floor
+      // froze there, then stood up through it and walked on sunk to the
+      // waist (Black Parade's floor sitters).
       mx_copy_vec(new_pos, &pModel->GetLocationVec());
+      new_pos->z += wanted_delta.z;
+      static ObjID s_obj[16];
+      static int   s_n = 0;
+      int k;
+      for (k = 0; k < s_n && s_obj[k] != objID; k++)
+         ;
+      if (k == s_n && s_n < 16)
+      {
+         s_obj[s_n++] = objID;
+         mprintf("%s: no way past %s (its sphere %d, the normal %.2f %.2f %.2f): held in place across, "
+                 "moved %.2f up or down as its motion asks\n",
+                 ObjWarnName(objID), last_terrain ? "the world" : (last_with ? ObjWarnName(last_with) : "an object"),
+                 last_submod, last_normal.x, last_normal.y, last_normal.z, wanted_delta.z);
+      }
       return TRUE;
    }
 

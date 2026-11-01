@@ -681,6 +681,24 @@ void LGAPI CrPosPropListener(sPropertyListenMsg* msg, PropListenerData data)
 
    Position *pPosition=ObjPosGet(msg->obj);
 
+   // something else moving a self-propelled creature up or down (logged: a
+   // sitter held at its height while its motion stood it up)
+   if (!pCreature->IsBallistic() &&
+       fabs(pPosition->loc.vec.z - pCreature->GetMultiped()->global_pos.z) > 0.3f)
+   {
+      static ObjID s_obj[16];
+      static int   s_n = 0;
+      int k;
+      for (k = 0; k < s_n && s_obj[k] != msg->obj; k++)
+         ;
+      if (k == s_n && s_n < 16)
+      {
+         s_obj[s_n++] = msg->obj;
+         mprintf("%s moved from outside its motion: its butt from %.2f to %.2f\n", ObjWarnName(msg->obj),
+                 pCreature->GetMultiped()->global_pos.z, pPosition->loc.vec.z);
+      }
+   }
+
    // can cause creature to become tilted
    pCreature->MoveButt(&pPosition->loc.vec,&pPosition->fac, TRUE,TRUE);
    pCreature->FlushRelativeState();
