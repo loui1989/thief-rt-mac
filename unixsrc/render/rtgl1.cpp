@@ -711,12 +711,13 @@ void preload_textures()
          std::this_thread::sleep_for(std::chrono::milliseconds(2));
       ++made;
    }
+   const auto t1 = std::chrono::steady_clock::now();
    // given to RTGL1 now, each with its maps (texture_name adopts the jobs)
    for (RtTexture *t : started)
       texture_name(t);
-   fprintf(stderr, "RT: material maps for %zu textures ready in %.1f s (%u threads)\n", made,
-           std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count(),
-           mat_pool().threads);
+   fprintf(stderr, "RT: material maps for %zu textures ready in %.1f s (%u threads), given to the path tracer in %.1f s\n", made,
+           std::chrono::duration<double>(t1 - t0).count(), mat_pool().threads,
+           std::chrono::duration<double>(std::chrono::steady_clock::now() - t1).count());
 }
 
 // The RTGL1 name for a texture, uploading its pixels first if they changed:

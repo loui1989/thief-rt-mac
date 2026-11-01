@@ -6,6 +6,8 @@
 // $Header: r:/t2repos/thief2/src/sim/wrloop.cpp,v 1.73 2000/03/18 15:20:54 adurant Exp $
 
 #include <wrloop.h>
+#include <chrono>
+#include <stdio.h>
 
 #include <lg.h>
 #include <loopapi.h>
@@ -1302,6 +1304,14 @@ static void water_db_message(DispatchData* msg)
    }
 }
 
+extern "C" double g_ResImageReadSeconds;   // (namedres: reading PNG and DDS images)
+
+// (where a world's load goes, in the log)
+static double wr_now()
+{
+   return std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count();
+}
+
 static void db_message(DispatchData* msg)
 {
    msgDatabaseData data;
@@ -1477,15 +1487,19 @@ static void db_message(DispatchData* msg)
                   size = file->BlockSize(&WrTag);
 
                AllocMemBuf(size); 
+               const double tRead = wr_now();
 
                // load the world rep
                ReadWR(movefunc);
+               const double tLight = wr_now();
 
                // load the light stuff
                if (gReadExtendedWorldRep)
                   ReadWriteWRExtLight(movefunc,TRUE);
                else
                   ReadWriteLight(movefunc, TRUE);
+               fprintf(stderr, "Load timing: world cells %.0f ms, light %.0f ms\n",
+                       (tLight - tRead) * 1000.0, (wr_now() - tLight) * 1000.0);
 
                // load the csg editting type stuff
 #ifdef EDITOR
@@ -1511,7 +1525,10 @@ static void db_message(DispatchData* msg)
                cleanup_tagfile(data.load);
             }
 
+            const double tTex = wr_now(), imgBefore = g_ResImageReadSeconds;
             texture_Load(data.load); 
+            fprintf(stderr, "Load timing: world textures %.0f ms (images read %.0f ms)\n",
+                    (wr_now() - tTex) * 1000.0, (g_ResImageReadSeconds - imgBefore) * 1000.0);
          }
 
          break;
