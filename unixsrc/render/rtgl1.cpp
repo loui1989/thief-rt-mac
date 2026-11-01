@@ -606,6 +606,83 @@ void adopt_job(RtTexture *t)
 bool g_preloading = false;
 const char *texture_name(RtTexture *t);
 
+// Textures the game let go of, kept with RTGL1 a while under their names:
+// a menu, the book or a letter frees all of the mission's textures and
+// makes the same ones again on the way back, and giving them all to the
+// path tracer again (each with its maps read anew) was a half-second hitch
+// on returning to the game. The same picture made again takes its old name
+// back. Keyed by its pixels, its file and what names it (materials, crevices).
+struct Retired {
+   std::string name;
+   const rtmat::Class *cls = nullptr;
+   bool polished = false, glows = false, mapsNone = false;
+   float glow = 0.0f;
+};
+std::unordered_map<uint64_t, Retired> g_retired;
+std::deque<uint64_t> g_retiredOrder;
+constexpr size_t kRetiredMax = 1500;
+
+uint64_t texture_key(const RtTexture &t)
+{
+   uint64_t h = 1469598103934665603ull ^ (uint64_t(uint32_t(t.width)) << 32 | uint32_t(t.height));
+   const size_t words = t.rgba.size() / 8;
+   const uint8_t *p = t.rgba.data();
+   for (size_t i = 0; i < words; ++i) {
+      uint64_t w;
+      memcpy(&w, p + i * 8, 8);
+      h = (h ^ w) * 0x9E3779B97F4A7C15ull;
+      h ^= h >> 29;
+   }
+   for (size_t i = words * 8; i < t.rgba.size(); ++i)
+      h = (h ^ p[i]) * 1099511628211ull;
+   for (unsigned char ch : t.source)
+      h = (h ^ ch) * 1099511628211ull;
+   h ^= (uint64_t(g_cfg.materials ? 1 : 0) << 7) ^ (uint64_t(std::lround(g_cfg.crevice * 100.0f)) << 9);
+   return h;
+}
+
+void retire_oldest()
+{
+   while (!g_retiredOrder.empty()) {
+      const uint64_t k = g_retiredOrder.front();
+      g_retiredOrder.pop_front();
+      auto it = g_retired.find(k);
+      if (it == g_retired.end())
+         continue;   // (taken back already)
+      release_name(it->second.name.c_str());
+      g_retired.erase(it);
+      return;
+   }
+}
+
+// all of them let go (a new mission's textures are in)
+void retire_clear()
+{
+   for (auto &e : g_retired)
+      release_name(e.second.name.c_str());
+   g_retired.clear();
+   g_retiredOrder.clear();
+}
+
+// the same picture as one let go of: its old name back, and nothing given again
+bool revive_texture(RtTexture *t)
+{
+   if (g_retired.empty() || !g_active)
+      return false;
+   auto it = g_retired.find(texture_key(*t));
+   if (it == g_retired.end())
+      return false;
+   snprintf(t->name, sizeof(t->name), "%s", it->second.name.c_str());
+   t->provided = true;   // (the retired one's hold on the name is now its)
+   t->cls = it->second.cls;
+   t->polished = it->second.polished;
+   t->glows = it->second.glows;
+   t->glow = it->second.glow;
+   t->mapsNone = it->second.mapsNone;
+   g_retired.erase(it);
+   return true;
+}
+
 // A mission's textures, all of them, mapped by the threads before its first
 // frame (all cores; the frame waits): the walls are bump-mapped from the
 // start instead of turning from flat to bumped in the first seconds, and
@@ -624,6 +701,8 @@ void preload_textures()
             started.push_back(&t);
       }
    g_preloading = false;
+   // what the last mission let go of and this one did not take back
+   retire_clear();
    if (started.empty())
       return;
    size_t made = 0;
@@ -656,6 +735,8 @@ const char *texture_name(RtTexture *t)
       t->glow = 0.0f;
       t->cls = nullptr;
       t->dirty = false;
+      if (revive_texture(t))
+         return t->name;
       if (const rtmat::Class *c = material_class(t)) {
          auto j = std::make_shared<MatJob>();
          j->rgba = t->rgba.data();
@@ -2263,6 +2344,8 @@ void Close()
    g_RenderRTCaptureVertices = 0;
    for (RtTexture &t : g_textures)
       t.provided = false, t.dirty = true;
+   g_retired.clear();
+   g_retiredOrder.clear();
    g_canvasTex.provided = g_movieTex.provided = false;
    g_ui.fontProvided = false;
 }
@@ -2333,7 +2416,26 @@ void DestroyTexture(void *handle)
    for (auto &w : g_worldTextures)
       if (w.second == t)
          w.second = nullptr;
+   // as given finally (not a stand-in while its maps are made): kept a while
+   const bool final = !t->job && !t->dirty;
    settle_job(*t);
+   if (t->provided && final && g_active && !t->rgba.empty()) {
+      const uint64_t k = texture_key(*t);
+      if (!g_retired.count(k)) {
+         Retired r;
+         r.name = t->name;
+         r.cls = t->cls;
+         r.polished = t->polished;
+         r.glows = t->glows;
+         r.glow = t->glow;
+         r.mapsNone = t->mapsNone;
+         g_retired.emplace(k, std::move(r));
+         g_retiredOrder.push_back(k);
+         t->provided = false;   // (its hold on the name goes to the retired one)
+         while (g_retired.size() > kRetiredMax)
+            retire_oldest();
+      }
+   }
    if (t->provided)
       release_name(t->name);
    t->provided = false;
@@ -3357,17 +3459,16 @@ void draw_frame(bool sceneDrawn)
       for (int i = 0; i < 3; ++i)
          volAmbient.data[i] = lin(g_fogRgb[i]) * g_cfg.sky;
    }
-   // Under water: the water itself as a haze, teal, thickening over 16 m
-   // and lit by the lamps (light through the surface shows as shafts), so
-   // the far side of a pool fades into water, not into black.
-   const bool waterHaze = g_underwater && g_cfg.underwaterHaze > 0.0f;
+   // Under water: the water itself as a haze, teal, thickening with
+   // distance (to 63% at 11 m), so the far side of a pool fades into water,
+   // not into black. By depth alone (RTGL1's simple volume): lit by the
+   // lamps, its few light samples a pixel were blotches the denoiser smeared
+   // across the view.
+   const bool waterHaze = g_underwater && g_cfg.underwaterHaze > 0.0f && !fogOn;
    if (waterHaze) {
-      const float D = 16.0f * g_cfg.underwaterClarity;
-      volFar = std::clamp(D, 12.0f, 300.0f);
-      const float tau = 1.6f * volFar / D;
-      volNear = 0.4f * tau / 0.064f;
-      volFarDens = 1.6f * tau / 0.064f;
-      const float teal[3] = {0.004f, 0.011f, 0.010f};
+      const float perMetre = 1.0f / (11.0f * g_cfg.underwaterClarity);
+      volNear = perMetre / 0.00005f;   // (the simple volume's density is this x 0.00005)
+      const float teal[3] = {0.006f, 0.016f, 0.015f};
       for (int i = 0; i < 3; ++i)
          volAmbient.data[i] = teal[i] * g_cfg.underwaterHaze;
    }
@@ -3435,7 +3536,7 @@ void draw_frame(bool sceneDrawn)
       // greyed Thief's darkness. Optional, lit by the lamps when on.
       .enable = g_cfg.volumetric || fogOn || waterHaze,
       .maxHistoryLength = 8.0f,
-      .useSimpleDepthBased = false,
+      .useSimpleDepthBased = waterHaze,
       .volumetricFar = volFar,
       .ambientColor = volAmbient,
       .scaterring = volNear,

@@ -7,6 +7,7 @@
 
 #include <lg.h>
 #include <stdio.h>
+#include <chrono>
 #include <string.h>
 #include <ctype.h>
 #include <limits.h>
@@ -1204,10 +1205,14 @@ static find_file_func special_file_find = NULL;
 
 #define LOAD_ORDER_PHASES (sizeof(load_order)/sizeof(load_order[0]))
 
+extern "C" double g_ResImageReadSeconds;   // (namedres: reading PNG and DDS images)
+
 edbFiletype dbLoad(const char* filename, ulong loadtype)
 {
    char fullname[256];
    const char* name = filename; 
+   const auto loadStart = std::chrono::steady_clock::now();
+   const double imagesBefore = g_ResImageReadSeconds;
    MissionDiagnosticsBegin(filename);
    begin_load_transaction();
    if (!file_factory)
@@ -1242,6 +1247,9 @@ edbFiletype dbLoad(const char* filename, ulong loadtype)
    edbFiletype retval = dbLoadTagFile(file,loadtype); 
    MissionDiagnosticsFinish(retval != 0);
    end_load_transaction();
+   fprintf(stderr, "Load timing: %s loaded in %.2f s (images read %.2f s)\n", name,
+           std::chrono::duration<double>(std::chrono::steady_clock::now() - loadStart).count(),
+           g_ResImageReadSeconds - imagesBefore);
 
    // So user knows what file he just loaded.
    strncpy(gCurrFilename, (char *)strip_pathname(name),sizeof(gCurrFilename));

@@ -7,6 +7,7 @@
 #include <mprintf.h>
 #include <platform_services.h>
 #include <chrono>
+#include <stdio.h>
 
 // The ray tracer's performance log: each loop client's time in the frame
 // messages, when set.
@@ -211,7 +212,10 @@ HRESULT cLoopDispatch::SendMessage(eLoopMessage message, tLoopMessageData hData,
 
 		auto* timeHook = (message & kMsgsFrame) ? g_LoopClientTimeHook : nullptr;
 		std::chrono::steady_clock::time_point hookStart;
-		if (timeHook)
+		// (loading, entering and leaving modes: any client that takes long
+		// on it goes into the log, to see where a load's time goes)
+		const bool timeRare = !(message & kMsgsFrame);
+		if (timeHook || timeRare)
 			hookStart = std::chrono::steady_clock::now();
 
 		eLoopMessageResult clientResult{};
@@ -223,6 +227,19 @@ HRESULT cLoopDispatch::SendMessage(eLoopMessage message, tLoopMessageData hData,
 		if (timeHook)
 			timeHook((const char*)pszClient, (unsigned)message,
 			         std::chrono::duration<double>(std::chrono::steady_clock::now() - hookStart).count());
+		if (timeRare)
+		{
+			const double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - hookStart).count();
+			if (ms >= 40.0)
+			{
+				// (a database message carries its kind first: load, post-load...)
+				const unsigned long kind = (message == kMsgLoad && hData) ? *reinterpret_cast<const unsigned long*>(hData) : 0;
+				fprintf(stderr, "Load timing: %s took %.0f ms on message 0x%x%s",
+				        (const char*)pszClient, ms, (unsigned)message, kind ? "" : "\n");
+				if (kind)
+					fprintf(stderr, " (database 0x%lx)\n", kind);
+			}
+		}
 
 		if (fLoopTimeThisMsg)
 			pTimer->Stop();
