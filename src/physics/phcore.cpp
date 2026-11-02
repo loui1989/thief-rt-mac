@@ -6950,7 +6950,8 @@ static void PlayerStuckWatch(long dt_msec)
       s_told = FALSE;
       return;
    }
-   if (s_stuck < 1.5f || s_told || s_episodes >= 20)
+   // (short hold-ups too: caught in a doorway or a crawlspace for a moment)
+   if (s_stuck < 0.4f || s_told || s_episodes >= 40)
       return;
    s_told = TRUE;
    ++s_episodes;
@@ -6964,10 +6965,24 @@ static void PlayerStuckWatch(long dt_msec)
            PhysObjValidPos(player, NULL) ? "valid" : "INSIDE something");
    for (int i = 0; i < pModel->NumSubModels(); i++)
    {
+      const mxs_vector &at = pModel->GetLocationVec(i);
+      mprintf("   submodel %d at (%.2f %.2f %.2f)%s\n", i, at.x, at.y, at.z,
+              pModel->GetType(i) == kPMT_Sphere || pModel->GetType(i) == kPMT_SphereHat ? "" : " (not a sphere)");
       cPhysSubModelInst *pContact;
       if (GetObjectContacts(player, i, pModel, &pContact))
          for (; pContact; pContact = pContact->GetNext())
             mprintf("   submodel %d touches %s\n", i, ObjWarnName(pContact->GetObjID()));
+      cFaceContactList *pFaces;
+      if (pModel->GetFaceContacts(i, &pFaces))
+         for (cFaceContact *f = pFaces->GetFirst(); f; f = f->GetNext())
+         {
+            const mxs_vector &n = f->GetNormal();
+            mprintf("   submodel %d against a face of %s, its normal (%.2f %.2f %.2f)\n", i,
+                    f->GetObjID() ? ObjWarnName(f->GetObjID()) : "the world", n.x, n.y, n.z);
+         }
+      cEdgeContactList *pEdges;
+      if (pModel->GetEdgeContacts(i, &pEdges))
+         mprintf("   submodel %d on an edge of the world\n", i);
    }
 }
 
