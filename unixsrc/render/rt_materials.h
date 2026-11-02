@@ -205,6 +205,7 @@ inline const char *kDefaultTable = R"(# Thief RT material table: what each textu
 #   <pattern> <class>        (the texture's path, as fam/city/marble: * and ? wildcards;
 #                             the first rule that matches wins)
 #   autobump <bump>          (textures no rule names: bumps from their own texels)
+#   (patterns match in any case)
 #
 # polish: the surface mirrors the room (sharp, traced reflections over its texture).
 # A class named window...: its bright, warm texels glow (lit windows), this strongly.
@@ -212,7 +213,7 @@ inline const char *kDefaultTable = R"(# Thief RT material table: what each textu
 # Delete this file to get the defaults back; after editing it, the textures'
 # maps are made again by themselves.
 
-autobump 0.6
+autobump 0.9
 
 class none        1.00 0.00 0.00 0.00
 class marble      0.35 0.00 0.10 1.20
@@ -323,6 +324,14 @@ mesh/txt*/*      skin
 *wall*           stone
 *ledge*          stone
 *floor*          stone
+
+# what is left of a family of rough walls: as its walls (after every rule
+# above, so its marble, tiles, wood and metal are still those)
+*/cave/*         rock
+*/rubble/*       rock
+*/mine/*         rock
+*/sewer/*        brick
+*/sewer2/*       brick
 )";
 
 inline bool glob(const char *p, const char *s)
@@ -344,15 +353,18 @@ inline bool glob(const char *p, const char *s)
          if (!e || !*s)
             return false;
          bool in = false;
+         const char sc = char(tolower((unsigned char)*s));
          for (const char *c = p + 1; c < e; ++c)
-            if (c + 2 < e && c[1] == '-') { in |= *s >= c[0] && *s <= c[2]; c += 2; }
-            else in |= *s == *c;
+            if (c + 2 < e && c[1] == '-') { in |= sc >= tolower((unsigned char)c[0]) && sc <= tolower((unsigned char)c[2]); c += 2; }
+            else in |= sc == tolower((unsigned char)*c);
          if (!in)
             return false;
          p = e;
          continue;
       }
-      if (!*s || (*p != '?' && *p != *s))
+      // (in any case: a fan mission's textures are often named in capitals --
+      // HALLEFORD/BrickYellow02 -- and no rule named them)
+      if (!*s || (*p != '?' && tolower((unsigned char)*p) != tolower((unsigned char)*s)))
          return false;
    }
    return !*s;
