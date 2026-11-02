@@ -102,6 +102,8 @@ struct Settings {
    float smallLamps = 2.0f;   // small lamps (a short reach): this much more, so the light the
                               // game reckons they give -- the light gem's -- shows round them
    float spriteGlow = 1.0f;   // flame sprites' glow (their emission maps)
+   float gemMatch = 10.0f;    // feet from a light (of the level's strength) past which the light
+                              // gem follows the traced light's 1/distance^2, not the game's 1/distance
    bool materials = true;     // material maps made from the textures (rt_materials.h)
    float bump = 1.0f;         // their bumps' strength
    float parallax = 0.03f;    // parallax depth, in texture widths (0 off)
@@ -192,6 +194,7 @@ void load_settings()
       else if (k == "water") g_cfg.water = std::clamp(int(value), 0, 2);
       else if (k == "fixture_light") g_cfg.fixtureLight = std::clamp(value, 0.25f, 6.0f);
       else if (k == "small_lamps") g_cfg.smallLamps = std::clamp(value, 1.0f, 6.0f);
+      else if (k == "gem_match_ft") g_cfg.gemMatch = std::clamp(value, 0.0f, 100.0f);
       else if (k == "sprite_glow") g_cfg.spriteGlow = std::clamp(value, 0.0f, 10.0f);
       else if (k == "gi") g_cfg.gi = std::clamp(int(value), 0, 3);
       else if (k == "volumetric") g_cfg.volumetric = value != 0;
@@ -265,6 +268,7 @@ void save_settings()
            g_cfg.candidates, int(g_cfg.steadyFaces), int(g_cfg.lightFade), int(g_cfg.bloom), int(g_cfg.rtDetection), g_cfg.reach, g_cfg.outputHeight, int(g_cfg.perfLog), g_cfg.frameCap, g_cfg.fog, int(g_cfg.materials), g_cfg.bump, g_cfg.parallax, int(g_cfg.polish), g_cfg.crevice, g_cfg.fixtureLight);
    fprintf(f, "window_light = %.2f\n", g_cfg.windowLight);
    fprintf(f, "small_lamps = %.2f\n", g_cfg.smallLamps);
+   fprintf(f, "gem_match_ft = %.1f\n", g_cfg.gemMatch);
    fclose(f);
 }
 
@@ -4933,6 +4937,7 @@ void RenderRTPrepEnd(void)
 } // extern "C"
 namespace {
 float lightRadius(const PendingLight &L);   // (below)
+float light_gain(const PendingLight &L);    // (below)
 // The light gem's light at a point: the lights given to the path tracer last
 // frame, each as RTGL1 spreads it (a sphere, a spot's cone), at the player's
 // legs, middle and head, shadowed by the world's walls (parts: light by light)
@@ -4978,7 +4983,20 @@ float gem_value(const float pos[3], std::vector<GemPart> *parts)
          scale = dot >= L.inner ? 1.0f : dot <= L.outer ? 0.0f : (dot - L.outer) / std::max(L.inner - L.outer, 1e-6f);
       }
       const float bright = std::sqrt(L.rgb[0] * L.rgb[0] + L.rgb[1] * L.rgb[1] + L.rgb[2] * L.rgb[2]) / 32.0f;
-      const float full = scale * bright / std::max(dFt, 0.5f);
+      float full = scale * bright / std::max(dFt, 0.5f);
+      // The game's light falls as 1/distance, the traced light -- what is
+      // on screen -- as 1/distance squared: near a light they agree, further
+      // off the game's still lit the player well where the screen showed
+      // the light all but gone (a fill light round a corner 5 m off, the
+      // gem at 0.3 in a corridor that looked black). Past the distance they
+      // part (gem_match_ft, 10 ft for a light of the level's strength;
+      // further for one the path tracer gives more, a lamp or a chandelier,
+      // nearer for a flame's) the gem follows the traced light.
+      if (g_cfg.gemMatch > 0.0f) {
+         const float reachFt = g_cfg.gemMatch * light_gain(L);
+         if (dFt > reachFt)
+            full *= reachFt / dFt;
+      }
       if (full < 0.002f)
          continue;
       const RgFloat3D lp = to_rt(L.pos);
@@ -5980,6 +5998,24 @@ float flame_noise(double t, uint32_t seed)
    };
    const float u = float(t - f), w = u * u * (3.0f - 2.0f * u);
    return at(int64_t(f)) * (1.0f - w) + at(int64_t(f) + 1) * w;
+}
+
+// How much more light the path tracer gives a light than one of the
+// level's strength (as upload_light reckons it: the lamps', the flames'),
+// for the light gem
+float light_gain(const PendingLight &L)
+{
+   const bool fixture = g_fixtureLights.count(L.id) != 0;
+   const bool flame = g_flameLights.count(L.id) != 0;
+   float g = g_cfg.light * (fixture ? g_cfg.fixtureLight : 1.0f);
+   if (fixture && !flame && L.radius > 0.0f)
+      g *= g_cfg.smallLamps * std::sqrt(std::clamp(L.radius, 25.0f, 72.0f) / 25.0f);
+   if (flame)
+      g *= 0.6f;
+   const float dl = std::sqrt(L.dir[0] * L.dir[0] + L.dir[1] * L.dir[1] + L.dir[2] * L.dir[2]);
+   if (fixture && L.inner >= 0.0f && !flame && dl > 0.0f && L.dir[2] / dl < -0.7f && L.outer < 0.8f)
+      g *= 0.6f;
+   return g;
 }
 
 void upload_light(const PendingLight &L)
