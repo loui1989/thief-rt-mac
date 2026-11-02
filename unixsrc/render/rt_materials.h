@@ -183,6 +183,7 @@ struct Class {
    float rough = 0.85f, metal = 0.0f, bump = 0.0f, polish = 0.0f, glow = 0.0f;
    bool none = false;      // "none": no maps at all (sky, water, lava, UI)
    bool window = false;    // a class named window...: its bright, warm texels glow
+   bool stained = false;   // a class named stained...: stained glass, its coloured panes glow
    uint32_t hash = 0;
 };
 struct Rule { std::string pattern; int cls; };
@@ -209,6 +210,8 @@ inline const char *kDefaultTable = R"(# Thief RT material table: what each textu
 #
 # polish: the surface mirrors the room (sharp, traced reflections over its texture).
 # A class named window...: its bright, warm texels glow (lit windows), this strongly.
+# A class named stained...: stained glass -- its coloured panes glow with the light
+# through them, this strongly, and throw their colour into the room; the lead stays dark.
 # A class named none: no maps (sky, water, lava, the interface).
 # Delete this file to get the defaults back; after editing it, the textures'
 # maps are made again by themselves.
@@ -219,6 +222,7 @@ class none        1.00 0.00 0.00 0.00
 class marble      0.35 0.00 0.10 1.20
 class tile        0.55 0.00 0.15 0.80
 class glass       0.30 0.00 0.00 1.50
+class stained     0.40 0.00 0.25 0.00 2.4
 class window      0.55 0.00 0.30 1.20 2.0
 class metal       0.45 0.80 0.50 0.35
 class blade       0.20 0.90 0.15 1.00
@@ -248,7 +252,23 @@ mesh/txt*/*      skin
 */win325s*      wood
 */winwd64s*     wood
 
-# windows: lit panes glow; stained glass is glass
+# stained glass (before the windows: WindowStain is stained glass)
+fam/*stain[0-9]*    stained
+fam/*/stain         stained
+fam/*stained*       stained
+fam/*windowstain*   stained
+fam/*rose*          stained
+fam/*/glass[0-9]*   stained
+fam/*/glasss        stained
+fam/*/sglass*       stained
+fam/*/jefglass      stained
+fam/*/panglass      stained
+fam/*/hamglass*     stained
+fam/*/keepglass*    stained
+fam/*/tpbglass*     stained
+fam/*/tbpglass*     stained
+fam/*/spiderglass   stained
+# windows: lit panes glow; other glass is glass
 *glass*          glass
 *glpries*        glass
 *glsmelt*        glass
@@ -426,6 +446,7 @@ inline void load_table(const std::string &rtDir)
          c.glow = n >= 6 ? std::max(0.0f, gl) : 0.0f;
          c.none = c.name == "none";
          c.window = c.name.compare(0, 6, "window") == 0;
+         c.stained = c.name.compare(0, 7, "stained") == 0;
          c.hash = fnv(line.data(), line.size());
          byName[c.name] = int(t.classes.size());
          t.classes.push_back(c);
@@ -555,6 +576,16 @@ struct Result {
    bool none = false;
 };
 
+// a stained glass pane: coloured or bright, not the dark lead between the
+// panes (nor clear glass's dull grey)
+inline bool stained_pane(const uint8_t *a)
+{
+   const int r = a[0], g = a[1], b = a[2];
+   const int lum = (54 * r + 183 * g + 19 * b) >> 8;
+   const int chroma = std::max({r, g, b}) - std::min({r, g, b});
+   return a[3] >= 128 && lum > 40 && (chroma > 30 || lum > 140);
+}
+
 // a lit window's pane: bright and warm (lamplight behind it), not its frame
 inline bool lit_pane(const uint8_t *a)
 {
@@ -645,6 +676,21 @@ inline Result prepare(const std::string &dir, const std::string &name, const Cla
                   o[k3] = uint8_t(std::clamp(g[k3] * k * g[3] / 255.0f, 0.0f, 255.0f));
                lit += (o[0] | o[1] | o[2]) > 8;
             }
+      } else if (c.stained && c.glow > 0) {
+         // the light through each pane, in its colour (a little richer:
+         // glass lit from behind is more saturated than its painted texture)
+         for (size_t i = 0; i < EN; ++i) {
+            const uint8_t *a = &eRgba[i * 4];
+            if (!stained_pane(a))
+               continue;
+            const float mean = (a[0] + a[1] + a[2]) / 3.0f;
+            for (int k3 = 0; k3 < 3; ++k3)
+               e[i * 3 + k3] = uint8_t(std::clamp(mean + (a[k3] - mean) * 1.25f, 0.0f, 255.0f));
+            ++lit;
+         }
+         // mostly lead or dull glass: not stained glass
+         if (lit < int(EN / 20))
+            lit = 0;
       } else if (c.window && c.glow > 0) {
          for (size_t i = 0; i < EN; ++i) {
             const uint8_t *a = &eRgba[i * 4];

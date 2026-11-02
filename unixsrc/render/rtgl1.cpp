@@ -6316,9 +6316,10 @@ void pane_stats(RtTexture &t)
       return;
    double sum[3] = {0, 0, 0};
    size_t lit = 0;
+   const bool stained = t.cls && t.cls->stained;
    for (size_t i = 0; i < n; ++i) {
       const uint8_t *a = &t.rgba[i * 4];
-      if (!rtmat::lit_pane(a))
+      if (!(stained ? rtmat::stained_pane(a) : rtmat::lit_pane(a)))
          continue;
       for (int k = 0; k < 3; ++k)
          sum[k] += a[k];
@@ -6329,6 +6330,18 @@ void pane_stats(RtTexture &t)
       const float hi = float(std::max({sum[0], sum[1], sum[2]}));
       for (int k = 0; k < 3; ++k)
          t.paneRgb[k] = hi > 0 ? float(sum[k]) / hi : 1.0f;
+      if (stained) {
+         // a stained window's panes of many colours average out near grey:
+         // its light a little richer in the colour it leans to
+         const float mean = (t.paneRgb[0] + t.paneRgb[1] + t.paneRgb[2]) / 3.0f;
+         float top = 0.0f;
+         for (float &c : t.paneRgb) {
+            c = std::max(0.05f, mean + (c - mean) * 1.6f);
+            top = std::max(top, c);
+         }
+         for (float &c : t.paneRgb)
+            c /= std::max(top, 1e-3f);
+      }
    }
 }
 
@@ -6340,7 +6353,7 @@ void build_window_lights()
    for (const WorldGroup &g : g_world) {
       auto t = g_worldTextures.find(g.textureId);
       if (t != g_worldTextures.end() && t->second && t->second->glows && t->second->cls &&
-          t->second->cls->window)
+          (t->second->cls->window || t->second->cls->stained))
          ++litTextures;
    }
    if (litTextures == g_windowLitTextures && g_windowWorldSerial == g_worldSerial)
@@ -6356,7 +6369,7 @@ void build_window_lights()
       if (f == g_worldTextures.end() || !f->second)
          continue;
       RtTexture &t = *f->second;
-      if (!t.glows || !t.cls || !t.cls->window)
+      if (!t.glows || !t.cls || !(t.cls->window || t.cls->stained))
          continue;
       if (t.paneFrac < 0.0f)
          pane_stats(t);
@@ -6394,7 +6407,9 @@ void build_window_lights()
             L.dir[k] = w.n[k];
          }
          // a fill light's strength (Dark's 20-60) for a pane of a square metre or two
-         L.peak = std::min(120.0f, 30.0f * lit);
+         // (stained glass: less of the light behind it gets through, and
+         // what does is coloured -- the light from a church's windows)
+         L.peak = t.cls->stained ? std::min(90.0f, 22.0f * lit) : std::min(120.0f, 30.0f * lit);
          for (int k = 0; k < 3; ++k)
             L.rgb[k] = t.paneRgb[k] * L.peak;
          L.inner = 0.6f;    // ~53 degrees: full strength

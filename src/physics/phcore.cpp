@@ -4123,7 +4123,12 @@ next_coll_obj:
       // froze there, then stood up through it and walked on sunk to the
       // waist (Black Parade's floor sitters).
       mx_copy_vec(new_pos, &pModel->GetLocationVec());
-      new_pos->z += wanted_delta.z;
+      // (but never down into a floor it is on: a guard's death motion,
+      // collapsing to the floor, was let through it a little every frame
+      // and sank out of sight -- Black Parade's bowman)
+      const BOOL into_floor = wanted_delta.z < 0.0f && last_normal.z > 0.7f;
+      if (!into_floor)
+         new_pos->z += wanted_delta.z;
       static ObjID s_obj[16];
       static int   s_n = 0;
       int k;
@@ -4133,9 +4138,10 @@ next_coll_obj:
       {
          s_obj[s_n++] = objID;
          mprintf("%s: no way past %s (its sphere %d, the normal %.2f %.2f %.2f): held in place across, "
-                 "moved %.2f up or down as its motion asks\n",
+                 "moved %.2f up or down as its motion asks%s\n",
                  ObjWarnName(objID), last_terrain ? "the world" : (last_with ? ObjWarnName(last_with) : "an object"),
-                 last_submod, last_normal.x, last_normal.y, last_normal.z, wanted_delta.z);
+                 last_submod, last_normal.x, last_normal.y, last_normal.z, into_floor ? 0.0f : wanted_delta.z,
+                 into_floor ? " (not down into the floor it is on)" : "");
       }
       return TRUE;
    }
