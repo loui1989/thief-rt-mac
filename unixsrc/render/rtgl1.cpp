@@ -4189,6 +4189,12 @@ void dump_texture(const RtTexture *t, const std::string &base)
    if (a) fclose(a);
 }
 
+// the light gem's light, light by light (RenderRTPointLighting; the inspector)
+struct GemPart { uint32_t id; float value, dist; int blocked; };
+float gem_value(const float pos[3], std::vector<GemPart> *parts);
+float g_gemPos[3] = {0, 0, 0};
+bool g_gemPosValid = false;
+
 void inspect_view()
 {
    const RgFloat3D o3 = to_rt(g_camera.pos);
@@ -4452,6 +4458,33 @@ void inspect_view()
          RenderRTGameObjectName(d.obj, name, sizeof(name));
          out("  object %u \"%s\" at frame %u (now %u): %s\n", d.obj, name, d.frame, g_frameNumber,
              d.why);
+      }
+   }
+   if (g_gemPosValid) {
+      // what lights the player for the light gem and the guards (when the
+      // path tracer decides it): each light's share, and where it is
+      std::vector<GemPart> parts;
+      const float v = gem_value(g_gemPos, &parts);
+      std::sort(parts.begin(), parts.end(), [](const GemPart &a, const GemPart &b) { return a.value > b.value; });
+      out("light gem: %.1f from the lights (the game's own: %.1f; %s decides)\n", v, g_noteOriginal,
+          g_cfg.rtDetection ? "the path tracer's" : "the game's");
+      const RgFloat3D me = to_rt(g_gemPos);
+      for (size_t i = 0; i < parts.size() && i < 8; ++i) {
+         const GemPart &p = parts[i];
+         const PendingLight *L = nullptr;
+         for (const PendingLight &x : g_lastLights)
+            if (x.id == p.id) {
+               L = &x;
+               break;
+            }
+         char owner[128] = "";
+         if (p.id < 0x10000u)
+            if (const int o = ObjAnimLightOwner(int(p.id)))
+               RenderRTGameObjectName(uint32_t(o), owner, sizeof(owner));
+         const RgFloat3D lp = L ? to_rt(L->pos) : me;
+         out("  light %u%s%s%s: %.1f, %.1f m away at (%.2f %.2f %.2f), %d of 3 body points behind walls%s\n", p.id,
+             owner[0] ? " (" : "", owner, owner[0] ? ")" : "", p.value, p.dist, lp.data[0], lp.data[1], lp.data[2],
+             p.blocked, L && L->inner >= 0.0f ? ", a spot" : "");
       }
    }
    if (log)
@@ -4768,21 +4801,13 @@ void RenderRTPrepEnd(void)
       g_ui.prepSum += std::chrono::duration<double>(std::chrono::steady_clock::now() - s_prepStart).count();
 }
 
-int RenderRTPointLighting(const float pos[3], float *value)
+} // extern "C"
+namespace {
+// The light gem's light at a point: the lights given to the path tracer last
+// frame, each as RTGL1 spreads it (a sphere, a spot's cone), at the player's
+// legs, middle and head, shadowed by the world's walls (parts: light by light)
+float gem_value(const float pos[3], std::vector<GemPart> *parts)
 {
-   if (!g_active || !value)
-      return 0;
-   struct PrepScope {
-      PrepScope() { RenderRTPrepBegin(); }
-      ~PrepScope() { RenderRTPrepEnd(); }
-   } prepScope;
-   // asked many times a frame (each guard): once
-   static uint32_t s_frame = 0;
-   static float s_pos[3] = {1e30f, 0, 0}, s_value = 0;
-   if (s_frame == g_frameNumber && pos[0] == s_pos[0] && pos[1] == s_pos[1] && pos[2] == s_pos[2]) {
-      *value = s_value;
-      return 1;
-   }
    ensure_world_bvh();
    // the body: legs, middle, head (Dark units are feet)
    const float offs[3] = {-1.6f, 0.0f, 1.3f};
@@ -4802,7 +4827,8 @@ int RenderRTPointLighting(const float pos[3], float *value)
       const RgFloat3D lp = to_rt(L.pos);
       const float lumens = L.peak * 4.0f * g_cfg.light;
       const float r = std::max(g_cfg.lightSize, 0.02f);
-      float sum = 0.0f;
+      float sum = 0.0f, all = 0.0f, nearest = 1e30f;
+      int blocked = 0;
       for (int i = 0; i < 3; ++i) {
          const float dx = lp.data[0] - body[i][0], dy = lp.data[1] - body[i][1], dz = lp.data[2] - body[i][2];
          const float d = std::sqrt(dx * dx + dy * dy + dz * dz);
@@ -4818,13 +4844,43 @@ int RenderRTPointLighting(const float pos[3], float *value)
             t = t * t * (3.0f - 2.0f * t);
             e *= t * t;
          }
+         nearest = std::min(nearest, d);
          if (e * kScale < 0.002f)
             continue;
+         all += e;
          if (!segment_blocked(body[i], lp.data))
             sum += e;
+         else
+            ++blocked;
       }
       total += kScale * sum / 3.0f;
+      if (parts && all * kScale > 0.0f)
+         parts->push_back({L.id, kScale * sum / 3.0f, nearest, blocked});
    }
+   return total;
+}
+
+} // namespace
+extern "C" {
+
+int RenderRTPointLighting(const float pos[3], float *value)
+{
+   if (!g_active || !value)
+      return 0;
+   struct PrepScope {
+      PrepScope() { RenderRTPrepBegin(); }
+      ~PrepScope() { RenderRTPrepEnd(); }
+   } prepScope;
+   // asked many times a frame (each guard): once
+   static uint32_t s_frame = 0;
+   static float s_pos[3] = {1e30f, 0, 0}, s_value = 0;
+   if (s_frame == g_frameNumber && pos[0] == s_pos[0] && pos[1] == s_pos[1] && pos[2] == s_pos[2]) {
+      *value = s_value;
+      return 1;
+   }
+   const float total = gem_value(pos, nullptr);
+   memcpy(g_gemPos, pos, sizeof(g_gemPos));
+   g_gemPosValid = true;
    s_frame = g_frameNumber;
    memcpy(s_pos, pos, sizeof(s_pos));
    s_value = total;
