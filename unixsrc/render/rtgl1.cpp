@@ -1400,6 +1400,8 @@ struct CachedObject {
    float bmin[3] = {}, bmax[3] = {};   // meters
    bool passLight = false;   // a small fixture around a light: it does not block it
    bool passGiven = false;   // passLight as last given (a change: its shadows given anew)
+   float glowGiven = 1.0f;   // its glowing parts' scale last given (its light's now / most), for the inspector
+   float highlightGiven = 0.0f;   // the game's highlight on it last given (in reach and usable)
    bool settled = false;     // prims made steady and given normals for hash
    bool keptOut = false;     // given out of view last frame
    uint32_t givenFrame = 0;  // last given to the path tracer
@@ -2478,6 +2480,8 @@ void upload_objects()
             c.splitValid = true;
          }
          const std::vector<uint64_t> ids = object_prim_ids(obj, c.split);
+         c.glowGiven = glowScale;
+         c.highlightGiven = g_uploadHighlight;
          for (size_t i = 0; i < c.split.size(); ++i)
             upload_captured(ids[i], c.split[i], i < c.splitNear, splitKept, glowScale);
          c.splitGiven = true;
@@ -2488,6 +2492,8 @@ void upload_objects()
             c.ids = object_prim_ids(obj, c.prims);
          const std::vector<uint64_t> &ids = c.ids;
          // (as given last time it was given, unless captured anew since)
+         c.glowGiven = glowScale;
+         c.highlightGiven = g_uploadHighlight;
          const bool same = !wasFresh && !c.splitGiven && c.passGiven == c.passLight;
          for (size_t i = 0; i < c.prims.size(); ++i)
             upload_captured(ids[i], c.prims[i], c.passLight, same, glowScale,
@@ -4442,8 +4448,10 @@ void inspect_view()
       char name[128];
       RenderRTGameObjectName(bestObj, name, sizeof(name));
       const CachedObject &c = g_objects[bestObj];
-      out("object %u \"%s\" at %.2f m: %zu primitives, whole %d, drawn frame %u (now %u)\n",
-          bestObj, name, best, c.prims.size(), int(c.whole), c.frame, g_frameNumber);
+      out("object %u \"%s\" at %.2f m: %zu primitives, whole %d, drawn frame %u (now %u); "
+          "its glowing parts at %.2f of their glow (its light now / at its brightest)%s\n",
+          bestObj, name, best, c.prims.size(), int(c.whole), c.frame, g_frameNumber, c.glowGiven,
+          c.highlightGiven > 0.0f ? "; highlit by the game (in reach and usable: the whole model lit up)" : "");
       for (size_t i = 0; i < c.prims.size() && i < 64; ++i) {
          const CapturedPrim &p = c.prims[i];
          const RtTexture *t = (p.tex && p.tex->serial == p.texSerial) ? p.tex : nullptr;
