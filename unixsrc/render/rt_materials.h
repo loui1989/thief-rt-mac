@@ -586,6 +586,27 @@ inline bool stained_pane(const uint8_t *a)
    return a[3] >= 128 && lum > 40 && (chroma > 30 || lum > 140);
 }
 
+// Scale2x (EPX): twice the size, a pixel's corners taking a neighbour's
+// colour where two of them meet along a diagonal -- edges between flat
+// colours stay sharp and stair-steps round off, as stained glass's panes and
+// lead are. (The texture tiles: its neighbours wrap round.)
+inline std::vector<uint8_t> scale2x(const uint8_t *src, int w, int h)
+{
+   std::vector<uint8_t> out(size_t(w) * h * 16);
+   auto px = [&](int x, int y) { return reinterpret_cast<const uint32_t *>(src)[size_t((y + h) % h) * w + (x + w) % w]; };
+   uint32_t *o = reinterpret_cast<uint32_t *>(out.data());
+   const int W = w * 2;
+   for (int y = 0; y < h; ++y)
+      for (int x = 0; x < w; ++x) {
+         const uint32_t P = px(x, y), A = px(x, y - 1), B = px(x + 1, y), C = px(x - 1, y), D = px(x, y + 1);
+         o[size_t(2 * y) * W + 2 * x] = (C == A && C != D && A != B) ? A : P;
+         o[size_t(2 * y) * W + 2 * x + 1] = (A == B && A != C && B != D) ? B : P;
+         o[size_t(2 * y + 1) * W + 2 * x] = (D == C && D != B && C != A) ? C : P;
+         o[size_t(2 * y + 1) * W + 2 * x + 1] = (B == D && B != A && D != C) ? D : P;
+      }
+   return out;
+}
+
 // a lit window's pane: bright and warm (lamplight behind it), not its frame
 inline bool lit_pane(const uint8_t *a)
 {
@@ -733,7 +754,14 @@ inline Result prepare(const std::string &dir, const std::string &name, const Cla
             if ((*glass)[size_t(std::min(glh - 1, y * glh / h)) * glw + std::min(glw - 1, x * glw / w)] < 128)
                polish = 0.0f;
          }
-         if (polish > 0)
+         float metal = c.metal;
+         if (c.stained) {
+            // glass: a sheen over each pane (the room's lamps caught in it,
+            // not a mirror); the lead between them dull
+            const bool pane = stained_pane(&rgba[i * 4]);
+            r = pane ? 0.22f : 0.8f;
+            metal = pane ? 0.0f : 0.35f;
+         } else if (polish > 0)
             r = 0.7f - std::clamp(polish * (0.85f + 0.15f * rel), 0.0f, 3.0f) / 4.5f;
          else
             r = std::max(c.rough + (1.0f - rel) * 0.1f, 0.71f);
@@ -741,7 +769,7 @@ inline Result prepare(const std::string &dir, const std::string &name, const Cla
          const float occ = 1.0f - 0.6f * std::clamp(c.bump / 1.2f, 0.0f, 1.0f) * depthRel * (2.0f - depthRel);
          orm[i * 3] = uint8_t(std::clamp(occ * 255.0f + 0.5f, 0.0f, 255.0f));
          orm[i * 3 + 1] = uint8_t(std::clamp(r * 255.0f + 0.5f, 0.0f, 255.0f));
-         orm[i * 3 + 2] = uint8_t(std::clamp(c.metal * (0.75f + 0.25f * rel) * 255.0f + 0.5f, 0.0f, 255.0f));
+         orm[i * 3 + 2] = uint8_t(std::clamp(metal * (0.75f + 0.25f * rel) * 255.0f + 0.5f, 0.0f, 255.0f));
       }
       write_png(pORM, orm.data(), w, h, 3);
    }
@@ -764,7 +792,14 @@ inline Result prepare(const std::string &dir, const std::string &name, const Cla
          std::vector<float> smooth;
          if (c.polish > 0)
             smooth = heights(rgba, w, h, false);
-         const auto &hg = c.polish > 0 ? smooth : H();
+         else if (c.stained) {
+            // stained glass: the lead stands out of the glass (raised where
+            // the texture is dark), each pane's own ripple over it, gently
+            smooth = H();
+            for (size_t i = 0; i < N; ++i)
+               smooth[i] = (stained_pane(&rgba[i * 4]) ? 0.0f : 0.5f) + 0.25f * smooth[i];
+         }
+         const auto &hg = (c.polish > 0 || c.stained) ? smooth : H();
          std::vector<uint8_t> n(N * 3);
          // a bigger texture has more texels to the same stone: smaller steps
          const float k = (c.polish > 0 ? 0.35f : 1.0f) * 17.0f * c.bump * std::sqrt(std::clamp(float(std::min(w, h)) / 64.0f, 0.5f, 4.0f));

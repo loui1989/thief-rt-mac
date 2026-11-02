@@ -535,6 +535,7 @@ struct MatJob {
    char name[160] = {};
    rtmat::Result result;
    std::vector<uint8_t> creviced;   // its picture as given to RTGL1 (empty: the texture's own)
+   std::vector<uint8_t> upscaled;   // stained glass: its picture made 4x as large (rt_materials.h scale2x)
    int cw = 0, ch = 0;
    // 0 waiting, 1 being made, 2 done, 3 given up
    std::atomic<int> state{0};
@@ -554,6 +555,8 @@ void job_name(MatJob &j)
    h ^= uint32_t(j.crevice * 20.0f + 0.5f) * 0xc2b2ae35u;
    if (j.illumStrength > 0)
       h = rtmat::fnv(j.illumMap.data(), j.illumMap.size(), h ^ uint32_t(j.illumStrength * 1000.0f));
+   if (j.cls->stained && std::max(j.w, j.h) < 256)
+      h ^= 0x5c41e2b7u;   // (its maps made from its picture 4x as large)
    if (!j.glass.empty())
       h = rtmat::fnv(j.glass.data(), j.glass.size(), h ^ 0x9a55u);
    // (no dots: RTGL1 takes what follows the last dot for an extension and
@@ -565,6 +568,20 @@ void run_job(MatJob &j)
 {
    if (!j.name[0])
       job_name(j);
+   // Stained glass, a small picture across a big window (64 x 128 for a
+   // window two metres high): its panes and lead smeared into each other.
+   // Made 4x as large first, its edges kept sharp (Scale2x twice), and its
+   // maps -- its glow above all -- made from that.
+   if (j.cls->stained && std::max(j.w, j.h) < 256 && j.w >= 4 && j.h >= 4) {
+      std::vector<uint8_t> twice = rtmat::scale2x(j.rgba, j.w, j.h);
+      j.upscaled = rtmat::scale2x(twice.data(), j.w * 2, j.h * 2);
+      j.cw = j.w * 4;
+      j.ch = j.h * 4;
+      j.result = rtmat::prepare(g_matDir, j.name, *j.cls, j.upscaled.data(), j.cw, j.ch,
+                                j.glowMap, j.gw, j.gh, j.illumStrength, nullptr, 0, 0);
+      j.creviced = std::move(j.upscaled);
+      return;
+   }
    j.result = rtmat::prepare(g_matDir, j.name, *j.cls, j.rgba, j.w, j.h,
                              j.glowMap, j.gw, j.gh, j.illumStrength,
                              j.glass.empty() ? nullptr : &j.glass, j.glw, j.glh);
@@ -6409,7 +6426,7 @@ void build_window_lights()
          // a fill light's strength (Dark's 20-60) for a pane of a square metre or two
          // (stained glass: less of the light behind it gets through, and
          // what does is coloured -- the light from a church's windows)
-         L.peak = t.cls->stained ? std::min(90.0f, 22.0f * lit) : std::min(120.0f, 30.0f * lit);
+         L.peak = t.cls->stained ? std::min(160.0f, 45.0f * lit) : std::min(120.0f, 30.0f * lit);
          for (int k = 0; k < 3; ++k)
             L.rgb[k] = t.paneRgb[k] * L.peak;
          L.inner = 0.6f;    // ~53 degrees: full strength
