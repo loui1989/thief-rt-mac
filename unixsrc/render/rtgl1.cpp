@@ -5808,9 +5808,12 @@ void upload_light(const PendingLight &L)
    // the pool under it.
    // (only a hanging lamp's, pointing down: a floodlight aimed up at a
    // statue stays a spot -- its shadow on the wall behind went)
+   // (and only a wide one, a lamp's pool: a narrow beam -- a theatre
+   // spotlight aimed at a painting, Black Parade's opera -- stays a beam;
+   // made a sphere, it lit the whole room)
    const float dl = std::sqrt(dir[0] * dir[0] + dir[1] * dir[1] + dir[2] * dir[2]);
    const bool lampSpot = fixture && L.inner >= 0.0f && !g_flameLights.count(L.id) &&
-                         dl > 0.0f && dir[2] / dl < -0.7f;
+                         dl > 0.0f && dir[2] / dl < -0.7f && L.outer < 0.8f;
    if (lampSpot)
       lumens *= 0.6f;
    // Raze RT's rt_light_soft: a strong light is a bigger source, its size
@@ -5834,9 +5837,12 @@ void upload_light(const PendingLight &L)
          .position = to_rt(flamePos),
          .direction = {{dir[0] / l, dir[1] / l, dir[2] / l}},
          .radius = radius,
-         // Dark stores the cone as cosines
+         // Dark stores the cone as cosines. (A hard-edged one -- inner and
+         // outer the same, a theatre spot -- gets a narrow soft rim, so its
+         // edge is not one hard, aliased line)
          .angleOuter = std::acos(std::clamp(L.outer, -1.0f, 1.0f)),
-         .angleInner = std::acos(std::clamp(L.inner, -1.0f, 1.0f)),
+         .angleInner = std::min(std::acos(std::clamp(L.inner, -1.0f, 1.0f)),
+                                0.9f * std::acos(std::clamp(L.outer, -1.0f, 1.0f))),
       };
       ext = &spot;
    } else {
