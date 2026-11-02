@@ -1374,6 +1374,7 @@ struct CachedObject {
    uint64_t normalsHash = 0;
    float bmin[3] = {}, bmax[3] = {};   // meters
    bool passLight = false;   // a small fixture around a light: it does not block it
+   bool passGiven = false;   // passLight as last given (a change: its shadows given anew)
    bool settled = false;     // prims made steady and given normals for hash
    bool keptOut = false;     // given out of view last frame
    uint32_t givenFrame = 0;  // last given to the path tracer
@@ -2189,8 +2190,19 @@ void upload_objects()
       float flameAt[3] = {};
       if (g_cfg.fixturesPass) {
          const float ext = std::max({c.bmax[0] - c.bmin[0], c.bmax[1] - c.bmin[1], c.bmax[2] - c.bmin[2]});
-         if (ext < 1.0f)
+         // A big lamp with its own light inside it -- a chandelier, 2 m from
+         // its chain to its bowl -- lets it out too: its stem through the
+         // light and its bowl under it shadowed nearly all of it, a ring of
+         // light round the ceiling and the floor under it dark.
+         const auto own = g_ownedLights.find(obj);
+         const std::vector<uint32_t> *owned =
+            own != g_ownedLights.end() && ext < 4.0f ? &own->second : nullptr;
+         if (ext < 1.0f || owned)
             for (size_t li = 0; li < g_lightPositions.size(); ++li) {
+               if (ext >= 1.0f &&
+                   (li >= g_lightPositionIds.size() ||
+                    std::find(owned->begin(), owned->end(), g_lightPositionIds[li]) == owned->end()))
+                  continue;
                const RgFloat3D &l = g_lightPositions[li];
                bool in = true;
                for (int k = 0; k < 3 && in; ++k)
@@ -2397,9 +2409,11 @@ void upload_objects()
             c.ids = object_prim_ids(obj, c.prims);
          const std::vector<uint64_t> &ids = c.ids;
          // (as given last time it was given, unless captured anew since)
+         const bool same = !wasFresh && !c.splitGiven && c.passGiven == c.passLight;
          for (size_t i = 0; i < c.prims.size(); ++i)
-            upload_captured(ids[i], c.prims[i], c.passLight, !wasFresh && !c.splitGiven, glowScale,
+            upload_captured(ids[i], c.prims[i], c.passLight, same, glowScale,
                             i < lampGlow.size() ? lampGlow[i] : 0.0f);
+         c.passGiven = c.passLight;
          c.splitGiven = false;
       }
       g_uploadHighlight = 0.0f;
@@ -3097,7 +3111,7 @@ const char *kRowLabels[kRowCount] = {
    "Upscaler", "Render resolution", "Output resolution", "Dynamic resolution", "Bounce light", "Light reach", "Lights traced",
    "Lights coming into range", "Lights tried per pixel", "Lights behind walls", "Light changes", "Light flicker",
    "Volumetric light", "Mission fog", "Bloom", "VSync", "Frame rate limit", "FPS counter", "Light gem and guards", "Light brightness", "Darkest exposure", "Ambient light", "Sky brightness",
-   "Light size (soft shadows)", "Surface roughness", "Model shading", "Model faces", "Torches and lamps", "Lamp and torch light", "Small lamps", "Lights in walls", "Lamp glow", "Flame glow", "Materials", "Bumps", "Crevices", "Parallax depth", "Polished reflections", "Water",
+   "Light size (soft shadows)", "Surface roughness", "Model shading", "Model faces", "Torches and lamps", "Lamp and torch light", "Lamp reach", "Lights in walls", "Lamp glow", "Flame glow", "Materials", "Bumps", "Crevices", "Parallax depth", "Polished reflections", "Water",
    "Debug view", "Freeze scene (test)", "Back faces (test)", "Light sampling (test)", "Blink nearest light (test)", "Performance log", "Inspect centre of view", "Reset to defaults",
 };
 
@@ -5932,8 +5946,14 @@ void upload_light(const PendingLight &L)
    // light falls as 1/distance to the edge of its reach, a traced light as
    // 1/distance squared -- and the light gem goes by that; traced at the
    // level's calibration, the floor round it looked dark while the gem lit.
-   if (fixture && !g_flameLights.count(L.id) && L.radius > 0.0f && L.radius <= 25.0f)
-      lumens *= g_cfg.smallLamps;
+   // A bigger one (a chandelier, a lamp the mapper gave a long reach, 48
+   // feet and more) the same and more with its reach: the game lights the
+   // far side of a hall with it, falling as 1/distance; the traced one,
+   // falling as 1/distance squared and given no more than a wall lamp of
+   // its brightness, lit the ceiling round it and not much further. (As the
+   // square root of its reach over 25 feet, to 72: 1.4x at 48 feet.)
+   if (fixture && !g_flameLights.count(L.id) && L.radius > 0.0f)
+      lumens *= g_cfg.smallLamps * std::sqrt(std::clamp(L.radius, 25.0f, 72.0f) / 25.0f);
    uint32_t color = pack_color(L.rgb[0] / peak, L.rgb[1] / peak, L.rgb[2] / peak, 1);
    float flamePos[3] = {L.pos[0], L.pos[1], L.pos[2]};
    if (g_flameLights.count(L.id)) {
