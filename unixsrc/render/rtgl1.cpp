@@ -1109,6 +1109,12 @@ std::vector<RgFloat3D> g_lightPositions;
 std::vector<uint32_t> g_lightPositionIds;   // (their lights' ids, in the same order)
 // light id -> 0 plain, 1 a lamp's, 2 a flame's, 3 a candle's (by its object)
 std::unordered_map<uint32_t, int> g_lightOwnerKind;
+// Each light's brightness this frame and the most it has had, and the lights
+// an object owns (its own Light/AnimLight): a lamp's glow follows its own
+// light -- off with it, dimmed and flickering with it.
+struct LightState { float now = 0.0f, most = 0.0f; uint32_t frame = 0; };
+std::unordered_map<uint32_t, LightState> g_lightState;
+std::unordered_map<uint32_t, std::vector<uint32_t>> g_ownedLights;
 // the level's ambient light (0..1), and the glow it gives surfaces
 float g_levelAmbient = 0.0f;
 // the player's light, by the game and by the path tracer (for the frame counter)
@@ -1817,10 +1823,10 @@ namespace {
 constexpr RgMeshPrimitiveFlags kRtPrimUnchanged = 1u << 29;
 
 void upload_captured(uint64_t id, const CapturedPrim &p, bool passLight = false, bool unchanged = false,
-                     bool lightOff = false)
+                     float glowScale = 1.0f)
 {
-   // (a lamp whose light is switched off: its glowing parts dark too)
-   const float pEmissive = lightOff ? 0.0f : p.emissive;
+   // (a lamp's glowing parts as bright as its light is now: dark when it is off)
+   const float pEmissive = p.emissive * glowScale;
    // a torch's own model sits around its light: as a shadow caster it put
    // the light out (lit or doused, the room looked the same)
    if (passLight && (p.flags & RG_MESH_PRIMITIVE_SHADOW_ONLY))
@@ -2238,16 +2244,38 @@ void upload_objects()
       g_uploadHighlight = (highlit_obj != 0 && uint32_t(highlit_obj) == obj)
                              ? std::clamp(objlight_highlight_level, 0.0f, 1.0f) * 0.7f
                              : 0.0f;
-      // A lamp whose light is switched off (a light switch, a doused torch):
-      // its glowing parts go dark with it -- an off light next to it (in or
-      // just round the model) and none on. Its bulb shone on, the corridor
-      // looked lit while the game (and the light gem) had it dark.
-      bool lightOff = false;
+      // A lamp's glowing parts follow its light: switched off (a light
+      // switch, a doused torch), they go dark with it; dimmed or flickering,
+      // they dim and flicker with it. Its bulb shone on, and the corridor
+      // looked lit while the game (and the light gem) had it dark. The
+      // lamp's own light (the object's Light / AnimLight) decides; a lamp
+      // whose light is a separate marker beside it, by that: an off light
+      // in or just round the model and none on. Only its own lights, so a
+      // switch for the electric lamps leaves the torches next to them be.
+      float glowScale = 1.0f;
+      bool glowing = false;
+      for (const CapturedPrim &p : c.prims)
+         glowing = glowing || (p.emissive > 0.0f && !p.sprite);
+      bool decided = false;
+      if (glowing) {
+         auto own = g_ownedLights.find(obj);
+         if (own != g_ownedLights.end()) {
+            float now = 0.0f, most = 0.0f;
+            for (uint32_t lid : own->second) {
+               auto st = g_lightState.find(lid);
+               if (st != g_lightState.end() && st->second.frame == g_frameNumber) {
+                  now += st->second.now;
+                  most += st->second.most;
+               }
+            }
+            if (most > 0.5f) {
+               glowScale = std::clamp(now / most, 0.0f, 1.0f);
+               decided = true;
+            }
+         }
+      }
       {
-         bool glowing = false;
-         for (const CapturedPrim &p : c.prims)
-            glowing = glowing || (p.emissive > 0.0f && !p.sprite);
-         if (glowing && !g_lastDim.empty()) {
+         if (glowing && !decided && !g_lastDim.empty()) {
             auto near = [&c](const float *q) {
                for (int k = 0; k < 3; ++k)
                   if (q[k] < c.bmin[k] - 0.3f || q[k] > c.bmax[k] + 0.3f)
@@ -2269,7 +2297,8 @@ void upload_objects()
                      on = true;
                      break;
                   }
-            lightOff = off && !on;
+            if (off && !on)
+               glowScale = 0.0f;
          }
       }
       if (c.passLight && c.flameInside && g_cfg.torchShadows) {
@@ -2305,7 +2334,7 @@ void upload_objects()
          }
          const std::vector<uint64_t> ids = object_prim_ids(obj, c.split);
          for (size_t i = 0; i < c.split.size(); ++i)
-            upload_captured(ids[i], c.split[i], i < c.splitNear, splitKept, lightOff);
+            upload_captured(ids[i], c.split[i], i < c.splitNear, splitKept, glowScale);
          c.splitGiven = true;
       } else {
          // (named again only when its primitives change: a vector and a map
@@ -2315,7 +2344,7 @@ void upload_objects()
          const std::vector<uint64_t> &ids = c.ids;
          // (as given last time it was given, unless captured anew since)
          for (size_t i = 0; i < c.prims.size(); ++i)
-            upload_captured(ids[i], c.prims[i], c.passLight, !wasFresh && !c.splitGiven, lightOff);
+            upload_captured(ids[i], c.prims[i], c.passLight, !wasFresh && !c.splitGiven, glowScale);
          c.splitGiven = false;
       }
       g_uploadHighlight = 0.0f;
@@ -5493,6 +5522,8 @@ void RenderRTWorldBegin(uint32_t serial)
    g_fixtureLights.clear();   // (marked again as the lamps are drawn)
    g_flameLights.clear();
    g_lightOwnerKind.clear();
+   g_lightState.clear();
+   g_ownedLights.clear();
    // a new world (a mission or a saved game loaded): the models kept from the
    // last one are not this one's, though some have the same numbers and places
    g_objects.clear();
@@ -5622,6 +5653,7 @@ void RenderRTLight(uint32_t id, const float pos[3], const float rgb[3], float ra
    if (id < 0x10000u && !g_lightOwnerKind.count(id)) {
       int kind = 0;
       if (const int owner = ObjAnimLightOwner(int(id))) {
+         g_ownedLights[uint32_t(owner)].push_back(id);
          char name[128];
          RenderRTGameObjectName(uint32_t(owner), name, sizeof(name));
          std::string n(name);
@@ -5643,6 +5675,12 @@ void RenderRTLight(uint32_t id, const float pos[3], const float rgb[3], float ra
          g_flameLights.insert(id);
    }
    const float peak = std::max({rgb[0], rgb[1], rgb[2]});
+   {
+      LightState &s = g_lightState[id];
+      s.now = peak;
+      s.most = std::max(s.most, peak);
+      s.frame = g_frameNumber;
+   }
    {
       // a timeline of brightness changes (a doused torch: at once, or a fade?)
       static std::unordered_map<uint32_t, float> s_last;
