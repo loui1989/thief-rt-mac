@@ -293,6 +293,9 @@ struct RtTexture {
    int width = 0, height = 0;
    std::vector<uint8_t> rgba;
    bool dirty = true;      // pixels changed since RTGL1 got them
+   // to be given again for a changed setting (crevices): a few a frame, as
+   // it was until then (all at once froze the game for a second or more)
+   bool restyle = false;
    bool provided = false;  // RTGL1 has a texture of this name
    bool hasAlpha = false;  // any texel not fully opaque
    bool cutout = false;    // any texel see-through (alpha < 50%)
@@ -492,6 +495,7 @@ std::vector<uint8_t> *illum_image(const std::string &path, int &w, int &h)
 
 // this frame's texture work on the main thread (perf.log's slow frames)
 double g_frameTexSeconds = 0;
+int g_frameRestyles = 0;   // textures given again this frame for a changed setting
 int g_frameTexGiven = 0, g_frameMapsInline = 0;
 
 constexpr int kAlbedoMax = 1024;
@@ -824,6 +828,13 @@ const char *texture_name(RtTexture *t)
 {
    if (!t || t->white || t->rgba.empty())
       return nullptr;
+   // (a changed setting: redone while this frame's texture work is under
+   // 3 ms, else next frame -- as it was meanwhile)
+   if (t->restyle && !t->dirty && g_frameTexSeconds < 0.003 && g_frameRestyles < 16) {
+      t->restyle = false;
+      t->dirty = true;
+      ++g_frameRestyles;
+   }
    if (t->dirty) {
       settle_job(*t);
       if (t->provided)
@@ -3233,10 +3244,11 @@ void change_row(int row, int dir)
       break;
    case kRowCrevice:
       g_cfg.crevice = std::clamp(std::round(g_cfg.crevice * 10.0f) / 10.0f + 0.1f * dir, 0.0f, 1.0f);
-      // every texture given again with its crevices
+      // every texture with crevices (a class with bumps; one not classed
+      // yet too) given again with them -- a few a frame (texture_name)
       for (RtTexture &t : g_textures)
-         if (!t.rgba.empty())
-            t.dirty = true;
+         if (!t.rgba.empty() && (!t.cls || t.cls->bump > 0))
+            t.restyle = true;
       break;
    case kRowParallax:
       g_cfg.parallax = std::clamp(std::round(g_cfg.parallax * 200.0f) / 200.0f + 0.005f * dir, 0.0f, 0.1f);
@@ -3365,6 +3377,7 @@ void perf_frame(double t)
    g_SoundSlowStart[0] = 0;
    g_ResImageReadSeconds = 0;
    g_frameTexSeconds = 0;
+   g_frameRestyles = 0;
    g_frameTexGiven = g_frameMapsInline = 0;
    g_perf.wait += delta(g_ui.waitSum, g_perf.lastWait);
    g_perf.draw += delta(g_ui.drawSum, g_perf.lastDraw);
