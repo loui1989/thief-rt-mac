@@ -1116,7 +1116,7 @@ std::unordered_map<uint32_t, int> g_lightOwnerKind;
 // Each light's brightness this frame and the most it has had, and the lights
 // an object owns (its own Light/AnimLight): a lamp's glow follows its own
 // light -- off with it, dimmed and flickering with it.
-struct LightState { float now = 0.0f, most = 0.0f; uint32_t frame = 0; };
+struct LightState { float now = 0.0f, most = 0.0f; uint32_t frame = 0; float pos[3] = {0, 0, 0}; };
 std::unordered_map<uint32_t, LightState> g_lightState;
 std::unordered_map<uint32_t, std::vector<uint32_t>> g_ownedLights;
 // the level's ambient light (0..1), and the glow it gives surfaces
@@ -1827,10 +1827,11 @@ namespace {
 constexpr RgMeshPrimitiveFlags kRtPrimUnchanged = 1u << 29;
 
 void upload_captured(uint64_t id, const CapturedPrim &p, bool passLight = false, bool unchanged = false,
-                     float glowScale = 1.0f)
+                     float glowScale = 1.0f, float lampGlow = 0.0f)
 {
-   // (a lamp's glowing parts as bright as its light is now: dark when it is off)
-   const float pEmissive = p.emissive * glowScale;
+   // (a lamp's glowing parts as bright as its light is now: dark when it is
+   // off; lampGlow: its shade or glass, lit by its own light, see upload_objects)
+   const float pEmissive = std::max(p.emissive * glowScale, lampGlow);
    // a torch's own model sits around its light: as a shadow caster it put
    // the light out (lit or doused, the room looked the same)
    if (passLight && (p.flags & RG_MESH_PRIMITIVE_SHADOW_ONLY))
@@ -2305,6 +2306,55 @@ void upload_objects()
                glowScale = 0.0f;
          }
       }
+      // A lamp that carries its own light (the object's Light / AnimLight,
+      // not a flame), its shade or glass glowing as bright as the light is
+      // now: the game draws it lit by its own light, the path tracer lit it
+      // only from inside, and a lamp switched on looked hardly any different.
+      // The parts of it next to its light (within 40 cm), not of metal,
+      // wood or stone (the bracket, the fittings).
+      std::vector<float> lampGlow;
+      if (g_cfg.glow > 0.0f) {
+         auto own = g_ownedLights.find(obj);
+         if (own != g_ownedLights.end()) {
+            float at[3] = {0, 0, 0};
+            float level = 0.0f;
+            bool found = false;
+            for (uint32_t lid : own->second) {
+               auto k = g_lightOwnerKind.find(lid);
+               auto st = g_lightState.find(lid);
+               if (k == g_lightOwnerKind.end() || k->second != 1 || st == g_lightState.end() ||
+                   st->second.frame != g_frameNumber || st->second.most <= 0.5f)
+                  continue;
+               const RgFloat3D q = to_rt(st->second.pos);
+               memcpy(at, q.data, sizeof(at));
+               level = std::max(level, std::clamp(st->second.now / st->second.most, 0.0f, 1.0f));
+               found = true;
+            }
+            if (found && level > 0.0f) {
+               lampGlow.assign(c.prims.size(), 0.0f);
+               for (size_t i = 0; i < c.prims.size(); ++i) {
+                  const CapturedPrim &p = c.prims[i];
+                  if (p.sprite || p.verts.empty() || (p.flags & RG_MESH_PRIMITIVE_SHADOW_ONLY))
+                     continue;
+                  if (p.tex && p.tex->cls) {
+                     const std::string &n = p.tex->cls->name;
+                     if (n == "metal" || n == "blade" || n == "rust" || n == "wood" || n == "stone" ||
+                         n == "rock" || n == "brick" || n == "marble" || n == "tile" || n == "skin")
+                        continue;
+                  }
+                  float m[3] = {0, 0, 0};
+                  for (const RgPrimitiveVertex &v : p.verts)
+                     for (int k = 0; k < 3; ++k)
+                        m[k] += v.position[k];
+                  for (float &x : m)
+                     x /= float(p.verts.size());
+                  const float dx = m[0] - at[0], dy = m[1] - at[1], dz = m[2] - at[2];
+                  if (dx * dx + dy * dy + dz * dz < 0.4f * 0.4f)
+                     lampGlow[i] = g_cfg.glow * level;
+               }
+            }
+         }
+      }
       if (c.passLight && c.flameInside && g_cfg.torchShadows) {
          const bool splitKept = c.splitValid && !wasFresh && c.splitGiven;
          if (!c.splitValid) {
@@ -2348,7 +2398,8 @@ void upload_objects()
          const std::vector<uint64_t> &ids = c.ids;
          // (as given last time it was given, unless captured anew since)
          for (size_t i = 0; i < c.prims.size(); ++i)
-            upload_captured(ids[i], c.prims[i], c.passLight, !wasFresh && !c.splitGiven, glowScale);
+            upload_captured(ids[i], c.prims[i], c.passLight, !wasFresh && !c.splitGiven, glowScale,
+                            i < lampGlow.size() ? lampGlow[i] : 0.0f);
          c.splitGiven = false;
       }
       g_uploadHighlight = 0.0f;
@@ -5740,6 +5791,7 @@ void RenderRTLight(uint32_t id, const float pos[3], const float rgb[3], float ra
    const float peak = std::max({rgb[0], rgb[1], rgb[2]});
    {
       LightState &s = g_lightState[id];
+      memcpy(s.pos, pos, sizeof(s.pos));
       s.now = peak;
       s.most = std::max(s.most, peak);
       s.frame = g_frameNumber;
