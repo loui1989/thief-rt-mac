@@ -1816,8 +1816,11 @@ namespace {
 // vertex) instead of finding it again. (A library without the patch ignores it.)
 constexpr RgMeshPrimitiveFlags kRtPrimUnchanged = 1u << 29;
 
-void upload_captured(uint64_t id, const CapturedPrim &p, bool passLight = false, bool unchanged = false)
+void upload_captured(uint64_t id, const CapturedPrim &p, bool passLight = false, bool unchanged = false,
+                     bool lightOff = false)
 {
+   // (a lamp whose light is switched off: its glowing parts dark too)
+   const float pEmissive = lightOff ? 0.0f : p.emissive;
    // a torch's own model sits around its light: as a shadow caster it put
    // the light out (lit or doused, the room looked the same)
    if (passLight && (p.flags & RG_MESH_PRIMITIVE_SHADOW_ONLY))
@@ -1838,7 +1841,7 @@ void upload_captured(uint64_t id, const CapturedPrim &p, bool passLight = false,
    // (Dark adds its highlight to the model's lighting, which the path tracer
    // replaces: nothing showed which object was in reach)
    const float highlight = opaque ? g_uploadHighlight : 0.0f;
-   const bool glows = (p.emissive > 0.0f || highlight > 0.0f) && opaque;
+   const bool glows = (pEmissive > 0.0f || highlight > 0.0f) && opaque;
    const RgMeshPrimitiveFlags glowFlags =
       glows ? RgMeshPrimitiveFlags(RG_MESH_PRIMITIVE_EMISSIVE_OVERRIDE | RG_MESH_PRIMITIVE_EMISSIVE_SCREEN_SCALED) : 0u;
    auto prim = RgMeshPrimitiveInfo{
@@ -1855,9 +1858,9 @@ void upload_captured(uint64_t id, const CapturedPrim &p, bool passLight = false,
       .pTextureName = p.texture.empty() ? nullptr : p.texture.c_str(),
       .textureFrame = 0,
       .color = p.color,
-      .emissive = std::max({p.emissive, ambient, highlight}),
+      .emissive = std::max({pEmissive, ambient, highlight}),
       .classicLight = 1.0f,
-      .emissiveGi = glows ? std::max(p.emissive * 0.06f, ambient) : 0.0f,
+      .emissiveGi = glows ? std::max(pEmissive * 0.06f, ambient) : 0.0f,
    };
    upload(id, prim);
 }
@@ -2235,6 +2238,40 @@ void upload_objects()
       g_uploadHighlight = (highlit_obj != 0 && uint32_t(highlit_obj) == obj)
                              ? std::clamp(objlight_highlight_level, 0.0f, 1.0f) * 0.7f
                              : 0.0f;
+      // A lamp whose light is switched off (a light switch, a doused torch):
+      // its glowing parts go dark with it -- an off light next to it (in or
+      // just round the model) and none on. Its bulb shone on, the corridor
+      // looked lit while the game (and the light gem) had it dark.
+      bool lightOff = false;
+      {
+         bool glowing = false;
+         for (const CapturedPrim &p : c.prims)
+            glowing = glowing || (p.emissive > 0.0f && !p.sprite);
+         if (glowing && !g_lastDim.empty()) {
+            auto near = [&c](const float *q) {
+               for (int k = 0; k < 3; ++k)
+                  if (q[k] < c.bmin[k] - 0.3f || q[k] > c.bmax[k] + 0.3f)
+                     return false;
+               return true;
+            };
+            bool off = false;
+            for (const PendingLight &d : g_lastDim) {
+               const RgFloat3D q = to_rt(d.pos);
+               if (near(q.data)) {
+                  off = true;
+                  break;
+               }
+            }
+            bool on = false;
+            if (off)
+               for (const RgFloat3D &l : g_lightPositions)
+                  if (near(l.data)) {
+                     on = true;
+                     break;
+                  }
+            lightOff = off && !on;
+         }
+      }
       if (c.passLight && c.flameInside && g_cfg.torchShadows) {
          const bool splitKept = c.splitValid && !wasFresh && c.splitGiven;
          if (!c.splitValid) {
@@ -2268,7 +2305,7 @@ void upload_objects()
          }
          const std::vector<uint64_t> ids = object_prim_ids(obj, c.split);
          for (size_t i = 0; i < c.split.size(); ++i)
-            upload_captured(ids[i], c.split[i], i < c.splitNear, splitKept);
+            upload_captured(ids[i], c.split[i], i < c.splitNear, splitKept, lightOff);
          c.splitGiven = true;
       } else {
          // (named again only when its primitives change: a vector and a map
@@ -2278,7 +2315,7 @@ void upload_objects()
          const std::vector<uint64_t> &ids = c.ids;
          // (as given last time it was given, unless captured anew since)
          for (size_t i = 0; i < c.prims.size(); ++i)
-            upload_captured(ids[i], c.prims[i], c.passLight, !wasFresh && !c.splitGiven);
+            upload_captured(ids[i], c.prims[i], c.passLight, !wasFresh && !c.splitGiven, lightOff);
          c.splitGiven = false;
       }
       g_uploadHighlight = 0.0f;
