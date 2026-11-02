@@ -1342,3 +1342,14 @@ EXTERN void ParticleGroupDestroyAttached(ObjID ownerID)
    SafeRelease(pQuery);
 
 }
+
+// For the ray tracer (render_rt.h): a particle group's on/off -- a candle's
+// or a torch's flame, put out when it is doused. 1 on, 0 off, -1 not a
+// particle group (or gone: deleted with its flame).
+extern "C" int RenderRTGameParticleLit(uint32_t obj)
+{
+   ParticleGroup *pg;
+   if (!particle_group_prop || !OBJ_IS_CONCRETE((ObjID)obj) || !particle_group_prop->Get((ObjID)obj, &pg))
+      return -1;
+   return pg->active ? 1 : 0;
+}

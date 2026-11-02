@@ -1137,9 +1137,13 @@ std::unordered_map<uint32_t, int> g_lightOwnerKind;
 // Each light's brightness this frame and the most it has had, and the lights
 // an object owns (its own Light/AnimLight): a lamp's glow follows its own
 // light -- off with it, dimmed and flickering with it.
-struct LightState { float now = 0.0f, most = 0.0f; uint32_t frame = 0; float pos[3] = {0, 0, 0}; };
+struct LightState { float now = 0.0f, most = 0.0f; uint32_t frame = 0; float pos[3] = {0, 0, 0}; bool flameOut = false; };
 std::unordered_map<uint32_t, LightState> g_lightState;
 std::unordered_map<uint32_t, std::vector<uint32_t>> g_ownedLights;
+// a light's flame: the particle group whose flame was seen at it (a candle's
+// light, often a plain static one the game never turns off when the candle
+// is doused -- the flame went, its light and the candle's glow stayed)
+std::unordered_map<uint32_t, uint32_t> g_lightFlameObj;
 // the level's ambient light (0..1), and the glow it gives surfaces
 float g_levelAmbient = 0.0f;
 // the player's light, by the game and by the path tracer (for the frame counter)
@@ -5281,6 +5285,9 @@ void RenderRTDrawWorld(int primitive, const sRenderBackendVertex *v, const float
                   if (dx * dx + dy * dy + dz * dz < 0.6f * 0.6f) {
                      g_fixtureLights.insert(g_pendingLights[li].id);
                      g_flameLights.insert(g_pendingLights[li].id);
+                     if (g_currentObject && g_pendingLights[li].id < 0x10000u &&
+                         RenderRTGameParticleLit(g_currentObject) >= 0)
+                        g_lightFlameObj[g_pendingLights[li].id] = g_currentObject;
                      break;
                   }
                }
@@ -5790,6 +5797,7 @@ void RenderRTWorldBegin(uint32_t serial)
    g_lightOwnerKind.clear();
    g_lightState.clear();
    g_ownedLights.clear();
+   g_lightFlameObj.clear();
    // a new world (a mission or a saved game loaded): the models kept from the
    // last one are not this one's, though some have the same numbers and places
    g_objects.clear();
@@ -5940,7 +5948,22 @@ void RenderRTLight(uint32_t id, const float pos[3], const float rgb[3], float ra
       if (kind >= 2)
          g_flameLights.insert(id);
    }
-   const float peak = std::max({rgb[0], rgb[1], rgb[2]});
+   float peak = std::max({rgb[0], rgb[1], rgb[2]});
+   // its flame put out (doused: the particle group off, or gone), the light
+   // with it -- whatever the game left it at
+   if (auto fl = g_lightFlameObj.find(id); fl != g_lightFlameObj.end() && peak > 0.5f &&
+       RenderRTGameParticleLit(fl->second) != 1) {
+      static int s_told = 0;
+      if (s_told < 20 && !g_lightState[id].flameOut) {
+         ++s_told;
+         char name[128];
+         RenderRTGameObjectName(fl->second, name, sizeof(name));
+         fprintf(stderr, "RT: light %u off with its flame (%s, %u)\n", id, name, fl->second);
+      }
+      g_lightState[id].flameOut = true;
+      peak = 0.0f;
+   } else if (auto ls = g_lightState.find(id); ls != g_lightState.end())
+      ls->second.flameOut = false;
    {
       LightState &s = g_lightState[id];
       memcpy(s.pos, pos, sizeof(s.pos));

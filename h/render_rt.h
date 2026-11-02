@@ -79,6 +79,9 @@ int RenderRTGameObjectPose(uint32_t obj, float pose[6]);
 void RenderRTGameDrawExtraObjects(void);
 // Implemented by the game: the object's name, for the inspector.
 void RenderRTGameObjectName(uint32_t obj, char *buf, int size);
+// Implemented by the game: a particle group's on/off (a flame doused): 1 on,
+// 0 off, -1 not a particle group (or gone).
+int RenderRTGameParticleLit(uint32_t obj);
 // The game's objects within radius (feet) of a point (Dark units), one line
 // each, for the inspector.
 void RenderRTGameDescribeNearby(const float at[3], float radius,
