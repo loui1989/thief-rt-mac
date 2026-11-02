@@ -215,8 +215,8 @@ inline const char *kDefaultTable = R"(# Thief RT material table: what each textu
 autobump 0.6
 
 class none        1.00 0.00 0.00 0.00
-class marble      0.35 0.00 0.30 1.20
-class tile        0.55 0.00 0.50 0.80
+class marble      0.35 0.00 0.10 1.20
+class tile        0.55 0.00 0.15 0.80
 class glass       0.30 0.00 0.00 1.50
 class window      0.55 0.00 0.30 1.20 2.0
 class metal       0.45 0.80 0.50 0.35
