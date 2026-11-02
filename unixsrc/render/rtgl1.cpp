@@ -99,6 +99,8 @@ struct Settings {
    float sky = 1.0f;
    float glow = 1.0f;         // light fixtures
    float fixtureLight = 2.0f; // the light of lamps and torches (lights at a glowing fixture or a flame)
+   float smallLamps = 2.0f;   // small lamps (a short reach): this much more, so the light the
+                              // game reckons they give -- the light gem's -- shows round them
    float spriteGlow = 1.0f;   // flame sprites' glow (their emission maps)
    bool materials = true;     // material maps made from the textures (rt_materials.h)
    float bump = 1.0f;         // their bumps' strength
@@ -189,6 +191,7 @@ void load_settings()
       else if (k == "glow") g_cfg.glow = std::clamp(value, 0.0f, 10.0f);
       else if (k == "water") g_cfg.water = std::clamp(int(value), 0, 2);
       else if (k == "fixture_light") g_cfg.fixtureLight = std::clamp(value, 0.25f, 6.0f);
+      else if (k == "small_lamps") g_cfg.smallLamps = std::clamp(value, 1.0f, 6.0f);
       else if (k == "sprite_glow") g_cfg.spriteGlow = std::clamp(value, 0.0f, 10.0f);
       else if (k == "gi") g_cfg.gi = std::clamp(int(value), 0, 3);
       else if (k == "volumetric") g_cfg.volumetric = value != 0;
@@ -261,6 +264,7 @@ void save_settings()
            int(g_cfg.fixturesPass), int(g_cfg.lightFix), g_cfg.response, g_cfg.evMin,
            g_cfg.candidates, int(g_cfg.steadyFaces), int(g_cfg.lightFade), int(g_cfg.bloom), int(g_cfg.rtDetection), g_cfg.reach, g_cfg.outputHeight, int(g_cfg.perfLog), g_cfg.frameCap, g_cfg.fog, int(g_cfg.materials), g_cfg.bump, g_cfg.parallax, int(g_cfg.polish), g_cfg.crevice, g_cfg.fixtureLight);
    fprintf(f, "window_light = %.2f\n", g_cfg.windowLight);
+   fprintf(f, "small_lamps = %.2f\n", g_cfg.smallLamps);
    fclose(f);
 }
 
@@ -3034,7 +3038,7 @@ const char *kUpscaleNames[] = {"Off",
 
 enum UiRow {
    kRowUpscale, kRowScale, kRowOutput, kRowDynres, kRowBounces, kRowReach, kRowLights, kRowLightFade, kRowCandidates, kRowLightCull, kRowResponse, kRowFlicker, kRowVolumetric, kRowFog, kRowBloom, kRowVsync, kRowFrameCap,
-   kRowFps, kRowDetection, kRowLight, kRowExposure, kRowAmbient, kRowSky, kRowLightSize, kRowRough, kRowSmooth, kRowSteady, kRowFixtures, kRowFixtureLight, kRowLightFix, kRowGlow, kRowFlameGlow, kRowMaterials, kRowBump, kRowCrevice, kRowParallax, kRowPolish, kRowWater,
+   kRowFps, kRowDetection, kRowLight, kRowExposure, kRowAmbient, kRowSky, kRowLightSize, kRowRough, kRowSmooth, kRowSteady, kRowFixtures, kRowFixtureLight, kRowSmallLamps, kRowLightFix, kRowGlow, kRowFlameGlow, kRowMaterials, kRowBump, kRowCrevice, kRowParallax, kRowPolish, kRowWater,
    kRowDebug, kRowFreeze, kRowBackFaces, kRowReuse, kRowBlink, kRowPerf, kRowInspect, kRowReset, kRowCount
 };
 
@@ -3042,7 +3046,7 @@ const char *kRowLabels[kRowCount] = {
    "Upscaler", "Render resolution", "Output resolution", "Dynamic resolution", "Bounce light", "Light reach", "Lights traced",
    "Lights coming into range", "Lights tried per pixel", "Lights behind walls", "Light changes", "Light flicker",
    "Volumetric light", "Mission fog", "Bloom", "VSync", "Frame rate limit", "FPS counter", "Light gem and guards", "Light brightness", "Darkest exposure", "Ambient light", "Sky brightness",
-   "Light size (soft shadows)", "Surface roughness", "Model shading", "Model faces", "Torches and lamps", "Lamp and torch light", "Lights in walls", "Lamp glow", "Flame glow", "Materials", "Bumps", "Crevices", "Parallax depth", "Polished reflections", "Water",
+   "Light size (soft shadows)", "Surface roughness", "Model shading", "Model faces", "Torches and lamps", "Lamp and torch light", "Small lamps", "Lights in walls", "Lamp glow", "Flame glow", "Materials", "Bumps", "Crevices", "Parallax depth", "Polished reflections", "Water",
    "Debug view", "Freeze scene (test)", "Back faces (test)", "Light sampling (test)", "Blink nearest light (test)", "Performance log", "Inspect centre of view", "Reset to defaults",
 };
 
@@ -3130,6 +3134,9 @@ std::string row_value(int row)
    case kRowRough:
       snprintf(buf, sizeof(buf), g_cfg.minRoughness >= 0.999f ? "%.2f (matte)" : "at least %.2f",
                g_cfg.minRoughness);
+      return buf;
+   case kRowSmallLamps:
+      snprintf(buf, sizeof(buf), "%.2fx", g_cfg.smallLamps);
       return buf;
    case kRowFixtureLight:
       snprintf(buf, sizeof(buf), "%.2fx", g_cfg.fixtureLight);
@@ -3300,6 +3307,9 @@ void change_row(int row, int dir)
       break;
    case kRowGlow:
       g_cfg.glow = std::clamp(std::round(g_cfg.glow * 4.0f) / 4.0f + 0.25f * dir, 0.0f, 5.0f);
+      break;
+   case kRowSmallLamps:
+      g_cfg.smallLamps = std::clamp(std::round(g_cfg.smallLamps * 4.0f) / 4.0f + 0.25f * dir, 1.0f, 6.0f);
       break;
    case kRowFixtureLight:
       g_cfg.fixtureLight = std::clamp(std::round(g_cfg.fixtureLight * 4.0f) / 4.0f + 0.25f * dir, 0.25f, 6.0f);
@@ -4482,7 +4492,7 @@ void inspect_view()
             if (const int o = ObjAnimLightOwner(int(p.id)))
                RenderRTGameObjectName(uint32_t(o), owner, sizeof(owner));
          const RgFloat3D lp = L ? to_rt(L->pos) : me;
-         out("  light %u%s%s%s: %.1f, %.1f m away at (%.2f %.2f %.2f), %d of 3 body points behind walls%s\n", p.id,
+         out("  light %u%s%s%s: %.1f, %.1f m away at (%.2f %.2f %.2f), %d of 3 body points in shadow (walls or solid objects)%s\n", p.id,
              owner[0] ? " (" : "", owner, owner[0] ? ")" : "", p.value, p.dist, lp.data[0], lp.data[1], lp.data[2],
              p.blocked, L && L->inner >= 0.0f ? ", a spot" : "");
       }
@@ -4808,54 +4818,51 @@ namespace {
 // legs, middle and head, shadowed by the world's walls (parts: light by light)
 float gem_value(const float pos[3], std::vector<GemPart> *parts)
 {
+   // The game's own reckoning (objlight.c compute_object_lighting: each
+   // light's brightness over its distance in feet, to the edge of its reach,
+   // through its spotlight's cone, at the player's place), so the light gem
+   // and the guards go by what the mission was made for; with the path
+   // tracer's shadows -- walls and solid models (crates, doors) between the
+   // light and the player's legs, middle and head -- instead of the game's
+   // baked ones. (RTGL1's own falloff, 1/distance squared, read half as lit
+   // again at 4 m from a lamp and twice as lit under it.)
    ensure_world_bvh();
-   // the body: legs, middle, head (Dark units are feet)
-   const float offs[3] = {-1.6f, 0.0f, 1.3f};
+   const float offs[3] = {-1.6f, 0.0f, 1.3f};   // feet
    float body[3][3];
    for (int i = 0; i < 3; ++i) {
       const float q[3] = {pos[0], pos[1], pos[2] + offs[i]};
       const RgFloat3D r = to_rt(q);
       memcpy(body[i], r.data, sizeof(body[i]));
    }
-   // the game's own scale: a light of brightness B 3 m (9.84 ft) away gives
-   // sqrt(3)*B/32/9.84 there; RTGL1's falls off with the square of distance
-   const float kScale = 1.7320508f * 9.0f / (32.0f * 9.8425f * 4.0f);
    float total = 0.0f;
    for (const PendingLight &L : g_lastLights) {
       if (L.peak <= 0.5f || L.id >= kWindowLightIds)
          continue;
-      const RgFloat3D lp = to_rt(L.pos);
-      const float lumens = L.peak * 4.0f * g_cfg.light;
-      const float r = std::max(g_cfg.lightSize, 0.02f);
-      float sum = 0.0f, all = 0.0f, nearest = 1e30f;
-      int blocked = 0;
-      for (int i = 0; i < 3; ++i) {
-         const float dx = lp.data[0] - body[i][0], dy = lp.data[1] - body[i][1], dz = lp.data[2] - body[i][2];
-         const float d = std::sqrt(dx * dx + dy * dy + dz * dz);
-         // as RTGL1's sphere: the solid angle it covers, over that of its disc far away
-         const float sinT = r / std::max(r, d);
-         const float omega = 2.0f * 3.14159265f * (1.0f - std::sqrt(1.0f - sinT * sinT));
-         float e = lumens * omega / (3.14159265f * r * r);
-         if (L.inner >= 0.0f && (L.dir[0] != 0 || L.dir[1] != 0 || L.dir[2] != 0)) {
-            const float dl = std::sqrt(L.dir[0] * L.dir[0] + L.dir[1] * L.dir[1] + L.dir[2] * L.dir[2]);
-            const float cosA = d > 1e-4f ? -(dx * L.dir[0] + dy * L.dir[1] + dz * L.dir[2]) / (d * dl) : 1.0f;
-            const float lo = std::min(L.outer, L.inner), hi = std::max(L.outer, L.inner);
-            float t = hi > lo ? std::clamp((cosA - lo) / (hi - lo), 0.0f, 1.0f) : (cosA >= hi ? 1.0f : 0.0f);
-            t = t * t * (3.0f - 2.0f * t);
-            e *= t * t;
-         }
-         nearest = std::min(nearest, d);
-         if (e * kScale < 0.002f)
-            continue;
-         all += e;
-         if (!segment_blocked(body[i], lp.data))
-            sum += e;
-         else
-            ++blocked;
+      const float dx = pos[0] - L.pos[0], dy = pos[1] - L.pos[1], dz = pos[2] - L.pos[2];
+      const float dFt = std::sqrt(dx * dx + dy * dy + dz * dz);
+      if (L.radius > 0.0f && dFt > L.radius)
+         continue;
+      float scale = 1.0f;
+      if (L.inner > -0.999f) {
+         // (portal_evaluate_spotlight)
+         const float dl = std::sqrt(L.dir[0] * L.dir[0] + L.dir[1] * L.dir[1] + L.dir[2] * L.dir[2]);
+         const float dot = (dFt > 1e-4f && dl > 1e-6f)
+                              ? (dx * L.dir[0] + dy * L.dir[1] + dz * L.dir[2]) / (dFt * dl) : 1.0f;
+         scale = dot >= L.inner ? 1.0f : dot <= L.outer ? 0.0f : (dot - L.outer) / std::max(L.inner - L.outer, 1e-6f);
       }
-      total += kScale * sum / 3.0f;
-      if (parts && all * kScale > 0.0f)
-         parts->push_back({L.id, kScale * sum / 3.0f, nearest, blocked});
+      const float bright = std::sqrt(L.rgb[0] * L.rgb[0] + L.rgb[1] * L.rgb[1] + L.rgb[2] * L.rgb[2]) / 32.0f;
+      const float full = scale * bright / std::max(dFt, 0.5f);
+      if (full < 0.002f)
+         continue;
+      const RgFloat3D lp = to_rt(L.pos);
+      int blocked = 0;
+      for (int i = 0; i < 3; ++i)
+         if (segment_blocked(body[i], lp.data))
+            ++blocked;
+      const float got = full * float(3 - blocked) / 3.0f;
+      total += got;
+      if (parts)
+         parts->push_back({L.id, got, dFt * 0.3048f, blocked});
    }
    return total;
 }
@@ -5819,6 +5826,13 @@ void upload_light(const PendingLight &L)
    // level's own brightness, they hardly showed against their surroundings)
    const bool fixture = g_fixtureLights.count(L.id) != 0;
    float lumens = peak * 4.0f * g_cfg.light * (fixture ? g_cfg.fixtureLight : 1.0f);
+   // A small lamp (a lamp's light reaching 25 feet or less, not a flame's):
+   // the game reckons it lights a player standing a few metres off -- its
+   // light falls as 1/distance to the edge of its reach, a traced light as
+   // 1/distance squared -- and the light gem goes by that; traced at the
+   // level's calibration, the floor round it looked dark while the gem lit.
+   if (fixture && !g_flameLights.count(L.id) && L.radius > 0.0f && L.radius <= 25.0f)
+      lumens *= g_cfg.smallLamps;
    uint32_t color = pack_color(L.rgb[0] / peak, L.rgb[1] / peak, L.rgb[2] / peak, 1);
    float flamePos[3] = {L.pos[0], L.pos[1], L.pos[2]};
    if (g_flameLights.count(L.id)) {
