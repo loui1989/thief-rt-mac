@@ -4543,7 +4543,7 @@ void inspect_view()
             if (const int o = ObjAnimLightOwner(int(p.id)))
                RenderRTGameObjectName(uint32_t(o), owner, sizeof(owner));
          const RgFloat3D lp = L ? to_rt(L->pos) : me;
-         out("  light %u%s%s%s: %.1f, %.1f m away at (%.2f %.2f %.2f), %d of 3 body points in shadow (walls or solid objects)%s\n", p.id,
+         out("  light %u%s%s%s: %.1f, %.1f m away at (%.2f %.2f %.2f), %d of 9 lines to it in shadow (walls or solid objects)%s\n", p.id,
              owner[0] ? " (" : "", owner, owner[0] ? ")" : "", p.value, p.dist, lp.data[0], lp.data[1], lp.data[2],
              p.blocked, L && L->inner >= 0.0f ? ", a spot" : "");
       }
@@ -4864,6 +4864,7 @@ void RenderRTPrepEnd(void)
 
 } // extern "C"
 namespace {
+float lightRadius(const PendingLight &L);   // (below)
 // The light gem's light at a point: the lights given to the path tracer last
 // frame, each as RTGL1 spreads it (a sphere, a spot's cone), at the player's
 // legs, middle and head, shadowed by the world's walls (parts: light by light)
@@ -4885,6 +4886,13 @@ float gem_value(const float pos[3], std::vector<GemPart> *parts)
       const RgFloat3D r = to_rt(q);
       memcpy(body[i], r.data, sizeof(body[i]));
    }
+   // Nine lines to the light, not three to its centre: the legs, middle and
+   // head, each at the body's left, middle and right, to places spread over
+   // the light's size (as RTGL1 casts its soft shadows). Three, all or
+   // nothing, made the light gem jump at a shadow's edge where the screen
+   // shows a soft one -- a step out from behind a curtain, or a light seen
+   // through the bars of a fence, the gem going from dark to lit at once.
+   constexpr int kRays = 9;
    float total = 0.0f;
    for (const PendingLight &L : g_lastLights) {
       if (L.peak <= 0.5f || L.id >= kWindowLightIds)
@@ -4906,11 +4914,33 @@ float gem_value(const float pos[3], std::vector<GemPart> *parts)
       if (full < 0.002f)
          continue;
       const RgFloat3D lp = to_rt(L.pos);
+      // across the line to the light: u level, v the other way
+      float w[3] = {lp.data[0] - body[1][0], lp.data[1] - body[1][1], lp.data[2] - body[1][2]};
+      const float wl = std::sqrt(w[0] * w[0] + w[1] * w[1] + w[2] * w[2]);
+      for (float &x : w)
+         x /= std::max(wl, 1e-4f);
+      float u[3] = {-w[1], w[0], 0.0f};
+      float ul = std::sqrt(u[0] * u[0] + u[1] * u[1]);
+      if (ul < 1e-3f)
+         u[0] = 1.0f, u[1] = 0.0f, ul = 1.0f;
+      u[0] /= ul, u[1] /= ul;
+      const float v[3] = {w[1] * u[2] - w[2] * u[1], w[2] * u[0] - w[0] * u[2],
+                          w[0] * u[1] - w[1] * u[0]};
+      const float size = lightRadius(L);
       int blocked = 0;
-      for (int i = 0; i < 3; ++i)
-         if (segment_blocked(body[i], lp.data))
+      for (int k = 0; k < kRays; ++k) {
+         const int h = k / 3, side = k % 3 - 1;
+         float a[3], b[3];
+         // a turn of the golden angle for each: spread evenly over the light
+         const float ang = 2.39996f * float(k), rad = size * std::sqrt((float(k) + 0.5f) / kRays);
+         for (int c = 0; c < 3; ++c) {
+            a[c] = body[h][c] + u[c] * 0.2f * float(side);
+            b[c] = lp.data[c] + (u[c] * std::cos(ang) + v[c] * std::sin(ang)) * rad;
+         }
+         if (segment_blocked(a, b))
             ++blocked;
-      const float got = full * float(3 - blocked) / 3.0f;
+      }
+      const float got = full * float(kRays - blocked) / float(kRays);
       total += got;
       if (parts)
          parts->push_back({L.id, got, dFt * 0.3048f, blocked});
@@ -4936,7 +4966,26 @@ int RenderRTPointLighting(const float pos[3], float *value)
       *value = s_value;
       return 1;
    }
-   const float total = gem_value(pos, nullptr);
+   float total = gem_value(pos, nullptr);
+   {
+      // eased over a moment (about a fifth of a second either way), as the
+      // eye takes in a change of light: stepping out of a shadow lights the
+      // gem quickly but not in a single frame. A jump of place (a load, a
+      // teleport) or a long pause takes the new value at once.
+      static float s_eased = -1.0f;
+      static float s_easedAt[3] = {0, 0, 0};
+      static auto s_t = std::chrono::steady_clock::now();
+      const auto now = std::chrono::steady_clock::now();
+      const float dt = std::chrono::duration<float>(now - s_t).count();
+      s_t = now;
+      const float dx = pos[0] - s_easedAt[0], dy = pos[1] - s_easedAt[1], dz = pos[2] - s_easedAt[2];
+      memcpy(s_easedAt, pos, sizeof(s_easedAt));
+      if (s_eased < 0.0f || dt > 0.5f || dx * dx + dy * dy + dz * dz > 100.0f)
+         s_eased = total;
+      else
+         s_eased += (total - s_eased) * std::min(1.0f, dt / 0.2f);
+      total = s_eased;
+   }
    memcpy(g_gemPos, pos, sizeof(g_gemPos));
    g_gemPosValid = true;
    s_frame = g_frameNumber;
