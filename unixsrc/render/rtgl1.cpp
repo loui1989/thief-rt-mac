@@ -2116,6 +2116,59 @@ void upload_objects()
       }
       return;
    }
+   // A budget for the models kept out of view: the nearest first, to about
+   // 30000 triangles. Each is kept within a few metres to 40 m of the camera
+   // (a straight line, through floors and walls); a walk round Black
+   // Parade's mansion gathered 630 of them, 125000 triangles -- the scene
+   // twice its size, every ray of the path tracer twice as slow (28 ms a
+   // frame), until a saved game was loaded and they were let go.
+   std::unordered_set<uint32_t> overBudget;
+   {
+      const RgFloat3D cam = to_rt(g_camera.pos);
+      struct Cand { float score; uint32_t obj; size_t tris; };
+      std::vector<Cand> cands;
+      cands.reserve(g_objects.size());
+      for (const auto &e : g_objects) {
+         const CachedObject &c = e.second;
+         if (c.frame == g_frameNumber)
+            continue;
+         const float dx = c.center[0] - cam.data[0], dy = c.center[1] - cam.data[1],
+                     dz = c.center[2] - cam.data[2];
+         float d = std::sqrt(dx * dx + dy * dy + dz * dz);
+         bool lit = c.passLight;
+         size_t tris = 0;
+         for (const CapturedPrim &p : c.prims) {
+            lit = lit || (p.emissive > 0.0f && !p.sprite);
+            tris += p.verts.size() / 3;
+         }
+         // (only those within their own reach, as below)
+         const float ext = std::max({c.bmax[0] - c.bmin[0], c.bmax[1] - c.bmin[1], c.bmax[2] - c.bmin[2], 0.0f});
+         const float keepBase = lit ? 40.0f : std::clamp(4.0f + 8.0f * ext, 4.0f, 25.0f);
+         const float keepAt = keepBase + (c.keptOut ? std::min(8.0f, 0.5f * keepBase) : 0.0f);
+         if (d > std::min(keepAt, kKeepDistance))
+            continue;
+         // a lamp a little ahead of the rest (its light, its reflection);
+         // one kept last frame a little too (no coming and going at the edge)
+         if (lit)
+            d *= 0.6f;
+         if (c.keptOut)
+            d *= 0.85f;
+         cands.push_back({d, e.first, tris});
+      }
+      constexpr size_t kOutOfViewTris = 30000, kOutOfViewModels = 250;
+      size_t total = 0;
+      for (const Cand &k : cands)
+         total += k.tris;
+      if (total > kOutOfViewTris || cands.size() > kOutOfViewModels) {
+         std::sort(cands.begin(), cands.end(), [](const Cand &a, const Cand &b) { return a.score < b.score; });
+         size_t sum = 0, n = 0;
+         for (const Cand &k : cands) {
+            sum += k.tris;
+            if (sum > kOutOfViewTris || ++n > kOutOfViewModels)
+               overBudget.insert(k.obj);
+         }
+      }
+   }
    for (auto it = g_objects.begin(); it != g_objects.end();) {
       const uint32_t obj = it->first;
       CachedObject &c = it->second;
@@ -2145,7 +2198,8 @@ void upload_objects()
             lit = lit || (p.emissive > 0.0f && !p.sprite);
          const float keepBase = lit ? 40.0f : std::clamp(4.0f + 8.0f * ext, 4.0f, 25.0f);
          const float keepAt = keepBase + (c.keptOut ? std::min(8.0f, 0.5f * keepBase) : 0.0f);
-         if (dx * dx + dy * dy + dz * dz > std::min(keepAt, kKeepDistance) * std::min(keepAt, kKeepDistance)) {
+         if (overBudget.count(obj) ||
+             dx * dx + dy * dy + dz * dz > std::min(keepAt, kKeepDistance) * std::min(keepAt, kKeepDistance)) {
             if (c.givenFrame + 1 == g_frameNumber && dx * dx + dy * dy + dz * dz < 20.0f * 20.0f)
                log_model_change(obj, "leaves the scene: not drawn by the game for %u frames, %.1f m away (kept to %.1f m)",
                                 g_frameNumber - c.frame, std::sqrt(dx * dx + dy * dy + dz * dz),
