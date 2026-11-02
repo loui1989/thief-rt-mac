@@ -231,6 +231,15 @@ void load_settings()
    // settings saved before version 2: the flame glow was unused (0.35)
    if (version < 2)
       g_cfg.spriteGlow = kDefaultsSpriteGlow;
+   // (in the log, so a value changed in the panel can be found again)
+   fprintf(stderr, "RT: settings at start: upscale %d, output height %d, dynamic resolution %d fps, light %.3f, "
+                   "ambient %.2fx, sky %.3f, light size %.3f, glow %.3f, flame glow %.3f, bounces %d, volumetric %d, "
+                   "bloom %d, materials %d, bump %.2f, crevice %.2f, parallax %.3f, polish %d, water %d, reach %d, "
+                   "lights tried %d, frame cap %d\n",
+           g_cfg.upscale, g_cfg.outputHeight, g_cfg.dynres, g_cfg.light, g_cfg.ambient, g_cfg.sky, g_cfg.lightSize,
+           g_cfg.glow, g_cfg.spriteGlow, g_cfg.gi, int(g_cfg.volumetric), int(g_cfg.bloom), int(g_cfg.materials),
+           g_cfg.bump, g_cfg.crevice, g_cfg.parallax, int(g_cfg.polish), g_cfg.water, g_cfg.reach, g_cfg.candidates,
+           g_cfg.frameCap);
 }
 
 void save_settings()
