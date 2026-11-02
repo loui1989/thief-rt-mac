@@ -105,10 +105,11 @@ cSndSource::SetPlaylist( SndPlaylist   pList )
    SSPLLabel            *pLabel;
    SSPLBranch           *pBranch;
    SSPLSetGate          *pSetGate;
-   char                 tmpBuff[256];
+   char                 tmpBuff[16384]; // a header padded to 4K sectors fits
    sSndAttribs          attribs;
    uint32               rawDataLen, bytesToRead, len, samplesThisSegment;
    void                 *pRawData;
+   uint32               presetSamples;
    BOOL                 prevWasDual, isDual, notDone, blewIt;
    FILE                 *inFile;
    Id                   rezId;
@@ -169,7 +170,12 @@ cSndSource::SetPlaylist( SndPlaylist   pList )
             blewIt = SndCrackRezHeader( tmpBuff, bytesToRead,
                                         &pRawData, &rawDataLen,
                                         &(pRezSingle->nSamples), &attribs );
-            assert( blewIt == FALSE );
+            if ( blewIt ) {
+               // never play from a place the header never gave
+               mprintf( "sound playlist: a sound's header couldn't be read, it plays as nothing\n" );
+               pRawData = (void *) tmpBuff;
+               pRezSingle->nSamples = 0;
+            }
             pRezSingle->off = static_cast<uint32>(((char *) pRawData) - tmpBuff);
             setFormatWords( &(pRezSingle->format1), &attribs, &mAttribs );
             if ( prevWasDual ) {
@@ -199,7 +205,12 @@ cSndSource::SetPlaylist( SndPlaylist   pList )
             blewIt = SndCrackRezHeader( tmpBuff, bytesToRead,
                                         &pRawData, &rawDataLen,
                                         &(pFileSingle->nSamples), &attribs );
-            assert( blewIt == FALSE );
+            if ( blewIt ) {
+               // never play from a place the header never gave
+               mprintf( "sound playlist: a sound's header couldn't be read, it plays as nothing\n" );
+               pRawData = (void *) tmpBuff;
+               pFileSingle->nSamples = 0;
+            }
             pFileSingle->off = static_cast<uint32>(((char *) pRawData) - tmpBuff);
             setFormatWords( &(pFileSingle->format1), &attribs, &mAttribs );
             if ( prevWasDual ) {
@@ -218,11 +229,32 @@ cSndSource::SetPlaylist( SndPlaylist   pList )
 
          case plMemSingle:
             pMemSingle = (SSPLMemSingle *) pOp;
+            presetSamples = pMemSingle->nSamples;
             bytesToRead = 1024;  // ASSume that header is less than this
+            // ...which a WAV padded out to a 4K sector (Black Parade's
+            // SephyLoop ambients) isn't: its data lies past 1024, the look
+            // failed and the loop played from a garbage place -- a crash.
+            // A RIFF file says its own length; the whole of it is in memory.
+            if ( strncmp( (const char *) pMemSingle->pData, "RIFF", 4 ) == 0 ) {
+               const uint8 *pHdr = (const uint8 *) pMemSingle->pData;
+               const uint32 riffLen = (uint32) pHdr[4] | ((uint32) pHdr[5] << 8) |
+                                      ((uint32) pHdr[6] << 16) | ((uint32) pHdr[7] << 24);
+               if ( riffLen >= 4 && riffLen < 0x7ffffff0u && riffLen + 8 > bytesToRead )
+                  bytesToRead = riffLen + 8;
+            }
             blewIt = SndCrackRezHeader( pMemSingle->pData, bytesToRead,
                                         &pRawData, &rawDataLen,
                                         &(pMemSingle->nSamples), &attribs );
-            assert( blewIt == FALSE );
+            // the source made from this buffer counted its samples from the
+            // whole sound; the header-only look here can only count more
+            if ( presetSamples != 0 && presetSamples < pMemSingle->nSamples )
+               pMemSingle->nSamples = presetSamples;
+            if ( blewIt ) {
+               // never play from a place the header never gave
+               mprintf( "sound playlist: a sound's header couldn't be read, it plays as nothing\n" );
+               pRawData = (void *) ((char *) pMemSingle->pData);
+               pMemSingle->nSamples = 0;
+            }
             pMemSingle->off = static_cast<uint32>(((char *) pRawData) - ((char *) pMemSingle->pData));
             setFormatWords( &(pMemSingle->format1), &attribs, &mAttribs );
             if ( prevWasDual ) {
@@ -259,7 +291,12 @@ cSndSource::SetPlaylist( SndPlaylist   pList )
             blewIt = SndCrackRezHeader( tmpBuff, bytesToRead,
                                         &pRawData, &rawDataLen,
                                         &(pNRezSingle->nSamples), &attribs );
-            assert( blewIt == FALSE );
+            if ( blewIt ) {
+               // never play from a place the header never gave
+               mprintf( "sound playlist: a sound's header couldn't be read, it plays as nothing\n" );
+               pRawData = (void *) tmpBuff;
+               pNRezSingle->nSamples = 0;
+            }
             pNRezSingle->off = static_cast<uint32>(((char *) pRawData) - tmpBuff);
             setFormatWords( &(pNRezSingle->format1), &attribs, &mAttribs );
             if ( prevWasDual ) {

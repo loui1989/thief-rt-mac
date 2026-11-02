@@ -130,8 +130,7 @@ SndCrackWaveHeader(
       pAttribs->samplesPerBlock = pAttribs->bytesPerBlock / bytesPerSample;
       *pNumSamples = *pDataLen / bytesPerSample;
    }
-   else if (format == kWaveFormatImaAdpcm && haveFact &&
-            pAttribs->samplesPerBlock != 0)
+   else if (format == kWaveFormatImaAdpcm && pAttribs->samplesPerBlock != 0)
    {
       pAttribs->dataType = kSndDataIMAADPCM;
       const uint32 blocks = *pDataLen / pAttribs->bytesPerBlock;
@@ -139,7 +138,9 @@ SndCrackWaveHeader(
       uint32 maxSamples = blocks * pAttribs->samplesPerBlock;
       if (partial >= 4)
          maxSamples += 1 + 2 * (partial - 4);
-      if (*pNumSamples > maxSamples)
+      // An ADPCM file whose "fact" chunk (its exact sample count) comes
+      // after its data, or is missing: the data's own length gives it.
+      if (!haveFact || *pNumSamples > maxSamples)
          *pNumSamples = maxSamples;
    }
    else

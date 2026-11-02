@@ -912,7 +912,7 @@ CreateNRezStreamedSoundSource( ISndMixer           *pMixer,          // your mix
    // handled through a common interface (and so looping info can be extracted without
    // reading in a whole file).
    int len = pRez->GetSize();
-   char tmpBuff[256];
+   char tmpBuff[16384]; // a header padded to 4K sectors fits
    int bytesToRead = ( len < sizeof(tmpBuff) ) ? len : sizeof(tmpBuff);
    //   int nSamples;
    pRez->ExtractPartial( 0, bytesToRead - 1, tmpBuff );
@@ -1056,7 +1056,7 @@ CreateSongSoundSource ( ISndMixer           *pMixer,
    // handled through a common interface (and so looping info, which usually resides after
    // sample data, can be easily extracted without reading in a whole file).
    int len = pResArray[0]->GetSize();
-   char tmpBuff[256];
+   char tmpBuff[16384]; // a header padded to 4K sectors fits
    int bytesToRead = ( len < sizeof(tmpBuff) ) ? len : sizeof(tmpBuff);
    //   int nSamples;
    pResArray[0]->ExtractPartial( 0, bytesToRead - 1, tmpBuff );
