@@ -433,6 +433,8 @@ BOOL CheckClimb(ObjID objID)
 
 // Set when the mantle under way ends in a crouch (see CheckMantle).
 static BOOL g_MantleCrouch = FALSE;
+// where the crouched shape was found to fit, for the end of the mantle
+static mxs_vector g_MantleCrouchDest;
 
 // One line in the log per mantle attempt that ends differently from the last
 // (the retry below checks every frame, so repeats are dropped).
@@ -497,9 +499,12 @@ void BreakMantle(ObjID objID)
 
    PhysSetModLocation(objID, (mxs_vector *)&pModel->GetLocationVec());
 
-   // only a mantle that got onto the ledge (state 4 or later) ends crouched;
-   // one let go of earlier drops back standing
-   const BOOL end_crouched = g_MantleCrouch && pModel->GetMantlingState() >= 4;
+   // only a mantle that got over the ledge (state 3, moving onto it, or
+   // later) ends crouched; one let go of earlier drops back standing. (Only
+   // state 4 on: the low ceiling a crouched mantle squeezes under was
+   // touched as it went forward, the mantle broken there, and it ended
+   // standing -- under the ceiling, and pushed back out of the space.)
+   const BOOL end_crouched = g_MantleCrouch && pModel->GetMantlingState() >= 3;
    g_MantleCrouch = FALSE;
 
    PlayerMotionActivate(kMoEnable);
@@ -516,6 +521,32 @@ void BreakMantle(ObjID objID)
       PlayerMotionSetOffset(PLAYER_HEAD, &head_lower);
       PlayerMotionSetOffset(PLAYER_BODY, &body_lower);
       PhysSetModLocation(objID, (mxs_vector *)&pModel->GetLocationVec());
+      // Not fitting where the climb left it (its head an inch into the low
+      // ceiling, or short of the ledge): a little lower first, then the
+      // place the crouched shape was found to fit -- not the search below,
+      // which steps back out of the space it was climbing into.
+      if (!PhysObjValidPos(objID, NULL))
+      {
+         BOOL placed = FALSE;
+         for (float down = 0.05f; down <= 0.31f && !placed; down += 0.05f)
+         {
+            mxs_vector d = {0, 0, -down};
+            if (PhysObjValidPos(objID, &d))
+            {
+               mxs_vector at = pModel->GetLocationVec();
+               at.z -= down;
+               PhysSetModLocation(objID, &at);
+               placed = TRUE;
+            }
+         }
+         if (!placed)
+         {
+            mxs_vector d;
+            mx_sub_vec(&d, &g_MantleCrouchDest, &pModel->GetLocationVec());
+            if (mx_mag2_vec(&d) < 5.0f * 5.0f && PhysObjValidPos(objID, &d))
+               PhysSetModLocation(objID, &g_MantleCrouchDest);
+         }
+      }
       MantleLog("mantle finished crouched");
    }
 
@@ -792,50 +823,75 @@ BOOL CheckMantle(ObjID objID)
       }
 
      mxs_vector delta_full = delta;
-     mx_addeq_vec(&delta, &movement_dir);
-     delta.z += -PLAYER_FOOT_POS;
-     g_MantleForward = 1.0f;
-     BOOL fits = PhysObjValidPos(objID, &delta);
-     if (!fits && NewMantle())
+     // Where it fits, NewDark's way: standing all the way onto the ledge;
+     // else crouched all the way (a vent, a crawlspace over a wardrobe);
+     // else standing or crouched part of the way (new_mantle_fwd, a narrow
+     // ledge). Standing part of the way came before crouching all the way:
+     // over a wardrobe with a crawlspace behind its lip it fitted standing
+     // at the lip, and the mantle left the player standing there, unable to
+     // go in. And a ledge whose room to stand ends just past the lip, with
+     // room to crouch on: crouched, as the way on is.
+     float min_fwd = 0.5f;
+     if (NewMantle())
      {
-        float min_fwd = 0.5f;
         config_get_float("new_mantle_fwd", &min_fwd);
         min_fwd = min(1.0f, max(0.5f, min_fwd));
-        for (float f = 0.875f; f >= min_fwd - 0.001f && !fits; f -= 0.125f)
-        {
-           delta = delta_full;
-           mx_scale_addeq_vec(&delta, &movement_dir, f);
-           delta.z += -PLAYER_FOOT_POS;
-           if (PhysObjValidPos(objID, &delta))
+     }
+     else
+        min_fwd = 1.0f;
+     auto stand_at = [&](float f) {
+        mxs_vector d = delta_full;
+        mx_scale_addeq_vec(&d, &movement_dir, f);
+        d.z += -PLAYER_FOOT_POS;
+        return PhysObjValidPos(objID, &d);
+     };
+     auto crouch_at = [&](float f, mxs_vector *out) {
+        mxs_vector d = delta_full;
+        mx_scale_addeq_vec(&d, &movement_dir, f);
+        d.z += -PLAYER_FOOT_POS - 0.40f;
+        if (!PhysPlayerValidPosCrouched(objID, &d))
+           return FALSE;
+        if (out)
+           *out = d;
+        return TRUE;
+     };
+     g_MantleForward = 1.0f;
+     g_MantleCrouch = FALSE;
+     BOOL fits = FALSE;
+     mxs_vector crouch_delta;
+     for (int pass = 0; pass < 2 && !fits; ++pass)
+     {
+        // pass 0: all the way; pass 1: part of the way (new mantle only)
+        const float hi = pass == 0 ? 1.0f : 0.875f, lo = pass == 0 ? 1.0f : min_fwd;
+        if (pass == 1 && !NewMantle())
+           break;
+        for (float f = hi; f >= lo - 0.001f && !fits; f -= 0.125f)
+           if (stand_at(f))
            {
               fits = TRUE;
               g_MantleForward = f;
-              #ifndef SHIP
-              if (config_is_defined("MantleSpew"))
-                 mprintf("New mantle: fits moving %.3f of the way forward\n", f);
-              #endif
            }
-        }
-     }
-     g_MantleCrouch = FALSE;
-     if (!fits && NewMantle())
-     {
-        // NewDark's new mantle also climbs into spaces only tall enough to
-        // crouch in (a window, a vent): try the crouched shape, with the feet
-        // just over the lip, at the same forward distances.
-        for (float f = 1.0f; f >= 0.5f - 0.001f && !fits; f -= 0.125f)
-        {
-           delta = delta_full;
-           mx_scale_addeq_vec(&delta, &movement_dir, f);
-           delta.z += -PLAYER_FOOT_POS - 0.40f;
-           if (PhysPlayerValidPosCrouched(objID, &delta))
+        for (float f = hi; f >= lo - 0.001f && !fits && NewMantle(); f -= 0.125f)
+           if (crouch_at(f, &crouch_delta))
            {
               fits = TRUE;
               g_MantleForward = f;
               g_MantleCrouch = TRUE;
            }
+     }
+     if (fits && !g_MantleCrouch && NewMantle())
+     {
+        // standing room only at the lip, crouching room on past it
+        const float on = g_MantleForward + 0.75f;
+        mxs_vector d;
+        if (!stand_at(on) && crouch_at(on, NULL) && crouch_at(g_MantleForward, &d))
+        {
+           g_MantleCrouch = TRUE;
+           crouch_delta = d;
         }
      }
+     if (g_MantleCrouch)
+        mx_add_vec(&g_MantleCrouchDest, &pModel->GetLocationVec(), &crouch_delta);
      if (!fits)
      {
          #ifndef SHIP
@@ -1126,7 +1182,9 @@ void UpdateMantling(cPhysModel *pModel, mxs_real dt)
             if ((PhysRaycast(start, end, &hit, &hit_obj, 0) != kCollideNone) && CanMantleOnto(hit_obj))
             {
                mx_copy_vec(&targ_vec, &hit.vec);
-               targ_vec.z += -PLAYER_FOOT_POS + 0.1f;
+               // (crouched: just over the floor, the head under a ceiling
+               // 4 ft up -- at 0.1 it was in it, and the mantle put back)
+               targ_vec.z += -PLAYER_FOOT_POS + (g_MantleCrouch ? 0.02f : 0.1f);
             }
 
             pModel->SetTargetLocation(targ_vec);
