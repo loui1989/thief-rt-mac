@@ -121,6 +121,12 @@ struct Settings {
    int gi = 0;                // bounce light: 0 two bounces at half rate (as Blood RT),
                               // 1 one bounce, 2 two bounces, 3 one bounce at half rate
    bool volumetric = false;   // haze lit by every light
+   bool moonShafts = true;    // god rays: the haze lit by the moon alone (cheap), when volumetric is off
+   float shafts = 1.0f;       // god rays' strength (the haze's light, times this)
+   float moon = 1.0f;         // moonlight through the sky's openings, times its base (0 off)
+   int moonAzimuth = 225;     // where the moon is, degrees round from the map's +x
+   int moonHeight = 50;       // and how high, degrees over the horizon
+   bool mfxDenoise = false;   // MetalFX's denoising upscaler in place of the path tracer's denoiser
    int fog = 2;               // the mission's fog: 0 off, 1 light, 2 as the mission, 3 thick
    int dynres = 0;            // dynamic resolution's target fps, 0 off
    int outputHeight = 0;      // the frame's height in pixels, 0 = the screen's own (Retina)
@@ -208,6 +214,12 @@ void load_settings()
       else if (k == "sprite_glow") g_cfg.spriteGlow = std::clamp(value, 0.0f, 10.0f);
       else if (k == "gi") g_cfg.gi = std::clamp(int(value), 0, 3);
       else if (k == "volumetric") g_cfg.volumetric = value != 0;
+      else if (k == "moon_shafts") g_cfg.moonShafts = value != 0;
+      else if (k == "god_ray_strength") g_cfg.shafts = std::clamp(value, 0.1f, 8.0f);
+      else if (k == "moon") g_cfg.moon = std::clamp(value, 0.0f, 8.0f);
+      else if (k == "moon_azimuth") g_cfg.moonAzimuth = ((int(value) % 360) + 360) % 360;
+      else if (k == "moon_height") g_cfg.moonHeight = std::clamp(int(value), 10, 90);
+      else if (k == "metalfx_denoiser") g_cfg.mfxDenoise = value != 0;
       else if (k == "fog") g_cfg.fog = std::clamp(int(value), 0, 3);
       else if (k == "materials") g_cfg.materials = value != 0;
       else if (k == "bump") g_cfg.bump = std::clamp(value, 0.0f, 4.0f);
@@ -280,6 +292,8 @@ void save_settings()
    fprintf(f, "small_lamps = %.2f\n", g_cfg.smallLamps);
    fprintf(f, "gem_match_ft = %.1f\n", g_cfg.gemMatch);
    fprintf(f, "gem_scale = %.3f\n", g_cfg.gemScale);
+   fprintf(f, "moon_shafts = %d\ngod_ray_strength = %.2f\nmoon = %.2f\nmoon_azimuth = %d\nmoon_height = %d\nmetalfx_denoiser = %d\n",
+           int(g_cfg.moonShafts), g_cfg.shafts, g_cfg.moon, g_cfg.moonAzimuth, g_cfg.moonHeight, int(g_cfg.mfxDenoise));
    fprintf(f, "gem_ease_s = %.2f\n", g_cfg.gemEase);
    fclose(f);
 }
@@ -1242,8 +1256,10 @@ void start_frame()
    resolution.frameGeneration = RG_FRAME_GENERATION_MODE_OFF;
    resolution.denoiser = RG_DENOISER_DEFAULT;
    const bool metalfx = g_cfg.upscale >= 1 && g_cfg.upscale <= 5;
-   // (MetalFX's denoiser: less stable than RTGL1's, and not cheaper)
-   const bool mfxDenoiser = false;
+   // MetalFX's denoising upscaler (macOS 26) in place of the path tracer's
+   // denoiser and the plain MetalFX upscaler -- a choice in the panel, to
+   // compare: tried once as the only one, it read less stable than RTGL1's
+   const bool mfxDenoiser = metalfx && g_cfg.mfxDenoise && metalfx_denoiser_available();
    // Dynamic resolution (the Metal backend reads RTGL1_DYNRES_* every frame):
    // the size asked for here is the largest; each frame's follows the GPU time.
    // Not with the MetalFX denoiser, which needs a fixed size.
@@ -2740,8 +2756,39 @@ void upload_world()
    const RgFloat3D cam = to_rt(g_camera.pos);
    for (size_t i = 0; i < g_world.size(); ++i) {
       WorldGroup &g = g_world[i];
-      if (g.verts.empty() || (g.flags & kRenderRTWorldSky))
+      if (g.verts.empty())
          continue;
+      if (g.flags & kRenderRTWorldSky) {
+         // The sky's own faces, while the moon is up: not seen (a ray that
+         // meets one sees the sky, as one that meets nothing) and no shadow,
+         // but there for the moon's test that its light came in through the
+         // sky -- not out of the level through a gap (sunRequireSky). All of
+         // them, near or far: few, and the moon's rays go a long way.
+         if (g_cfg.moon <= 0.0f)
+            continue;
+         auto skyPrim = RgMeshPrimitiveInfo{
+            .sType = RG_STRUCTURE_TYPE_MESH_PRIMITIVE_INFO,
+            .pNext = nullptr,
+            .flags = RG_MESH_PRIMITIVE_SKY_VISIBILITY | RG_MESH_PRIMITIVE_NO_MOTION_VECTORS |
+                     RG_MESH_PRIMITIVE_NO_SHADOW,
+            .primitiveIndexInMesh = 0,
+            .pVertices = g.verts.data(),
+            .vertexCount = uint32_t(g.verts.size()),
+            .pIndices = g.indices.data(),
+            .indexCount = uint32_t(g.indices.size()),
+            .pTextureName = nullptr,
+            .textureFrame = 0,
+            .color = pack_color(1, 1, 1, 1),
+            .emissive = 0.0f,
+            .classicLight = 1.0f,
+            .emissiveGi = 0.0f,
+         };
+         if (g.given)
+            skyPrim.flags |= kRtPrimUnchanged;
+         upload(0x100000000ull + i, skyPrim);
+         g.given = true;
+         continue;
+      }
       // a room far from the camera (walking, through the openings) is left
       // out, unless near in a straight line (its shadows and reflections);
       // once given, kept a little farther, so pieces do not come and go
@@ -3379,15 +3426,15 @@ const char *kUpscaleNames[] = {"Off",
                                "MetalFX Custom"};
 
 enum UiRow {
-   kRowUpscale, kRowScale, kRowOutput, kRowDynres, kRowBounces, kRowReach, kRowLights, kRowLightFade, kRowCandidates, kRowLightCull, kRowResponse, kRowFlicker, kRowVolumetric, kRowFog, kRowBloom, kRowVsync, kRowFrameCap,
-   kRowFps, kRowDetection, kRowGemScale, kRowGemMatch, kRowGemEase, kRowLight, kRowExposure, kRowAmbient, kRowSky, kRowLightSize, kRowRough, kRowSmooth, kRowSteady, kRowFixtures, kRowFixtureLight, kRowSmallLamps, kRowLightFix, kRowGlow, kRowFlameGlow, kRowMaterials, kRowBump, kRowCrevice, kRowParallax, kRowPolish, kRowWater,
+   kRowUpscale, kRowScale, kRowOutput, kRowDynres, kRowDenoiser, kRowBounces, kRowReach, kRowLights, kRowLightFade, kRowCandidates, kRowLightCull, kRowResponse, kRowFlicker, kRowVolumetric, kRowShafts, kRowFog, kRowBloom, kRowVsync, kRowFrameCap,
+   kRowFps, kRowDetection, kRowGemScale, kRowGemMatch, kRowGemEase, kRowLight, kRowExposure, kRowAmbient, kRowSky, kRowMoon, kRowMoonDir, kRowMoonHeight, kRowLightSize, kRowRough, kRowSmooth, kRowSteady, kRowFixtures, kRowFixtureLight, kRowSmallLamps, kRowLightFix, kRowGlow, kRowFlameGlow, kRowMaterials, kRowBump, kRowCrevice, kRowParallax, kRowPolish, kRowWater,
    kRowDebug, kRowFreeze, kRowBackFaces, kRowReuse, kRowBlink, kRowPerf, kRowInspect, kRowReset, kRowCount
 };
 
 const char *kRowLabels[kRowCount] = {
-   "Upscaler", "Render resolution", "Output resolution", "Dynamic resolution", "Bounce light", "Light reach", "Lights traced",
+   "Upscaler", "Render resolution", "Output resolution", "Dynamic resolution", "Denoiser", "Bounce light", "Light reach", "Lights traced",
    "Lights coming into range", "Lights tried per pixel", "Lights behind walls", "Light changes", "Light flicker",
-   "Volumetric light", "Mission fog", "Bloom", "VSync", "Frame rate limit", "FPS counter", "Light gem and guards", "  Light gem brightness", "  Light gem falloff", "  Light gem response", "Light brightness", "Darkest exposure", "Ambient light", "Sky brightness",
+   "God rays (volumetric)", "  God ray strength", "Mission fog", "Bloom", "VSync", "Frame rate limit", "FPS counter", "Light gem and guards", "  Light gem brightness", "  Light gem falloff", "  Light gem response", "Light brightness", "Darkest exposure", "Ambient light", "Sky brightness", "Moonlight", "  Moon direction", "  Moon height",
    "Light size (soft shadows)", "Surface roughness", "Model shading", "Model faces", "Torches and lamps", "Lamp and torch light", "Lamp reach", "Lights in walls", "Lamp glow", "Flame glow", "Materials", "Bumps", "Crevices", "Parallax depth", "Polished reflections", "Water",
    "Debug view", "Freeze scene (test)", "Back faces (test)", "Light sampling (test)", "Blink nearest light (test)", "Performance log", "Inspect centre of view", "Reset to defaults",
 };
@@ -3433,7 +3480,24 @@ std::string row_value(int row)
    case kRowCandidates: snprintf(buf, sizeof(buf), "%d", g_cfg.candidates); return buf;
    case kRowResponse: return g_cfg.response == 0 ? "As Blood RT" : g_cfg.response == 2 ? "Instant (noisier)" : "Quick";
    case kRowFlicker: return g_cfg.flicker == 1 ? "As the game" : g_cfg.flicker == 2 ? "Nearly steady" : "Smoothed";
-   case kRowVolumetric: return g_cfg.volumetric ? "On" : "Off";
+   case kRowVolumetric:
+      return g_cfg.volumetric ? "Every light (costly)" : g_cfg.moonShafts ? (g_cfg.moon > 0.0f ? "Moonlight shafts" : "Moonlight shafts (moon off)") : "Off";
+   case kRowShafts: snprintf(buf, sizeof(buf), "%.2fx", g_cfg.shafts); return buf;
+   case kRowMoon:
+      if (g_cfg.moon <= 0.0f) return "Off";
+      snprintf(buf, sizeof(buf), "%.2fx", g_cfg.moon);
+      return buf;
+   case kRowMoonDir: {
+      static const char *kDirs[] = {"+x", "+x +y", "+y", "-x +y", "-x", "-x -y", "-y", "+x -y"};
+      snprintf(buf, sizeof(buf), "%d deg (from %s)", g_cfg.moonAzimuth, kDirs[((g_cfg.moonAzimuth + 22) / 45) % 8]);
+      return buf;
+   }
+   case kRowMoonHeight: snprintf(buf, sizeof(buf), "%d deg up", g_cfg.moonHeight); return buf;
+   case kRowDenoiser:
+      if (!g_cfg.mfxDenoise) return "Path tracer's own";
+      if (!metalfx_denoiser_available()) return "MetalFX (not on this Mac)";
+      if (g_cfg.upscale < 1 || g_cfg.upscale > 5) return "MetalFX (needs a MetalFX upscaler)";
+      return g_cfg.dynres > 0 ? "MetalFX (dynamic res. paused)" : "MetalFX";
    case kRowFog:
       return g_cfg.fog == 0 ? "Off" : g_cfg.fog == 1 ? "Light" : g_cfg.fog == 3 ? "Thick" : "As the mission";
    case kRowBloom: return g_cfg.bloom ? "On" : "Off";
@@ -3616,7 +3680,21 @@ void change_row(int row, int dir)
    }
    case kRowResponse: g_cfg.response = (g_cfg.response + dir + 3) % 3; break;
    case kRowFlicker: g_cfg.flicker = (g_cfg.flicker + dir + 3) % 3; break;
-   case kRowVolumetric: g_cfg.volumetric = !g_cfg.volumetric; break;
+   case kRowVolumetric: {
+      // off -> moonlight shafts -> every light
+      int m = g_cfg.volumetric ? 2 : g_cfg.moonShafts ? 1 : 0;
+      m = (m + dir + 3) % 3;
+      g_cfg.volumetric = m == 2;
+      g_cfg.moonShafts = m == 1;
+      break;
+   }
+   case kRowShafts: g_cfg.shafts = step_mul(g_cfg.shafts, dir, 0.25f, 8.0f); break;
+   case kRowMoon: g_cfg.moon = g_cfg.moon <= 0.0f && dir > 0 ? 0.25f
+                               : (g_cfg.moon <= 0.25f && dir < 0 ? 0.0f : step_mul(g_cfg.moon, dir, 0.25f, 8.0f));
+      break;
+   case kRowMoonDir: g_cfg.moonAzimuth = ((g_cfg.moonAzimuth / 15) * 15 + 15 * dir + 360) % 360; break;
+   case kRowMoonHeight: g_cfg.moonHeight = std::clamp((g_cfg.moonHeight / 5) * 5 + 5 * dir, 10, 90); break;
+   case kRowDenoiser: g_cfg.mfxDenoise = !g_cfg.mfxDenoise; break;
    case kRowFog: g_cfg.fog = (g_cfg.fog + dir + 4) % 4; break;
    case kRowBloom: g_cfg.bloom = !g_cfg.bloom; break;
    case kRowVsync: g_cfg.vsync = !g_cfg.vsync; break;
@@ -4221,6 +4299,13 @@ void draw_frame(bool sceneDrawn)
    // lamps, its few light samples a pixel were blotches the denoiser smeared
    // across the view.
    const bool waterHaze = g_underwater && g_cfg.underwaterHaze > 0.0f && !fogOn;
+   // god rays: the haze lit by the moon, where it comes in through the sky
+   const bool moonHaze = g_cfg.moonShafts && g_cfg.moon > 0.0f && !waterHaze;
+   if (moonHaze && !fogOn && !g_cfg.volumetric) {
+      // a night's thin haze, enough for a shaft under a window to show
+      // (6% scattered over the volume's 40 m), the rest of the view clear
+      volNear = volFarDens = 1.0f;
+   }
    if (waterHaze) {
       const float perMetre = 1.0f / (11.0f * g_cfg.underwaterClarity);
       volNear = perMetre / 0.00005f;   // (the simple volume's density is this x 0.00005)
@@ -4290,7 +4375,7 @@ void draw_frame(bool sceneDrawn)
       .pNext = &smoke,
       // RTGL1's default is on, with a bright ambient haze: costly, and it
       // greyed Thief's darkness. Optional, lit by the lamps when on.
-      .enable = g_cfg.volumetric || fogOn || waterHaze,
+      .enable = g_cfg.volumetric || moonHaze || fogOn || waterHaze,
       .maxHistoryLength = 8.0f,
       .useSimpleDepthBased = waterHaze,
       .volumetricFar = volFar,
@@ -4300,8 +4385,12 @@ void draw_frame(bool sceneDrawn)
       .useIlluminationVolume = false,
       .fallbackSourceColor = {{0, 0, 0}},
       .fallbackSourceDirection = {{0, 0, -1}},
-      .lightMultiplier = 1.0f,
-      .illuminateFromAllLights = true,
+      .lightMultiplier = g_cfg.volumetric || moonHaze ? g_cfg.shafts : 1.0f,
+      // God rays from the moon alone: the stock volume, one light (the
+      // directional one) and one shadow ray a cell -- the cheap way. Every
+      // light (or the mission's fog, lit by its lamps) runs each cell's
+      // whole light estimate.
+      .illuminateFromAllLights = !(moonHaze && !g_cfg.volumetric && !fogOn),
       .mediaColor = {{1.0f, 1.0f, 1.0f}},
       .mediaColorFar = {{1.0f, 1.0f, 1.0f}},
       .farScattering = volFarDens,
@@ -4438,11 +4527,14 @@ void draw_frame(bool sceneDrawn)
       .skyViewerPosition = {{0, 0, 0}},
       .pSkyCubemapTextureName = nullptr,
       .skyCubemapRotationTransform = {},
-      .sunRequireSky = 0.0f,
+      // the moon's light only where its ray reaches the sky (upload_world),
+      // and shaded on its own -- a faint light drawn by lot among the lamps
+      // won few pixels, its shadows sparse and smeared (RgDrawFrameSkyParams)
+      .sunRequireSky = g_cfg.moon > 0.0f ? 1.0f : 0.0f,
       .sunLeakDebug = 0.0f,
       .sunLeakDebugMul = 1.0f,
       .sunSkyProbeMaxDist = 10000.0f,
-      .sunSplit = 0.0f,
+      .sunSplit = g_cfg.moon > 0.0f ? 1.0f : 0.0f,
    };
    // the heat haze's shimmer (on while there are fires to shimmer over)
    RgPostEffectWaves heatHaze{};
@@ -6839,8 +6931,43 @@ void build_window_lights()
    fprintf(stderr, "RT: lit windows: %zu lights from %zu lit window textures\n", g_windowLights.size(), litTextures);
 }
 
+// The moon: one directional light, cool and faint, from where the panel says
+// (Thief's missions are nights; it lights what is open to the sky -- a
+// courtyard, a floor under a window -- and casts the window's shadow). Its
+// light counts only where its ray reaches a face of the sky (upload_world),
+// not where it found a way out of the level through a gap. Not in the light
+// gem's reckoning (gem_value: the mission's own lights).
+constexpr uint64_t kMoonLightId = 0x7f0000000ull;
+void upload_moon()
+{
+   if (g_cfg.moon <= 0.0f || !g_worldValid)
+      return;
+   const float az = float(g_cfg.moonAzimuth) * 0.0174533f, el = float(g_cfg.moonHeight) * 0.0174533f;
+   // (to the moon, in the map's axes, z up; the light travels the other way)
+   const float to[3] = {std::cos(el) * std::cos(az), std::cos(el) * std::sin(az), std::sin(el)};
+   auto moon = RgLightDirectionalEXT{
+      .sType = RG_STRUCTURE_TYPE_LIGHT_DIRECTIONAL_EXT,
+      .pNext = nullptr,
+      .color = pack_color(0.70f, 0.78f, 1.0f, 1.0f),
+      // lux: a quarter of what a fill light of the level's strength (a sphere
+      // gives its intensity / distance^2: 400 at 5 m, 16) gives a wall nearby
+      .intensity = 4.0f * g_cfg.moon * g_cfg.light,
+      .direction = {{-to[0], -to[1], -to[2]}},
+      .angularDiameterDegrees = 1.0f,
+   };
+   auto info = RgLightInfo{
+      .sType = RG_STRUCTURE_TYPE_LIGHT_INFO,
+      .pNext = &moon,
+      .uniqueID = kMoonLightId,
+      .isExportable = false,
+   };
+   if (rt.rgUploadLight(&info) == RG_RESULT_SUCCESS)
+      ++g_frameLights;
+}
+
 void flush_lights()
 {
+   upload_moon();
    if (g_freezeLights) {
       for (const PendingLight &L : g_frozenLights)
          upload_light(L);
