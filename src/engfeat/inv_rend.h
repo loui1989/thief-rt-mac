@@ -58,6 +58,7 @@ EXTERN void invRendSetView(invRendState* us, const sInvRendView * view);
 
 // Flush list of hardware rendered objects queued by calls to invRendDrawUpdate()
 EXTERN void invRendFlushQueue(void);
+EXTERN void invRendDescribe(const invRendState *us, char *buf, int size);
 
 // Free queue on mode changes
 EXTERN void invRendFreeQueue(void);

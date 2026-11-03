@@ -57,6 +57,12 @@
 #include <unordered_set>
 #include <vector>
 #include <dlfcn.h>
+#ifdef __APPLE__
+// (the Objective-C runtime, declared here: its headers' BOOL is not the engine's)
+extern "C" void *objc_getClass(const char *name);
+extern "C" void *sel_registerName(const char *name);
+extern "C" void objc_msgSend(void);
+#endif
 #include <limits.h>
 #include <sys/stat.h>
 #include <unistd.h>
@@ -3090,6 +3096,30 @@ int Draw(int primitive, const sRenderBackendVertex *v, int count, int canvasW, i
       return 1;
    if (g_inScene)
       return 1;   // the path-traced scene replaces lgd3d's screen-space view
+   // A model drawn on the screen (the HUD's item, the inventory wheel's
+   // pictures) comes a polygon at a time: each run of polygons alike in
+   // texture, blending and place is one draw, not hundreds.
+   if (!g_overlays.empty()) {
+      Overlay &last = g_overlays.back();
+      if (last.texture == g_bound[0] && last.blend == g_blend && last.canvasW == canvasW &&
+          last.canvasH == canvasH && last.viewport.x == viewport.x && last.viewport.y == viewport.y &&
+          last.viewport.w == viewport.w && last.viewport.h == viewport.h && count % 3 == 0 &&
+          last.verts.size() % 3 == 0) {
+         const size_t at = last.verts.size();
+         last.verts.resize(at + size_t(count));
+         for (int i = 0; i < count; ++i) {
+            RgPrimitiveVertex &d = last.verts[at + size_t(i)];
+            d = {};
+            d.position[0] = v[i].x;
+            d.position[1] = v[i].y;
+            d.position[2] = 0;
+            d.texCoord[0] = v[i].u0;
+            d.texCoord[1] = v[i].v0;
+            d.color = pack_color(v[i].r, v[i].g, v[i].b, v[i].a);
+         }
+         return 1;
+      }
+   }
    Overlay o;
    o.texture = g_bound[0];
    o.blend = g_blend;
@@ -3674,6 +3704,7 @@ struct Perf {
    std::map<std::string, double> clients;   // seconds in the window
    std::unordered_map<const char *, std::string> names;
    uint64_t models = 0, prims = 0, tris = 0, kept = 0, lights = 0;
+   uint64_t overlays = 0, overlayTris = 0;   // 2D draws after the view (lgd3d's), and their triangles
    double lastWait = 0, lastDraw = 0, lastCapture = 0, lastPrep = 0;
 } g_perf;
 
@@ -3827,6 +3858,27 @@ void perf_frame(double t)
       fprintf(f, "\n  scene per frame: %.0f models (%.0f kept out of view), %.0f primitives, %.0fk model triangles; world %u of %zu pieces traced; %.0f lights traced of %u\n",
               g_perf.models / n, g_perf.kept / n, g_perf.prims / n, g_perf.tris / n / 1000.0,
               g_worldShownGroups, g_world.size(), g_perf.lights / n, g_lightsTotal);
+      {
+         // the screen's own draws (HUD, inventory pictures), and how warm the Mac
+         // is: when it is too warm, or saving power, its GPU runs slower and
+         // every pass of the frame takes longer, for the same scene
+         static const char *kThermal[] = {"normal", "fair (warm)", "serious (slowed for heat)", "critical"};
+         long thermal = -1;
+         bool lowPower = false;
+#ifdef __APPLE__
+         using Msg = void *(*)(void *, void *);
+         void *cls = objc_getClass("NSProcessInfo");
+         void *pi = cls ? reinterpret_cast<Msg>(objc_msgSend)(cls, sel_registerName("processInfo")) : nullptr;
+         if (pi) {
+            thermal = reinterpret_cast<long (*)(void *, void *)>(objc_msgSend)(pi, sel_registerName("thermalState"));
+            lowPower = reinterpret_cast<bool (*)(void *, void *)>(objc_msgSend)(pi, sel_registerName("isLowPowerModeEnabled"));
+         }
+#endif
+         fprintf(f, "  2D after the view per frame: %.0f draws, %.1fk triangles; Mac's heat: %s%s\n",
+                 g_perf.overlays / n, g_perf.overlayTris / n / 1000.0,
+                 thermal >= 0 && thermal <= 3 ? kThermal[thermal] : "unknown",
+                 lowPower ? "; Low Power Mode on" : "");
+      }
       const CaptureParts &cp = g_capParts;
       fprintf(f, "  capture parts (ms per frame): draws %.2f (%.0f calls), models' ends %.2f, given to the path tracer: lights %.2f, world %.2f, models %.2f; "
                  "of these, faces made steady %.2f, matched to last frame %.2f (%.0f models captured anew; %.1f taken as unchanged to within 2 mm)\n",
@@ -3866,6 +3918,7 @@ void perf_frame(double t)
    g_objCost.clear();
    g_uploadLibrarySecs = 0;
    g_perf.models = g_perf.prims = g_perf.tris = g_perf.kept = g_perf.lights = 0;
+   g_perf.overlays = g_perf.overlayTris = 0;
    g_perf.windowStart = t;
 }
 
@@ -4443,7 +4496,9 @@ void Present(int drawableWidth, int drawableHeight, bool vsync)
 
    // lgd3d's 2D draws after the main view
    uint64_t id = 0x200000000ull;
+   g_perf.overlays += g_overlays.size();
    for (Overlay &o : g_overlays) {
+      g_perf.overlayTris += o.verts.size() / 3;
       upload_2d(id++, o.verts.data(), uint32_t(o.verts.size()), texture_name(o.texture),
                 o.blend != kRenderBackendBlendOpaque || (o.texture && o.texture->hasAlpha),
                 o.canvasW, o.canvasH, o.viewport);

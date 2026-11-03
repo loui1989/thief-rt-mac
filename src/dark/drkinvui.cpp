@@ -142,6 +142,10 @@ static BOOL gInvRadialMouse = FALSE;
 static float gInvRadialCursor[2] = {0.0f, 0.0f};
 // each slot's picture: its object's model, as the HUD shows the one in hand
 static invRendState* gInvRadialRend[INV_RADIAL_STICK_COUNT][INV_RADIAL_MAX_ENTRIES];
+// what each slot's picture is, written to the log the first time the wheel
+// opens with these contents (thief.log, "inventory wheel:")
+static BOOL gInvRadialLogged = FALSE;
+static int gInvRadialLoggedCount[INV_RADIAL_STICK_COUNT] = {-1, -1};
 
 static void radial_free_pictures(void)
 {
@@ -983,6 +987,13 @@ static void radial_build(void)
          ring.entries[ring.count++] = obj;
    }
    pContainSys->IterEnd(iter);
+   // (logged again only when what is carried has changed in number)
+   if (gInvRadial[0].count != gInvRadialLoggedCount[0] || gInvRadial[1].count != gInvRadialLoggedCount[1])
+   {
+      gInvRadialLogged = FALSE;
+      gInvRadialLoggedCount[0] = gInvRadial[0].count;
+      gInvRadialLoggedCount[1] = gInvRadial[1].count;
+   }
 
    gInvRadial[0].current = radial_find(gInvRadial[0],
       pInventory->Selection(kCurrentWeapon));
@@ -1575,6 +1586,14 @@ static void render_radial_ring(int stick, const sInvRadialRing& ring, int center
          rend = invRendBuildState(flags, obj, &r, NULL);
       if (rend)
          invRendDrawUpdate(rend);
+      if (!gInvRadialLogged)
+      {
+         char what[160];
+         invRendDescribe(rend, what, sizeof(what));
+         cStr name = get_object_name(obj);
+         fprintf(stderr, "inventory wheel: %s %d %d \"%s\": %s\n", stick ? "item" : "weapon", i, obj,
+                 (const char *)name, what);
+      }
    }
 
    for (int i = 0; i < ring.count; ++i)
@@ -1659,6 +1678,7 @@ static void render_radial_menu(void)
                       radius, gInvRadialMouse ? "WEAPONS" : "WEAPONS - LEFT STICK", "NO WEAPON");
    render_radial_ring(1, gInvRadial[1], width * 7 / 10, height / 2,
                       radius, gInvRadialMouse ? "ITEMS" : "ITEMS - RIGHT STICK", "NO ITEM");
+   gInvRadialLogged = TRUE;
    if (gInvRadialMouse)
    {
       // the mouse's cursor: point toward a slot in either ring, let go

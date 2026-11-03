@@ -20,6 +20,7 @@
 #include <mdutil.h>
 #include <matrix.h>
 #include <mlight.h>
+#include <stdio.h>
 #include <string.h>
 #include <lgd3d.h>
 #include <scrnman.h>
@@ -521,9 +522,30 @@ void invRendUpdateState(invRendState *us, int flags, ObjID o_id, const Rect *r, 
    }
 }
 
-#define QUEUE_SIZE 25
+// (25 in the original: the HUD's three and a little; the inventory wheel
+// draws a picture for each thing carried, both rings at once)
+#define QUEUE_SIZE 96
 static invRendState *objQueue[QUEUE_SIZE];
 static int numObjs=0;
+
+// what a state will draw, in words (for the inventory wheel's log)
+void invRendDescribe(const invRendState *us, char *buf, int size)
+{
+   if (!buf || size <= 0)
+      return;
+   if (!us)
+      snprintf(buf, size, "no state");
+   else if (us->flags & INVREND_MODEL)
+      snprintf(buf, size, "model %d%s (%s)", us->model_idx,
+               objmodelGetModelType(us->model_idx) == OM_TYPE_MD ? "" : ", not an md model: not drawn",
+               us->rendtype.type == kInvRenderModel ? us->rendtype.resource.text
+               : us->rendtype.type == kInvRenderDefault ? "its own" : "?");
+   else if (us->flags & INVREND_BITMAP)
+      snprintf(buf, size, "picture %s", us->rendtype.resource.text);
+   else
+      snprintf(buf, size, "nothing to draw (type %d \"%s\")", us->rendtype.type,
+               us->rendtype.type == kInvRenderDefault ? "" : us->rendtype.resource.text);
+}
 
 ///////////////////
 // draw/update control
@@ -536,7 +558,9 @@ void invRendDrawUpdate(invRendState *us)
       case INVREND_HARDWARE_QUEUE|INVREND_MODEL:
          // queue object for hardware accelerated rendering...
          if (numObjs >= QUEUE_SIZE) {
-            Warning(("invRendDrawUpdate(): too many objects to queue.\n"));
+            static int s_told = 0;
+            if ((s_told++ % 600) == 0)
+               fprintf(stderr, "inventory pictures: more than %d in a frame, the rest not drawn\n", QUEUE_SIZE);
          } else if (us->back_buffer != NULL) {
             Warning(("Can't hardware accelerate object rendered off screen.\n"));
          } else {
