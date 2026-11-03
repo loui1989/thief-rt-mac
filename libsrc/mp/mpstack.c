@@ -158,11 +158,19 @@ void mp_evaluate_motion(multiped * mp, mps_motion_node * m, quat * rot,
          // so a motion captured at 15 or 30 frames a second held each pose
          // for two to four frames drawn at 60 and jumped to the next -- the
          // characters' jerky animation.
-         fframe = m->frame;
-         if (fframe < 0.0f)
-            fframe = 0.0f;
-         if (fframe > (float)motion->info.num_frames - 1.0f)
-            fframe = (float)motion->info.num_frames - 1.0f;
+         // Only a captured motion: a virtual one (the player's arm, its bow's
+         // draw) has no frames of its own (num_frames -1) and counts its time
+         // by the whole frame, as before -- clamped to its "last frame" it
+         // was held at -2, and the bow never drew.
+         fframe = (float)frame;
+         if (motion->info.type == MT_CAPTURE && motion->info.num_frames > 0)
+         {
+            fframe = m->frame;
+            if (fframe < 0.0f)
+               fframe = 0.0f;
+            if (fframe > (float)motion->info.num_frames - 1.0f)
+               fframe = (float)motion->info.num_frames - 1.0f;
+         }
       }
 	
       // Go get the rotation and translational data of the specified motion.

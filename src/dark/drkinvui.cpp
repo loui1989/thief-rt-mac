@@ -49,6 +49,7 @@
 #include <fonrstyp.h>
 #include <respaths.h>
 #include <scrnman.h>
+#include <timer.h>
 #include <drkvo.h>
 #include <propface.h>
 #include <propman.h>
@@ -1579,13 +1580,29 @@ static void render_radial_ring(int stick, const sInvRadialRing& ring, int center
       const int y = centerY + (int)(sin(angle) * radius);
       const int half = (i == ring.selected ? pic * 6 / 5 : pic) / 2;
       Rect r = {{(short)(x - half), (short)(y - half)}, {(short)(x + half), (short)(y + half)}};
-      const ulong flags = INVREND_SET | INVREND_HARDWARE_QUEUE | (i == ring.selected ? INVREND_ROTATE : 0);
+      const ulong flags = INVREND_SET | INVREND_HARDWARE_QUEUE;
       if (rend)
          invRendUpdateState(rend, flags, obj, &r, NULL);
       else
          rend = invRendBuildState(flags, obj, &r, NULL);
       if (rend)
+      {
+         // Seen from the side, not along its length: the inventory camera
+         // sits on the model's x axis, which is an arrow's (and a sword's)
+         // length -- an arrow not turning was a dot. Weapons lie across
+         // the slot's diagonal, the longest line it has. The picked one
+         // sways to and fro (never turning end on) rather than spinning.
+         sInvRendView view;
+         invRendGetView(rend, &view);
+         int turn = 0x3800;
+         if (i == ring.selected)
+            turn += (int)(sin(tm_get_millisec_unrecorded() * 0.0025) * 0x1400);
+         view.off_ang.tz = (mxs_ang)turn;
+         view.off_ang.ty = (mxs_ang)0xf000;
+         view.off_ang.tx = (mxs_ang)(stick == 0 ? 0x2000 : 0);
+         invRendSetView(rend, &view);
          invRendDrawUpdate(rend);
+      }
       if (!gInvRadialLogged)
       {
          char what[160];
@@ -1596,21 +1613,44 @@ static void render_radial_ring(int stick, const sInvRadialRing& ring, int center
       }
    }
 
+   // each slot framed (the picked one brighter, doubled, a line to it from
+   // the middle stopping at its frame) and, for a stack, how many: the
+   // pictures stand apart from the scene behind them, arrows told apart by
+   // count as well as by head
+   cAutoIPtr<IIntProperty> pStackProp(pContainSys->StackCountProp());
    for (int i = 0; i < ring.count; ++i)
    {
       const double angle = twoPi * i / ring.count - twoPi / 4.0;
       const int x = centerX + (int)(cos(angle) * radius);
       const int y = centerY + (int)(sin(angle) * radius);
-      if (i == ring.selected)
+      const BOOL picked = i == ring.selected;
+      const int half = (ring.entries[i] == OBJ_NULL ? pic / 3 : (picked ? pic * 6 / 5 : pic) / 2);
+      gr_set_fcolor(picked ? bright : (i == ring.current ? fg : dim));
+      gr_box(x - half, y - half, x + half, y + half);
+      if (picked)
       {
-         gr_set_fcolor(bright);
-         gr_rect(x - 5, y - 5, x + 5, y + 5);
-         gr_int_line(centerX, centerY, x, y);
+         gr_box(x - half - 2, y - half - 2, x + half + 2, y + half + 2);
+         const double reach = radius - half * 1.42 - 2;
+         if (reach > 4)
+            gr_int_line(centerX, centerY, centerX + (int)(cos(angle) * reach),
+                        centerY + (int)(sin(angle) * reach));
       }
-      else
+      if (ring.entries[i] == OBJ_NULL)
       {
-         gr_set_fcolor(i == ring.current ? fg : dim);
-         gr_box(x - 3, y - 3, x + 3, y + 3);
+         // the empty slot (nothing in hand): a cross
+         gr_int_line(x - half / 2, y - half / 2, x + half / 2, y + half / 2);
+         gr_int_line(x - half / 2, y + half / 2, x + half / 2, y - half / 2);
+         continue;
+      }
+      int cnt = 0;
+      if (pStackProp && pStackProp->Get(ring.entries[i], &cnt) && cnt > 1)
+      {
+         char buf[16];
+         short w, h;
+         sprintf(buf, "%d", cnt);
+         gr_string_size(buf, &w, &h);
+         gr_set_fcolor(picked ? bright : fg);
+         gr_string(buf, x + half - w - 2, y + half - h - 1);
       }
    }
 
