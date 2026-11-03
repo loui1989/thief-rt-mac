@@ -361,10 +361,11 @@ public:
       kFogToggle,
 	  kWeatherToggle,
 	  kSkyDetail,
+      kRendererToggle,
       kGammaSliderRect,
       kGammaSliderText,
-      kNumBasicVideoButts = 5,
-      kNumBasicVideoRects = 7,
+      kNumBasicVideoButts = 6,
+      kNumBasicVideoRects = 8,
 
       //audio buttons/rects
       kSpeakerTest = kGammaSliderText + 1,
@@ -538,7 +539,7 @@ protected:
       //load in the tab and subpanel rectangles
       AppendRects ("optiontr", mTabRects);//tabs
       AppendRects ("optioncr", mSubPanelRects);//controls
-      AppendRects ("optnbvr", mSubPanelRects);//basic video
+      AppendVideoRects ();//basic video
       AppendRects ("optionar", mSubPanelRects);//audio
       AppendRects ("optiongr", mSubPanelRects);//game
       AppendRects ("optionbr", mSubPanelRects);//bindings
@@ -884,6 +885,8 @@ protected:
 
       SetUIString (mSubPanelStrs[(int)kSkyDetail], mSubPanelElems[(int)kSkyDetail], "videob_3",
          (char *)(const char *)mMiscStrs[(SkyRendererTryEnhanced()) ? kMiscStrHigh : kMiscStrLow]);
+
+      SetRendererString ();
    }
 
    //////////////////////////////////////////////////////
@@ -1570,6 +1573,89 @@ protected:
 
    //////////////////////////////////////////////////////
 
+   // The basic video page's rectangles. Its layout (optnbvr) has Thief 2's
+   // count or Thief Gold's -- Gold's had no Sky Detail, and the page after it
+   // (its gamma slider, the audio page) took the wrong rectangles, one along.
+   // Made here from its first button and its slider: six buttons, evenly
+   // spaced (display mode, resolution, fog, weather, sky detail, renderer),
+   // then the gamma slider and its text below them.
+   void AppendVideoRects ()
+   {
+      cRectArray file;
+      FetchUIRects ("optnbvr", file, mResPath);
+      const long n = file.Size ();
+      Rect made[kNumBasicVideoRects];
+      if (n < 3) {
+         // (no layout: the old way, whatever it holds)
+         AppendRects ("optnbvr", mSubPanelRects);
+         return;
+      }
+      const Rect first = file[0];
+      const short h = first.lr.y - first.ul.y;
+      const short step = h + 3;
+      for (int i = 0; i < kNumBasicVideoButts; i++) {
+         made[i] = first;
+         made[i].ul.y = first.ul.y + i * step;
+         made[i].lr.y = made[i].ul.y + h;
+      }
+      // the slider and its text, as the file has them, moved down below
+      const short below = made[kNumBasicVideoButts - 1].lr.y + 6;
+      Rect slider = file[n - 2], text = file[n - 1];
+      const short gap = text.ul.y - slider.lr.y;
+      const short sh = slider.lr.y - slider.ul.y, th = text.lr.y - text.ul.y;
+      slider.ul.y = below;
+      slider.lr.y = below + sh;
+      text.ul.y = slider.lr.y + gap;
+      text.lr.y = text.ul.y + th;
+      made[kNumBasicVideoButts] = slider;
+      made[kNumBasicVideoButts + 1] = text;
+      const long old = mSubPanelRects.Size ();
+      mSubPanelRects.SetSize (old + kNumBasicVideoRects);
+      for (int i = 0; i < kNumBasicVideoRects; i++)
+         mSubPanelRects[old + i] = made[i];
+   }
+
+   //////////////////////////////////////////////////////
+
+   // The renderer, for the next start: the path tracer or OpenGL (run.sh
+   // reads renderer.txt next to the rt folder; it cannot change while the
+   // game runs, the two draw through different graphics systems).
+   static const char *RendererFile ()
+   {
+      static char path[1024];
+      const char *rt = getenv ("THIEF_RT_DIR");
+      snprintf (path, sizeof(path), "%s/../renderer.txt", rt && *rt ? rt : "rt");
+      return path;
+   }
+
+   static BOOL RendererNextIsGL ()
+   {
+      FILE *f = fopen (RendererFile (), "r");
+      if (!f) {
+         const char *v = getenv ("THIEF_RT");
+         return !v || *v == '0';   // as it is now
+      }
+      char buf[16] = "";
+      fgets (buf, sizeof(buf), f);
+      fclose (f);
+      return strncmp (buf, "gl", 2) == 0;
+   }
+
+   void SetRendererString ()
+   {
+      const char *v = getenv ("THIEF_RT");
+      const BOOL nowGL = !v || *v == '0';
+      const BOOL nextGL = RendererNextIsGL ();
+      cStr &str = mSubPanelStrs[(int)kRendererToggle];
+      str = "Renderer: ";
+      str += nextGL ? "OpenGL" : "Path tracer";
+      if (nextGL != nowGL)
+         str += " (next start)";
+      mSubPanelElems[(int)kRendererToggle].draw_data = (void *)(const char *)str;
+   }
+
+   //////////////////////////////////////////////////////
+
    void AppendRects (const char *rect_file, cRectArray &old_rects)
    {
       long old_sz, tmp_sz;
@@ -1952,6 +2038,19 @@ protected:
             FillBlack ((int)kWeatherToggle);
 	    //tell anything that wants it that the sky is on here.
             RedrawDisplay ();
+         break;
+
+         case kRendererToggle:
+         {
+            const BOOL gl = !RendererNextIsGL ();
+            if (FILE *f = fopen (RendererFile (), "w")) {
+               fputs (gl ? "gl\n" : "rt\n", f);
+               fclose (f);
+            }
+            SetRendererString ();
+            FillBlack ((int)kRendererToggle);
+            RedrawDisplay ();
+         }
          break;
 
          case kSkyDetail:
