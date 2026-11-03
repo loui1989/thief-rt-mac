@@ -1172,8 +1172,34 @@ std::unordered_map<uint32_t, int> g_lightOwnerKind;
 // Each light's brightness this frame and the most it has had, and the lights
 // an object owns (its own Light/AnimLight): a lamp's glow follows its own
 // light -- off with it, dimmed and flickering with it.
-struct LightState { float now = 0.0f, most = 0.0f; uint32_t frame = 0; float pos[3] = {0, 0, 0}; bool flameOut = false; };
+struct LightState {
+   float now = 0.0f, most = 0.0f; uint32_t frame = 0; float pos[3] = {0, 0, 0}; bool flameOut = false;
+   // going off and on again, and when (flicker, not a dousing: light_flickers)
+   bool off = false;
+   double toggles[6] = {};
+   int toggleNext = 0;
+};
 std::unordered_map<uint32_t, LightState> g_lightState;
+double now_seconds();
+// A light the game turns fully off and on again and again -- a gas lantern's
+// flicker (Black Parade's: off for 60 ms, on for 60, all the time): off and on
+// three times in the last 3 s. Not a light put out: kept in the traced set
+// while off (its flicker eased as any other's, smooth_flicker), and no
+// "light event" -- each off had the denoiser let go of what it had gathered
+// over the whole screen for 10 frames, so near such a lantern it never
+// settled: the crawl and flicker everywhere round it.
+bool light_flickers(uint32_t id)
+{
+   auto it = g_lightState.find(id);
+   if (it == g_lightState.end() || it->second.flameOut)
+      return false;
+   const double t = now_seconds();
+   int n = 0;
+   for (double at : it->second.toggles)
+      if (at > 0.0 && t - at < 3.0)
+         ++n;
+   return n >= 3;
+}
 std::unordered_map<uint32_t, std::vector<uint32_t>> g_ownedLights;
 // a light's flame: the particle group whose flame was seen at it (a candle's
 // light, often a plain static one the game never turns off when the candle
@@ -6672,6 +6698,12 @@ void RenderRTLight(uint32_t id, const float pos[3], const float rgb[3], float ra
       ls->second.flameOut = false;
    {
       LightState &s = g_lightState[id];
+      const bool offNow = peak <= 0.5f;
+      if (s.frame != 0 && offNow != s.off) {
+         s.toggles[s.toggleNext] = now_seconds();
+         s.toggleNext = (s.toggleNext + 1) % 6;
+      }
+      s.off = offNow;
       memcpy(s.pos, pos, sizeof(s.pos));
       s.now = peak;
       s.most = std::max(s.most, peak);
@@ -6691,7 +6723,8 @@ void RenderRTLight(uint32_t id, const float pos[3], const float rgb[3], float ra
       if (it == s_last.end() || std::fabs(it->second - peak) >= 1.0f)
          s_last[id] = peak;
    }
-   if (peak <= 0.5f) {
+   // (a flickering one stays, at its brightness now -- naught while off: eased)
+   if (peak <= 0.5f && !light_flickers(id)) {
       PendingLight d;
       d.id = id;
       memcpy(d.pos, pos, sizeof(d.pos));
@@ -7016,8 +7049,9 @@ void smooth_flicker()
       const float before = std::max({st[0], st[1], st[2]});
       if (std::fabs(L.peak - before) > 0.05f * std::max(before, 1.0f))
          ++s_changing;
-      // put out (a torch doused): no easing, it goes dark at once
-      const float b = L.peak < 0.15f * before ? 1.0f : a;
+      // put out (a torch doused): no easing, it goes dark at once (not a
+      // lantern's flicker going off: light_flickers)
+      const float b = (L.peak < 0.15f * before && !light_flickers(L.id)) ? 1.0f : a;
       for (int k = 0; k < 3; ++k) {
          st[k] += (L.rgb[k] - st[k]) * b;
          L.rgb[k] = st[k];
@@ -7532,8 +7566,8 @@ void flush_lights()
       for (const PendingLight &L : g_pendingLights) {
          auto it = s_fade.find(L.id);
          if (it == s_fade.end()) {
-            if (!first && s_dimBefore.count(L.id))
-               g_lightEventFrames = 10;   // lit in the game
+            if (!first && s_dimBefore.count(L.id) && !light_flickers(L.id))
+               g_lightEventFrames = 10;   // lit in the game (not a flicker's coming on)
             it = s_fade.emplace(L.id, (first || s_dimBefore.count(L.id)) ? 1.0f : 0.0f).first;
          }
          it->second = std::min(1.0f, it->second + step);
@@ -7548,7 +7582,7 @@ void flush_lights()
          }
          float &f = s_fade[id];
          // out in the game (or gone): not faded, the ghost below takes it
-         if (dim.count(id))
+         if (dim.count(id) && !light_flickers(id))
             g_lightEventFrames = 10;   // put out in the game
          if (dim.count(id) || !offered.count(id) || g_cfg.reach > 0 || (f -= step) <= 0.0f) {
             s_fade.erase(id);
