@@ -168,6 +168,17 @@ float SkyRendererGetSkyIntensity(mxs_vector *pDir)
    return SkyRenderer.GetSkyIntensity(pDir);
 }
 
+// the first of the mission's celestial objects (its moon), for the path
+// tracer's moonlight
+BOOL SkyRendererGetCelestialDir(float dir[3])
+{
+   if (!SkyRendererUseEnhanced())
+      return FALSE;
+   return CelestialObjectRenderer1.GetDirection(dir) ||
+          CelestialObjectRenderer2.GetDirection(dir) ||
+          CelestialObjectRenderer3.GetDirection(dir);
+}
+
 float SkyRendererGetSkyDist(mxs_vector *pDir)
 {
    return SkyRenderer.GetSkyDist(pDir);

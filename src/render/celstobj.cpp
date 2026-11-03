@@ -262,6 +262,23 @@ void cCelestialObject::AppInit()
 }
 
 
+// Where the object sits in the sky: its centre, as Init places it (the
+// mission's latitude down from the zenith, then its longitude round z).
+BOOL cCelestialObject::GetDirection(float dir[3])
+{
+   mxs_vector ZVec = {0,0,1};
+   mxs_vector TempVec, CenterVec;
+
+   if (!pCelestialObj || !pCelestialObj->bUseCelestialObject)
+      return FALSE;
+   mx_rot_y_vec(&TempVec, &ZVec, mx_rad2ang(pCelestialObj->fLatAng*DEG));
+   mx_rot_z_vec(&CenterVec, &TempVec, mx_rad2ang(pCelestialObj->fLongAng*DEG));
+   dir[0] = CenterVec.x;
+   dir[1] = CenterVec.y;
+   dir[2] = CenterVec.z;
+   return TRUE;
+}
+
 // We make this 256 just in case texture is wrong. Really, we only use the first 16
 static ushort AlphaTable[256] =
 {

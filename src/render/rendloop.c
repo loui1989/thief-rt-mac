@@ -422,6 +422,57 @@ static void composite(float *alpha, uchar *rgb, float under_alpha, const uchar *
 extern BOOL (*pSkyRenderCallback)(void);
 
 // This is so we can draw the new sky, if specified.
+// The enhanced sky for the path tracer: one face of a cube round the viewer
+// a frame, drawn by the sky's own renderer into a square canvas at 90
+// degrees, its polygons handed to the path tracer (RenderRTSkyFaceBegin),
+// which keeps each face's and gives them to its sky. Turned the six ways of
+// a cube: the four round, up and down.
+extern void lgd3d_render_flush(void);
+static void rt_capture_sky_face(void)
+{
+   static grs_canvas *s_canvas = NULL;
+   static int s_size = 0;
+   static const mxs_angvec kFaceAng[6] = {
+      {0, 0, 0}, {0, 0, 0x4000}, {0, 0, 0x8000}, {0, 0, 0xc000},
+      {0, 0x4000, 0}, {0, 0xc000, 0},
+   };
+   mxs_vector zero = {0, 0, 0};
+   mxs_vector vecs[4];
+   mxs_angvec ang;
+   float corners[12];
+   int i, face, size;
+
+   face = RenderRTSkyFaceWanted();
+   if (face < 0 || face > 5)
+      return;
+   size = RenderRTSkyFaceSize();
+   if (!s_canvas || s_size != size) {
+      if (s_canvas)
+         gr_free_canvas(s_canvas);
+      s_canvas = gr_alloc_canvas(grd_canvas->bm.type, size, size);
+      s_size = size;
+      if (!s_canvas)
+         return;
+   }
+   ang = kFaceAng[face];
+   gr_push_canvas(s_canvas);
+   r3_start_frame();
+   r3_set_view_angles(&zero, &ang, R3_DEFANG);
+   r3_get_view_pyr_vecs(vecs);
+   for (i = 0; i < 4; ++i) {
+      corners[i * 3 + 0] = vecs[i].x;
+      corners[i * 3 + 1] = vecs[i].y;
+      corners[i * 3 + 2] = vecs[i].z;
+   }
+   lgd3d_set_offsets(0, 0);
+   RenderRTSkyFaceBegin(face, corners);
+   SkyRendererRender();
+   lgd3d_render_flush();
+   RenderRTSkyFaceEnd();
+   r3_end_frame();
+   gr_pop_canvas();
+}
+
 // return FALSE if new-style sky is NOT to be rendered, and old one should be used.
 static BOOL RenderNewSky(void)
 {
@@ -473,6 +524,10 @@ void cam_render_scene(Position *pos, float zoom)
 
    if ((GetSkyMode() == kSkyModeStars) && !SkyRendererUseEnhanced())
       starfield_startframe(pos, zoom);
+
+   // (the path tracer's sky, drawn by the game: outside the main view)
+   if (RenderRTActive() && SkyRendererUseEnhanced())
+      rt_capture_sky_face();
 
    rendobj_init_frame();
    pSkyRenderCallback = RenderNewSky;

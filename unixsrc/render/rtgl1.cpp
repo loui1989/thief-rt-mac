@@ -59,6 +59,7 @@
 #include <dlfcn.h>
 extern "C" int GetSkyMode(void);              // render.cpp: 0 textures, 1 stars
 extern "C" int SkyRendererUseEnhanced(void);  // skyrend.cpp: the clouds-and-moon sky
+extern "C" int SkyRendererGetCelestialDir(float dir[3]);   // and where its moon is
 #ifdef __APPLE__
 // (the Objective-C runtime, declared here: its headers' BOOL is not the engine's)
 extern "C" void *objc_getClass(const char *name);
@@ -126,7 +127,7 @@ struct Settings {
    bool moonShafts = false;   // god rays: the haze lit by the moon alone (cheap), when volumetric is off
    float shafts = 1.0f;       // god rays' strength (the haze's light, times this)
    float moon = 1.0f;         // moonlight through the sky's openings, times its base (0 off)
-   int moonAzimuth = 225;     // where the moon is, degrees round from the map's +x
+   int moonAzimuth = -1;      // where the moon is, degrees round from the map's +x (-1: the sky's moon)
    int moonHeight = 50;       // and how high, degrees over the horizon
    bool mfxDenoise = false;   // MetalFX's denoising upscaler in place of the path tracer's denoiser
    int fog = 2;               // the mission's fog: 0 off, 1 light, 2 as the mission, 3 thick
@@ -219,7 +220,7 @@ void load_settings()
       else if (k == "moon_shafts") g_cfg.moonShafts = value != 0;
       else if (k == "god_ray_strength") g_cfg.shafts = std::clamp(value, 0.1f, 8.0f);
       else if (k == "moon") g_cfg.moon = std::clamp(value, 0.0f, 8.0f);
-      else if (k == "moon_azimuth") g_cfg.moonAzimuth = ((int(value) % 360) + 360) % 360;
+      else if (k == "moon_azimuth") g_cfg.moonAzimuth = value < 0 ? -1 : int(value) % 360;
       else if (k == "moon_height") g_cfg.moonHeight = std::clamp(int(value), 10, 90);
       else if (k == "metalfx_denoiser") g_cfg.mfxDenoise = value != 0;
       else if (k == "fog") g_cfg.fog = std::clamp(int(value), 0, 3);
@@ -1204,6 +1205,30 @@ struct Overlay {
    darkrt::Rect viewport;
 };
 std::vector<Overlay> g_overlays;
+
+// The mission's enhanced sky (clouds, stars, moon), as the game draws it: one
+// face of a cube round the viewer a frame (rendloop.c rt_capture_sky_face),
+// each face's polygons put back in 3D round the origin -- their screen
+// points turned to directions by the face's view pyramid, out to the depth
+// they were drawn at -- and given to the path tracer as its rasterized sky.
+constexpr int kSkyFaceSize = 1024;
+struct SkyDraw {
+   RtTexture *tex = nullptr;
+   uint32_t serial = 0;   // the texture's, when drawn (a handle is reused)
+   int blend = 0;
+   std::vector<RgPrimitiveVertex> verts;
+};
+struct SkyCapture {
+   int face = -1;
+   float ul[3] = {}, right[3] = {}, down[3] = {};
+} g_skyCap;
+std::vector<SkyDraw> g_skyFaces[6];
+unsigned g_skyFacesSeen = 0;   // a bit for each face drawn since the world came
+int g_skyNextFace = 0;
+uint32_t g_skyWorldSerial = ~0u;
+size_t g_skyTris = 0;
+bool sky_ready();
+void upload_sky();
 
 std::unordered_map<uint32_t, uint32_t> g_primitiveCounters;
 
@@ -3151,9 +3176,86 @@ void SetBlend(int mode) { g_blend = mode; }
 void SetAlphaTest(int enabled) { g_alphaTest = enabled != 0; }
 void SetFog(int, uint32_t) {}
 
+// a sky face's polygons (or points: stars), back in 3D (see g_skyFaces)
+void sky_capture(int primitive, const sRenderBackendVertex *v, int count)
+{
+   const SkyCapture &c = g_skyCap;
+   const float S = float(kSkyFaceSize);
+   auto at = [&](float x, float y, float rhw, float out[3]) {
+      // (r3_get_view_vec: a screen point's direction, linear across the face)
+      const float a = x / S, b = y / S;
+      const float z = rhw > 1e-9f ? 1.0f / rhw : 1e6f;
+      for (int k = 0; k < 3; ++k)
+         out[k] = (c.ul[k] + c.right[k] * a + c.down[k] * b) * z;
+   };
+   auto vert = [&](const sRenderBackendVertex &q, const float p[3], float uOff, float vOff) {
+      RgPrimitiveVertex d{};
+      d.position[0] = p[0];
+      d.position[1] = p[1];
+      d.position[2] = p[2];
+      d.texCoord[0] = q.u0 + uOff;
+      d.texCoord[1] = q.v0 + vOff;
+      // (an opaque draw's alpha means nothing to lgd3d; here it blends)
+      d.color = pack_color(q.r, q.g, q.b, g_blend == kRenderBackendBlendOpaque ? 1.0f : q.a);
+      return d;
+   };
+   std::vector<SkyDraw> &face = g_skyFaces[c.face];
+   if (face.empty() || face.back().tex != g_bound[0] || face.back().blend != g_blend) {
+      face.emplace_back();
+      face.back().tex = g_bound[0];
+      face.back().serial = g_bound[0] ? g_bound[0]->serial : 0;
+      face.back().blend = g_blend;
+   }
+   std::vector<RgPrimitiveVertex> &out = face.back().verts;
+   // Each triangle scaled as a whole to 100 m at its farthest: the same
+   // directions and the same perspective across it, inside the camera's reach.
+   auto triangle = [&](const sRenderBackendVertex *q[3], const float p[3][3]) {
+      float far = 0.0f;
+      for (int i = 0; i < 3; ++i)
+         far = std::max(far, std::sqrt(p[i][0] * p[i][0] + p[i][1] * p[i][1] + p[i][2] * p[i][2]));
+      if (far <= 0.0f)
+         return;
+      const float k = 100.0f / far;
+      for (int i = 0; i < 3; ++i) {
+         const float s[3] = {p[i][0] * k, p[i][1] * k, p[i][2] * k};
+         out.push_back(vert(*q[i], s, 0.0f, 0.0f));
+      }
+      ++g_skyTris;
+   };
+   if (primitive == kRenderBackendTriangles) {
+      for (int i = 0; i + 2 < count; i += 3) {
+         const sRenderBackendVertex *q[3] = {&v[i], &v[i + 1], &v[i + 2]};
+         float p[3][3];
+         for (int j = 0; j < 3; ++j)
+            at(q[j]->x, q[j]->y, q[j]->rhw, p[j]);
+         triangle(q, p);
+      }
+   } else if (primitive == kRenderBackendPoints) {
+      // a star: a little square, a pixel and a half across on its face
+      for (int i = 0; i < count; ++i) {
+         const sRenderBackendVertex &q = v[i];
+         const float h = 0.75f;
+         float p[4][3];
+         at(q.x - h, q.y - h, q.rhw, p[0]);
+         at(q.x + h, q.y - h, q.rhw, p[1]);
+         at(q.x + h, q.y + h, q.rhw, p[2]);
+         at(q.x - h, q.y + h, q.rhw, p[3]);
+         const sRenderBackendVertex *qq[3] = {&q, &q, &q};
+         const float t0[3][3] = {{p[0][0], p[0][1], p[0][2]}, {p[1][0], p[1][1], p[1][2]}, {p[2][0], p[2][1], p[2][2]}};
+         const float t1[3][3] = {{p[0][0], p[0][1], p[0][2]}, {p[2][0], p[2][1], p[2][2]}, {p[3][0], p[3][1], p[3][2]}};
+         triangle(qq, t0);
+         triangle(qq, t1);
+      }
+   }
+}
+
 int Draw(int primitive, const sRenderBackendVertex *v, int count, int canvasW, int canvasH,
          const Rect &viewport)
 {
+   if (g_active && v && g_skyCap.face >= 0) {
+      sky_capture(primitive, v, count);
+      return 1;
+   }
    if (!g_active || !v || count < 3 || primitive != kRenderBackendTriangles)
       return 1;
    if (g_inScene)
@@ -3497,11 +3599,22 @@ std::string row_value(int row)
       snprintf(buf, sizeof(buf), "%.2fx", g_cfg.moon);
       return buf;
    case kRowMoonDir: {
+      if (g_cfg.moonAzimuth < 0) {
+         float d[3];
+         return SkyRendererGetCelestialDir(d) ? "Where the sky's moon is" : "The sky's moon (none: 225 deg)";
+      }
       static const char *kDirs[] = {"+x", "+x +y", "+y", "-x +y", "-x", "-x -y", "-y", "+x -y"};
       snprintf(buf, sizeof(buf), "%d deg (from %s)", g_cfg.moonAzimuth, kDirs[((g_cfg.moonAzimuth + 22) / 45) % 8]);
       return buf;
    }
-   case kRowMoonHeight: snprintf(buf, sizeof(buf), "%d deg up", g_cfg.moonHeight); return buf;
+   case kRowMoonHeight:
+      if (g_cfg.moonAzimuth < 0) {
+         float d[3];
+         if (SkyRendererGetCelestialDir(d))
+            return "As the sky's moon";
+      }
+      snprintf(buf, sizeof(buf), "%d deg up", g_cfg.moonHeight);
+      return buf;
    case kRowFog:
       return g_cfg.fog == 0 ? "Off" : g_cfg.fog == 1 ? "Light" : g_cfg.fog == 3 ? "Thick" : "As the mission";
    case kRowBloom: return g_cfg.bloom ? "On" : "Off";
@@ -3696,7 +3809,13 @@ void change_row(int row, int dir)
    case kRowMoon: g_cfg.moon = g_cfg.moon <= 0.0f && dir > 0 ? 0.25f
                                : (g_cfg.moon <= 0.25f && dir < 0 ? 0.0f : step_mul(g_cfg.moon, dir, 0.25f, 8.0f));
       break;
-   case kRowMoonDir: g_cfg.moonAzimuth = ((g_cfg.moonAzimuth / 15) * 15 + 15 * dir + 360) % 360; break;
+   case kRowMoonDir: {
+      // the sky's moon, then 0, 15 ... 345 degrees
+      int i = g_cfg.moonAzimuth < 0 ? 0 : g_cfg.moonAzimuth / 15 + 1;
+      i = (i + dir + 25) % 25;
+      g_cfg.moonAzimuth = i == 0 ? -1 : (i - 1) * 15;
+      break;
+   }
    case kRowMoonHeight: g_cfg.moonHeight = std::clamp((g_cfg.moonHeight / 5) * 5 + 5 * dir, 10, 90); break;
    case kRowFog: g_cfg.fog = (g_cfg.fog + dir + 4) % 4; break;
    case kRowBloom: g_cfg.bloom = !g_cfg.bloom; break;
@@ -4523,7 +4642,8 @@ void draw_frame(bool sceneDrawn)
    auto sky = RgDrawFrameSkyParams{
       .sType = RG_STRUCTURE_TYPE_DRAW_FRAME_SKY_PARAMS,
       .pNext = &tonemap,
-      .skyType = RG_SKY_TYPE_COLOR,
+      // the mission's enhanced sky, once all six faces have been drawn
+      .skyType = sky_ready() ? RG_SKY_TYPE_RASTERIZED_GEOMETRY : RG_SKY_TYPE_COLOR,
       .skyColorDefault = {{0.035f, 0.045f, 0.075f}},
       .skyColorMultiplier = g_cfg.sky,
       .skyColorSaturation = 1.0f,
@@ -5543,6 +5663,7 @@ void RenderRTSceneEnd(void)
       PartTimer t(g_capParts.models);
       upload_objects();
    }
+   upload_sky();
    // the material maps being made (texture_name), now and then
    if ((g_frameNumber & 63) == 0) {
       static size_t s_reported = 0;
@@ -5561,6 +5682,53 @@ void RenderRTSceneEnd(void)
 }
 
 int RenderRTCaptureDraws(void) { return g_inScene ? 1 : 0; }
+
+int RenderRTSkyFaceWanted(void)
+{
+   if (!g_active || !g_worldValid || g_inScene)
+      return -1;
+   if (g_skyWorldSerial != g_worldSerial) {
+      // a new mission (or its world again): its sky drawn anew, face by face
+      g_skyWorldSerial = g_worldSerial;
+      for (auto &f : g_skyFaces)
+         f.clear();
+      g_skyFacesSeen = 0;
+      g_skyNextFace = 0;
+   }
+   return g_skyNextFace;
+}
+
+int RenderRTSkyFaceSize(void) { return kSkyFaceSize; }
+
+void RenderRTSkyFaceBegin(int face, const float corners[12])
+{
+   if (face < 0 || face > 5)
+      return;
+   SkyCapture &c = g_skyCap;
+   for (int k = 0; k < 3; ++k) {
+      c.ul[k] = corners[k];
+      c.right[k] = corners[3 + k] - corners[k];
+      c.down[k] = corners[9 + k] - corners[k];
+   }
+   g_skyFaces[face].clear();
+   g_skyTris = 0;
+   c.face = face;
+}
+
+void RenderRTSkyFaceEnd(void)
+{
+   const int face = g_skyCap.face;
+   g_skyCap.face = -1;
+   if (face < 0)
+      return;
+   if (!(g_skyFacesSeen & (1u << face))) {
+      fprintf(stderr, "RT: sky face %d: %zu draws, %zu triangles\n", face, g_skyFaces[face].size(), g_skyTris);
+      if ((g_skyFacesSeen | (1u << face)) == 0x3fu)
+         fprintf(stderr, "RT: the mission's sky is the path tracer's\n");
+   }
+   g_skyFacesSeen |= 1u << face;
+   g_skyNextFace = (face + 1) % 6;
+}
 
 int RenderRTSuppressCapture(int suppress)
 {
@@ -6940,14 +7108,89 @@ void build_window_lights()
 // light counts only where its ray reaches a face of the sky (upload_world),
 // not where it found a way out of the level through a gap. Not in the light
 // gem's reckoning (gem_value: the mission's own lights).
+// the enhanced sky's faces, as last drawn, to the path tracer's rasterized sky
+// (drawn from the origin: RgDrawFrameSkyParams.skyViewerPosition). All
+// translucent, so they are laid down in the game's order, each over the last,
+// as it drew them with the depth test off; an additive draw (a glow) adds.
+bool sky_ready() { return g_skyFacesSeen == 0x3fu && SkyRendererUseEnhanced(); }
+void upload_sky()
+{
+   if (!sky_ready())
+      return;
+   for (int f = 0; f < 6; ++f) {
+      uint64_t k = 0;
+      for (const SkyDraw &d : g_skyFaces[f]) {
+         ++k;
+         if (d.verts.empty())
+            continue;
+         // a texture since destroyed (its handle reused): not drawn
+         if (d.tex && d.tex->serial != d.serial)
+            continue;
+         const bool additive = d.blend == kRenderBackendBlendAdd;
+         auto prim = RgMeshPrimitiveInfo{
+            .sType = RG_STRUCTURE_TYPE_MESH_PRIMITIVE_INFO,
+            .pNext = nullptr,
+            .flags = RG_MESH_PRIMITIVE_SKY | RG_MESH_PRIMITIVE_TRANSLUCENT,
+            .primitiveIndexInMesh = 0,
+            .pVertices = d.verts.data(),
+            .vertexCount = uint32_t(d.verts.size()),
+            .pIndices = nullptr,
+            .indexCount = 0,
+            .pTextureName = texture_name(d.tex),
+            .textureFrame = 0,
+            .color = pack_color(1, 1, 1, 1),
+            // (translucent and emissive: the rasterizer's additive blend)
+            .emissive = additive ? 1.0f : 0.0f,
+            .classicLight = 1.0f,
+            .emissiveGi = 0.0f,
+         };
+         upload(0x380000000ull + uint64_t(f) * 0x100000ull + k, prim);
+      }
+   }
+}
+
 constexpr uint64_t kMoonLightId = 0x7f0000000ull;
+// where the mission's sky has its moon (its first celestial object), kept
+// at least 10 degrees over the horizon (a moon set lights nothing)
+bool moon_from_sky(float to[3])
+{
+   float d[3];
+   if (!SkyRendererGetCelestialDir(d))
+      return false;
+   const float flat = std::sqrt(d[0] * d[0] + d[1] * d[1]);
+   const float minUp = 0.1736f;   // sin 10 degrees
+   const float l = std::sqrt(flat * flat + d[2] * d[2]);
+   if (l < 1e-4f)
+      return false;
+   float up = d[2] / l;
+   if (up < minUp) {
+      if (flat < 1e-4f)
+         return false;
+      const float c = std::sqrt(1.0f - minUp * minUp);
+      to[0] = d[0] / flat * c;
+      to[1] = d[1] / flat * c;
+      to[2] = minUp;
+      return true;
+   }
+   to[0] = d[0] / l;
+   to[1] = d[1] / l;
+   to[2] = up;
+   return true;
+}
+
 void upload_moon()
 {
    if (g_cfg.moon <= 0.0f || !g_worldValid)
       return;
-   const float az = float(g_cfg.moonAzimuth) * 0.0174533f, el = float(g_cfg.moonHeight) * 0.0174533f;
    // (to the moon, in the map's axes, z up; the light travels the other way)
-   const float to[3] = {std::cos(el) * std::cos(az), std::cos(el) * std::sin(az), std::sin(el)};
+   float to[3];
+   if (!(g_cfg.moonAzimuth < 0 && moon_from_sky(to))) {
+      const int azDeg = g_cfg.moonAzimuth < 0 ? 225 : g_cfg.moonAzimuth;
+      const float az = float(azDeg) * 0.0174533f, el = float(g_cfg.moonHeight) * 0.0174533f;
+      to[0] = std::cos(el) * std::cos(az);
+      to[1] = std::cos(el) * std::sin(az);
+      to[2] = std::sin(el);
+   }
    auto moon = RgLightDirectionalEXT{
       .sType = RG_STRUCTURE_TYPE_LIGHT_DIRECTIONAL_EXT,
       .pNext = nullptr,

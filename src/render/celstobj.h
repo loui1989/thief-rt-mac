@@ -37,6 +37,8 @@ public:
    virtual void Init();
    virtual void Term();
    virtual void Render();
+   // where it is in the sky (a unit vector, z up), if the mission has it
+   BOOL GetDirection(float dir[3]);
 
 private:
    void SetDefaults();

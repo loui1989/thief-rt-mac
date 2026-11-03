@@ -18,6 +18,7 @@ EXTERN void SkyRendererRender();
 EXTERN BOOL SkyRendererTryEnhanced();
 EXTERN void SkyRendererSetEnhanced(BOOL enhance);
 EXTERN BOOL SkyRendererUseEnhanced();
+EXTERN BOOL SkyRendererGetCelestialDir(float dir[3]);
 EXTERN float SkyRendererGetHorizonDip();
 EXTERN float SkyRendererGetSkyIntensity(mxs_vector *pDir);
 EXTERN float SkyRendererGetSkyDist(mxs_vector *pDir);

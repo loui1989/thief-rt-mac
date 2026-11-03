@@ -147,6 +147,18 @@ void RenderRTLight(uint32_t id, const float pos[3], const float rgb[3],
 // walk: metres from the camera walking through the openings, -1 beyond reach,
 // -2 not known (the light is in no cell)
 
+// The mission's enhanced sky (clouds, stars, moon) for the path tracer: the
+// game draws it, one face a frame, into the six faces of a cube round the
+// viewer (rendloop.c), and the path tracer keeps what each face drew.
+// RenderRTSkyFaceWanted: the face to draw now (0-5), or -1; its canvas is
+// RenderRTSkyFaceSize() square. corners: the face's view pyramid, world
+// space (r3_get_view_pyr_vecs: upper left, upper right, lower right, lower
+// left), so each screen point drawn is a direction again.
+int RenderRTSkyFaceWanted(void);
+int RenderRTSkyFaceSize(void);
+void RenderRTSkyFaceBegin(int face, const float corners[12]);
+void RenderRTSkyFaceEnd(void);
+
 #ifdef __cplusplus
 }
 #endif
