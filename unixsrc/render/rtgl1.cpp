@@ -6741,8 +6741,6 @@ void build_window_lights()
    g_windowLitTextures = litTextures;
    g_windowWorldSerial = g_worldSerial;
    g_windowLights.clear();
-   float behindSum = 0.0f;   // stained glass: how far behind its windows their lights went
-   int behindCount = 0;
    struct Window { float c[3], n[3], area; };
    for (const WorldGroup &g : g_world) {
       if (g.flags & (kRenderRTWorldSky | kRenderRTWorldWater))
@@ -6786,41 +6784,9 @@ void build_window_lights()
             continue;
          PendingLight L{};
          // (a little in front of the pane, out of the wall's shadow; stained
-         // glass's well behind it, as Blood RT's 0.75 m outside: 6 cm behind,
-         // a light of 4-8 cm saw the window through a different pane from
-         // each of its points -- the pattern on the floor 70 times its size
-         // and in noise, crawling. As far back as there is room, to 0.75 m.)
-         float back = 0.3f;
-         bool wb = behind;   // this window's light behind it
-         if (wb) {
-            ensure_world_bvh();
-            const float d[3] = {-w.n[0], -w.n[1], -w.n[2]};
-            float o[3];
-            for (int k = 0; k < 3; ++k)
-               o[k] = w.c[k] - w.n[k] * 0.045f;   // (past its glass copy)
-            float lo = 0.0f, hi = 0.75f;
-            if (g_worldBvh.blocked(o, d, hi))
-               for (int it = 0; it < 7; ++it) {
-                  const float mid = 0.5f * (lo + hi);
-                  if (g_worldBvh.blocked(o, d, mid))
-                     hi = mid;
-                  else
-                     lo = mid;
-               }
-            else
-               lo = hi;
-            back = 0.045f + 0.8f * lo;
-            // (with next to no room behind it -- a thin wall -- the one
-            // colour in front, as without: right behind the glass it crawled)
-            if (lo < 0.15f)
-               wb = false;
-            else {
-               behindSum += back;
-               ++behindCount;
-            }
-         }
+         // glass's behind it, behind its glass copy, inside the wall)
          for (int k = 0; k < 3; ++k) {
-            L.pos[k] = (w.c[k] + w.n[k] * (wb ? -back : 0.3f)) / kMetersPerUnit;
+            L.pos[k] = (w.c[k] + w.n[k] * (behind ? -0.06f : 0.3f)) / kMetersPerUnit;
             L.dir[k] = w.n[k];
          }
          // a fill light's strength (Dark's 20-60) for a pane of a square metre or two
@@ -6832,22 +6798,15 @@ void build_window_lights()
          static const float kPale[3] = {0.92f, 0.95f, 1.0f};
          (void)0;
          for (int k = 0; k < 3; ++k)
-            L.rgb[k] = (wb ? kPale[k] : t.paneRgb[k]) * L.peak;
+            L.rgb[k] = (behind ? kPale[k] : t.paneRgb[k]) * L.peak;
          L.inner = 0.6f;    // ~53 degrees: full strength
          L.outer = 0.08f;   // ~85 degrees: out to the wall it is in
          L.radius = 0;
          L.size = std::clamp(0.35f * std::sqrt(w.area), 0.12f, 0.6f);
          // (stained glass's small: a big source blurred the lead's lines out
          // of the pattern, and reached past the glass into the room)
-         if (wb) {
-            // small for its distance (the lead's lines sharp), its cone just
-            // the window (none of it spent on the inside of the wall)
-            L.size = std::clamp(0.06f * back, 0.006f, 0.045f);
-            const float half = 0.5f * std::sqrt(w.area);
-            const float ang = std::atan2(half, back);
-            L.inner = std::cos(std::min(ang, 1.3f));
-            L.outer = std::cos(std::min(ang + 0.25f, 1.45f));
-         }
+         if (behind)
+            L.size = 0.08f;
          uint32_t h = 2166136261u;
          for (int k = 0; k < 3; ++k)
             h = (h ^ uint32_t(int32_t(std::lround(w.c[k] * 20.0f)))) * 16777619u;
@@ -6855,11 +6814,7 @@ void build_window_lights()
          g_windowLights.push_back(L);
       }
    }
-   fprintf(stderr, "RT: lit windows: %zu lights from %zu lit window textures", g_windowLights.size(), litTextures);
-   if (behindCount)
-      fprintf(stderr, "; %d of them stained glass, lit from behind (%.2f m on average)", behindCount,
-              behindSum / float(behindCount));
-   fprintf(stderr, "\n");
+   fprintf(stderr, "RT: lit windows: %zu lights from %zu lit window textures\n", g_windowLights.size(), litTextures);
 }
 
 void flush_lights()
