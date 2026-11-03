@@ -110,6 +110,8 @@ struct Settings {
    float spriteGlow = 1.0f;   // flame sprites' glow (their emission maps)
    float gemMatch = 10.0f;    // feet from a light (of the level's strength) past which the light
                               // gem follows the traced light's 1/distance^2, not the game's 1/distance
+   float gemScale = 1.0f;     // the light gem's (and the guards') reading of the traced light, times this
+   float gemEase = 0.2f;      // seconds the light gem takes to follow a change of light (0 at once)
    bool materials = true;     // material maps made from the textures (rt_materials.h)
    float bump = 1.0f;         // their bumps' strength
    float parallax = 0.03f;    // parallax depth, in texture widths (0 off)
@@ -201,6 +203,8 @@ void load_settings()
       else if (k == "fixture_light") g_cfg.fixtureLight = std::clamp(value, 0.25f, 6.0f);
       else if (k == "small_lamps") g_cfg.smallLamps = std::clamp(value, 1.0f, 6.0f);
       else if (k == "gem_match_ft") g_cfg.gemMatch = std::clamp(value, 0.0f, 100.0f);
+      else if (k == "gem_scale") g_cfg.gemScale = std::clamp(value, 0.1f, 10.0f);
+      else if (k == "gem_ease_s") g_cfg.gemEase = std::clamp(value, 0.0f, 2.0f);
       else if (k == "sprite_glow") g_cfg.spriteGlow = std::clamp(value, 0.0f, 10.0f);
       else if (k == "gi") g_cfg.gi = std::clamp(int(value), 0, 3);
       else if (k == "volumetric") g_cfg.volumetric = value != 0;
@@ -275,6 +279,8 @@ void save_settings()
    fprintf(f, "window_light = %.2f\n", g_cfg.windowLight);
    fprintf(f, "small_lamps = %.2f\n", g_cfg.smallLamps);
    fprintf(f, "gem_match_ft = %.1f\n", g_cfg.gemMatch);
+   fprintf(f, "gem_scale = %.3f\n", g_cfg.gemScale);
+   fprintf(f, "gem_ease_s = %.2f\n", g_cfg.gemEase);
    fclose(f);
 }
 
@@ -3374,14 +3380,14 @@ const char *kUpscaleNames[] = {"Off",
 
 enum UiRow {
    kRowUpscale, kRowScale, kRowOutput, kRowDynres, kRowBounces, kRowReach, kRowLights, kRowLightFade, kRowCandidates, kRowLightCull, kRowResponse, kRowFlicker, kRowVolumetric, kRowFog, kRowBloom, kRowVsync, kRowFrameCap,
-   kRowFps, kRowDetection, kRowLight, kRowExposure, kRowAmbient, kRowSky, kRowLightSize, kRowRough, kRowSmooth, kRowSteady, kRowFixtures, kRowFixtureLight, kRowSmallLamps, kRowLightFix, kRowGlow, kRowFlameGlow, kRowMaterials, kRowBump, kRowCrevice, kRowParallax, kRowPolish, kRowWater,
+   kRowFps, kRowDetection, kRowGemScale, kRowGemMatch, kRowGemEase, kRowLight, kRowExposure, kRowAmbient, kRowSky, kRowLightSize, kRowRough, kRowSmooth, kRowSteady, kRowFixtures, kRowFixtureLight, kRowSmallLamps, kRowLightFix, kRowGlow, kRowFlameGlow, kRowMaterials, kRowBump, kRowCrevice, kRowParallax, kRowPolish, kRowWater,
    kRowDebug, kRowFreeze, kRowBackFaces, kRowReuse, kRowBlink, kRowPerf, kRowInspect, kRowReset, kRowCount
 };
 
 const char *kRowLabels[kRowCount] = {
    "Upscaler", "Render resolution", "Output resolution", "Dynamic resolution", "Bounce light", "Light reach", "Lights traced",
    "Lights coming into range", "Lights tried per pixel", "Lights behind walls", "Light changes", "Light flicker",
-   "Volumetric light", "Mission fog", "Bloom", "VSync", "Frame rate limit", "FPS counter", "Light gem and guards", "Light brightness", "Darkest exposure", "Ambient light", "Sky brightness",
+   "Volumetric light", "Mission fog", "Bloom", "VSync", "Frame rate limit", "FPS counter", "Light gem and guards", "  Light gem brightness", "  Light gem falloff", "  Light gem response", "Light brightness", "Darkest exposure", "Ambient light", "Sky brightness",
    "Light size (soft shadows)", "Surface roughness", "Model shading", "Model faces", "Torches and lamps", "Lamp and torch light", "Lamp reach", "Lights in walls", "Lamp glow", "Flame glow", "Materials", "Bumps", "Crevices", "Parallax depth", "Polished reflections", "Water",
    "Debug view", "Freeze scene (test)", "Back faces (test)", "Light sampling (test)", "Blink nearest light (test)", "Performance log", "Inspect centre of view", "Reset to defaults",
 };
@@ -3435,6 +3441,21 @@ std::string row_value(int row)
    case kRowFps: return g_cfg.fps ? "On" : "Off";
    case kRowLight: snprintf(buf, sizeof(buf), "%.2fx", g_cfg.light); return buf;
    case kRowDetection: return g_cfg.rtDetection ? "See the ray-traced light" : "Original lighting";
+   case kRowGemScale:
+      // with what it reads now (and what the game's own lighting would say)
+      if (g_noteTraced >= 0 && g_cfg.rtDetection)
+         snprintf(buf, sizeof(buf), "%.2fx  (now %.2f, game %.2f)", g_cfg.gemScale, g_noteTraced, g_noteOriginal);
+      else
+         snprintf(buf, sizeof(buf), "%.2fx%s", g_cfg.gemScale, g_cfg.rtDetection ? "" : "  (needs the row above)");
+      return buf;
+   case kRowGemMatch:
+      if (g_cfg.gemMatch <= 0.0f) return "As the game (1/distance)";
+      snprintf(buf, sizeof(buf), "as the screen past %.0f ft", g_cfg.gemMatch);
+      return buf;
+   case kRowGemEase:
+      if (g_cfg.gemEase <= 0.0f) return "Instant";
+      snprintf(buf, sizeof(buf), "%.2f s", g_cfg.gemEase);
+      return buf;
    case kRowExposure:
       snprintf(buf, sizeof(buf), "EV %d%s", g_cfg.evMin, g_cfg.evMin == 5 ? " (Blood RT)" : g_cfg.evMin == 0 ? " (brightest)" : "");
       return buf;
@@ -3602,6 +3623,16 @@ void change_row(int row, int dir)
    case kRowFps: g_cfg.fps = !g_cfg.fps; break;
    case kRowLight: g_cfg.light = step_mul(g_cfg.light, dir, 0.05f, 20.0f); break;
    case kRowDetection: g_cfg.rtDetection = !g_cfg.rtDetection; break;
+   case kRowGemScale:
+      // fine steps, for matching the gem to what the screen shows
+      g_cfg.gemScale = std::clamp(std::round(g_cfg.gemScale * 20.0f) / 20.0f + 0.05f * dir, 0.1f, 4.0f);
+      break;
+   case kRowGemMatch:
+      g_cfg.gemMatch = std::clamp(std::round(g_cfg.gemMatch / 2.0f) * 2.0f + 2.0f * dir, 0.0f, 60.0f);
+      break;
+   case kRowGemEase:
+      g_cfg.gemEase = std::clamp(std::round(g_cfg.gemEase * 20.0f) / 20.0f + 0.05f * dir, 0.0f, 1.0f);
+      break;
    case kRowExposure: g_cfg.evMin = std::clamp(g_cfg.evMin + dir, 0, 7); break;
    case kRowAmbient: g_cfg.ambient = g_cfg.ambient <= 0.0f && dir > 0 ? 0.25f
                                     : (g_cfg.ambient <= 0.25f && dir < 0 ? 0.0f
@@ -5314,7 +5345,7 @@ int RenderRTPointLighting(const float pos[3], float *value)
       *value = s_value;
       return 1;
    }
-   float total = gem_value(pos, nullptr);
+   float total = gem_value(pos, nullptr) * g_cfg.gemScale;
    {
       // eased over a moment (about a fifth of a second either way), as the
       // eye takes in a change of light: stepping out of a shadow lights the
@@ -5328,10 +5359,10 @@ int RenderRTPointLighting(const float pos[3], float *value)
       s_t = now;
       const float dx = pos[0] - s_easedAt[0], dy = pos[1] - s_easedAt[1], dz = pos[2] - s_easedAt[2];
       memcpy(s_easedAt, pos, sizeof(s_easedAt));
-      if (s_eased < 0.0f || dt > 0.5f || dx * dx + dy * dy + dz * dz > 100.0f)
+      if (s_eased < 0.0f || dt > 0.5f || dx * dx + dy * dy + dz * dz > 100.0f || g_cfg.gemEase <= 0.0f)
          s_eased = total;
       else
-         s_eased += (total - s_eased) * std::min(1.0f, dt / 0.2f);
+         s_eased += (total - s_eased) * std::min(1.0f, dt / g_cfg.gemEase);
       total = s_eased;
    }
    memcpy(g_gemPos, pos, sizeof(g_gemPos));
