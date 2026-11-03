@@ -1230,7 +1230,9 @@ unsigned g_skyFacesSeen = 0;   // a bit for each face drawn since the world came
 int g_skyNextFace = 0;
 uint32_t g_skyWorldSerial = ~0u;
 size_t g_skyTris = 0;
-float g_skyScale = 0.0f;   // one scale for every face's points (to ~100 m), so shared corners stay shared
+float g_skyScale = 0.0f;
+float g_skyBackdrop[3] = {0, 0, 0};   // the opaque layers' average colour (behind all)
+double g_skyBackSum[4] = {0, 0, 0, 0};   // one scale for every face's points (to ~100 m), so shared corners stay shared
 bool sky_ready();
 void upload_sky();
 
@@ -3221,11 +3223,29 @@ void sky_capture(int primitive, const sRenderBackendVertex *v, int count)
       ++g_skyTris;
    };
    if (primitive == kRenderBackendTriangles) {
+      // The opaque layers (the dome's bands) grown a pixel on their face, so
+      // neighbouring bands overlap: where they met, the path tracer's sky had
+      // hairline gaps that kept the screen's older pixels (dark dots in rows,
+      // left on the screen as it turned). (Not the see-through layers: their
+      // overlap would show as lines.)
+      const bool grow = g_blend == kRenderBackendBlendOpaque;
       for (int i = 0; i + 2 < count; i += 3) {
          const sRenderBackendVertex *q[3] = {&v[i], &v[i + 1], &v[i + 2]};
          float p[3][3];
-         for (int j = 0; j < 3; ++j)
-            at(q[j]->x, q[j]->y, q[j]->rhw, p[j]);
+         const float cx = (q[0]->x + q[1]->x + q[2]->x) / 3.0f, cy = (q[0]->y + q[1]->y + q[2]->y) / 3.0f;
+         for (int j = 0; j < 3; ++j) {
+            float x = q[j]->x, y = q[j]->y;
+            if (grow) {
+               const float dx = x - cx, dy = y - cy, l = std::sqrt(dx * dx + dy * dy);
+               if (l > 1e-3f)
+                  x += dx / l * 1.0f, y += dy / l * 1.0f;
+               g_skyBackSum[0] += q[j]->r;
+               g_skyBackSum[1] += q[j]->g;
+               g_skyBackSum[2] += q[j]->b;
+               g_skyBackSum[3] += 1.0;
+            }
+            at(x, y, q[j]->rhw, p[j]);
+         }
          triangle(q, p);
       }
    } else if (primitive == kRenderBackendPoints) {
@@ -5700,6 +5720,8 @@ int RenderRTSkyFaceWanted(void)
       g_skyFacesSeen = 0;
       g_skyNextFace = 0;
       g_skyScale = 0.0f;
+      for (double &x : g_skyBackSum)
+         x = 0.0;
    }
    return g_skyNextFace;
 }
@@ -7137,6 +7159,49 @@ void upload_sky()
 {
    if (!sky_ready())
       return;
+   {
+      // the backdrop: a cube round the viewer in the dome's colour, under all
+      // the rest, so a gap anywhere shows sky, not the screen's old pixels
+      if (g_skyBackSum[3] > 0.0)
+         for (int k = 0; k < 3; ++k)
+            g_skyBackdrop[k] = float(g_skyBackSum[k] / g_skyBackSum[3]);
+      static RgPrimitiveVertex box[36];
+      const uint32_t c = pack_color(g_skyBackdrop[0], g_skyBackdrop[1], g_skyBackdrop[2], 1.0f);
+      const float R = 150.0f;
+      static const int faces[6][4][3] = {
+         {{1, -1, -1}, {1, 1, -1}, {1, 1, 1}, {1, -1, 1}},     {{-1, 1, -1}, {-1, -1, -1}, {-1, -1, 1}, {-1, 1, 1}},
+         {{1, 1, -1}, {-1, 1, -1}, {-1, 1, 1}, {1, 1, 1}},     {{-1, -1, -1}, {1, -1, -1}, {1, -1, 1}, {-1, -1, 1}},
+         {{-1, -1, 1}, {1, -1, 1}, {1, 1, 1}, {-1, 1, 1}},     {{-1, 1, -1}, {1, 1, -1}, {1, -1, -1}, {-1, -1, -1}},
+      };
+      int n = 0;
+      for (const auto &f : faces) {
+         const int order[6] = {0, 1, 2, 0, 2, 3};
+         for (int o : order) {
+            RgPrimitiveVertex &d = box[n++];
+            d = {};
+            for (int k = 0; k < 3; ++k)
+               d.position[k] = float(f[o][k]) * R;
+            d.color = c;
+         }
+      }
+      auto prim = RgMeshPrimitiveInfo{
+         .sType = RG_STRUCTURE_TYPE_MESH_PRIMITIVE_INFO,
+         .pNext = nullptr,
+         .flags = RG_MESH_PRIMITIVE_SKY | RG_MESH_PRIMITIVE_TRANSLUCENT,
+         .primitiveIndexInMesh = 0,
+         .pVertices = box,
+         .vertexCount = 36,
+         .pIndices = nullptr,
+         .indexCount = 0,
+         .pTextureName = nullptr,
+         .textureFrame = 0,
+         .color = pack_color(1, 1, 1, 1),
+         .emissive = 0.0f,
+         .classicLight = 1.0f,
+         .emissiveGi = 0.0f,
+      };
+      upload(0x37ffff000ull, prim);
+   }
    for (int f = 0; f < 6; ++f) {
       uint64_t k = 0;
       for (const SkyDraw &d : g_skyFaces[f]) {
