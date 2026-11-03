@@ -4585,7 +4585,11 @@ void draw_frame(bool sceneDrawn)
       .directDiffuseSensitivityToChange = (g_cfg.response == 0 && !lightEvent) ? 0.5f : 1.0f,
       .indirectDiffuseSensitivityToChange = lightEvent || g_cfg.response == 2 ? 1.0f : g_cfg.response == 1 ? 0.6f : 0.2f,
       .specularSensitivityToChange = lightEvent || g_cfg.response == 2 ? 1.0f : g_cfg.response == 1 ? 0.8f : 0.3f,
-      .polygonalLightSpotlightFactor = 2.0f,
+      // The sky as seen, apart from its light, the mission's own sky only (the
+      // plain colour stays as it was): rt/bin/shaders storeSky takes it from
+      // this field, which nothing else reads (no shader; the Metal backend
+      // only copies it), times this.
+      .polygonalLightSpotlightFactor = sky_ready() ? std::clamp(g_cfg.skySeen / std::max(g_cfg.sky, 0.05f), 0.01f, 2000.0f) : 1.0f,
       .lightUniqueIdIgnoreFirstPersonViewerShadows = nullptr,
       .enableRrTemporalPrefilter = false,
       .rrFireflyThreshold = 0.0f,
@@ -4688,12 +4692,9 @@ void draw_frame(bool sceneDrawn)
       // won few pixels, its shadows sparse and smeared (RgDrawFrameSkyParams)
       .sunRequireSky = g_cfg.moon > 0.0f ? 1.0f : 0.0f,
       .sunLeakDebug = 0.0f,
-      // The sky as seen, apart from its light, the mission's own sky only (the
-      // plain colour stays as it was): its boost in this field's whole part,
-      // 1000 + 100 x the boost (rt/bin/shaders storeSky). Its fraction stays
-      // 0: Raze's glass reflection cap reads it (RtRaygenReflRefr).
-      .sunLeakDebugMul = sky_ready() ? 1000.0f + std::round(std::clamp(g_cfg.skySeen / std::max(g_cfg.sky, 0.05f), 0.01f, 2000.0f) * 100.0f)
-                                     : 1.0f,
+      // (Raze's shaders read this for their debug views of the lights and
+      // their glass reflection cap: kept as it was)
+      .sunLeakDebugMul = 1.0f,
       .sunSkyProbeMaxDist = 10000.0f,
       .sunSplit = g_cfg.moon > 0.0f ? 1.0f : 0.0f,
    };
