@@ -121,6 +121,7 @@ struct Settings {
    float parallax = 0.03f;    // parallax depth, in texture widths (0 off)
    bool polish = true;        // polished surfaces mirror the room
    float crevice = 0.6f;      // joints and cracks darkened in the textures' colour
+   int texDetail = 1;         // textures' (and their bump maps') sharpness: 0 sharpest, 1 balanced, 2 steady
    int water = 0;             // 0 translucent (as the game), 1 RTGL1 water, 2 opaque
    int gi = 0;                // bounce light: 0 two bounces at half rate (as Blood RT),
                               // 1 one bounce, 2 two bounces, 3 one bounce at half rate
@@ -231,6 +232,7 @@ void load_settings()
       else if (k == "parallax") g_cfg.parallax = std::clamp(value, 0.0f, 0.1f);
       else if (k == "polish") g_cfg.polish = value != 0;
       else if (k == "crevice") g_cfg.crevice = std::clamp(value, 0.0f, 1.0f);
+      else if (k == "texture_detail") g_cfg.texDetail = std::clamp(int(value), 0, 2);
       else if (k == "settings_version") version = int(value);
       else if (k == "dynres") g_cfg.dynres = std::clamp(int(value), 0, 240);
       else if (k == "reach") g_cfg.reach = std::clamp(int(value), 0, 90);
@@ -298,6 +300,7 @@ void save_settings()
    fprintf(f, "gem_match_ft = %.1f\n", g_cfg.gemMatch);
    fprintf(f, "gem_scale = %.3f\n", g_cfg.gemScale);
    fprintf(f, "sky_seen = %.2f\n", g_cfg.skySeen);
+   fprintf(f, "texture_detail = %d\n", g_cfg.texDetail);
    fprintf(f, "moon_shafts = %d\ngod_ray_strength = %.2f\nmoon = %.2f\nmoon_azimuth = %d\nmoon_height = %d\nmetalfx_denoiser = %d\n",
            int(g_cfg.moonShafts), g_cfg.shafts, g_cfg.moon, g_cfg.moonAzimuth, g_cfg.moonHeight, int(g_cfg.mfxDenoise));
    fprintf(f, "gem_ease_s = %.2f\n", g_cfg.gemEase);
@@ -3566,7 +3569,7 @@ const char *kUpscaleNames[] = {"Off",
 
 enum UiRow {
    kRowUpscale, kRowScale, kRowOutput, kRowDynres, kRowBounces, kRowReach, kRowLights, kRowLightFade, kRowCandidates, kRowLightCull, kRowResponse, kRowFlicker, kRowVolumetric, kRowShafts, kRowFog, kRowBloom, kRowVsync, kRowFrameCap,
-   kRowFps, kRowDetection, kRowGemScale, kRowGemMatch, kRowGemEase, kRowLight, kRowExposure, kRowAmbient, kRowSkySeen, kRowSky, kRowMoon, kRowMoonDir, kRowMoonHeight, kRowLightSize, kRowRough, kRowSmooth, kRowSteady, kRowFixtures, kRowFixtureLight, kRowSmallLamps, kRowLightFix, kRowGlow, kRowFlameGlow, kRowMaterials, kRowBump, kRowCrevice, kRowParallax, kRowPolish, kRowWater,
+   kRowFps, kRowDetection, kRowGemScale, kRowGemMatch, kRowGemEase, kRowLight, kRowExposure, kRowAmbient, kRowSkySeen, kRowSky, kRowMoon, kRowMoonDir, kRowMoonHeight, kRowLightSize, kRowRough, kRowSmooth, kRowSteady, kRowFixtures, kRowFixtureLight, kRowSmallLamps, kRowLightFix, kRowGlow, kRowFlameGlow, kRowMaterials, kRowBump, kRowCrevice, kRowTexDetail, kRowParallax, kRowPolish, kRowWater,
    kRowDebug, kRowFreeze, kRowBackFaces, kRowReuse, kRowBlink, kRowPerf, kRowInspect, kRowReset, kRowCount
 };
 
@@ -3574,7 +3577,7 @@ const char *kRowLabels[kRowCount] = {
    "Upscaler", "Render resolution", "Output resolution", "Dynamic resolution", "Bounce light", "Light reach", "Lights traced",
    "Lights coming into range", "Lights tried per pixel", "Lights behind walls", "Light changes", "Light flicker",
    "God rays (volumetric)", "  God ray strength", "Mission fog", "Bloom", "VSync", "Frame rate limit", "FPS counter", "Light gem and guards", "  Light gem brightness", "  Light gem falloff", "  Light gem response", "Light brightness", "Darkest exposure", "Ambient light", "Sky brightness (as seen)", "Sky light (on the level)", "Moonlight", "  Moon direction", "  Moon height",
-   "Light size (soft shadows)", "Surface roughness", "Model shading", "Model faces", "Torches and lamps", "Lamp and torch light", "Lamp reach", "Lights in walls", "Lamp glow", "Flame glow", "Materials", "Bumps", "Crevices", "Parallax depth", "Polished reflections", "Water",
+   "Light size (soft shadows)", "Surface roughness", "Model shading", "Model faces", "Torches and lamps", "Lamp and torch light", "Lamp reach", "Lights in walls", "Lamp glow", "Flame glow", "Materials", "Bumps", "Crevices", "Texture detail", "Parallax depth", "Polished reflections", "Water",
    "Debug view", "Freeze scene (test)", "Back faces (test)", "Light sampling (test)", "Blink nearest light (test)", "Performance log", "Inspect centre of view", "Reset to defaults",
 };
 
@@ -3724,6 +3727,10 @@ std::string row_value(int row)
       if (g_cfg.bump <= 0.0f) return "Off";
       snprintf(buf, sizeof(buf), "%.2fx", g_cfg.bump);
       return buf;
+   case kRowTexDetail: {
+      static const char *kDetail[] = {"Sharpest (noisier)", "Balanced", "Steady (softer)"};
+      return kDetail[std::clamp(g_cfg.texDetail, 0, 2)];
+   }
    case kRowCrevice:
       if (g_cfg.crevice <= 0.0f) return "Off";
       snprintf(buf, sizeof(buf), "%.1f", g_cfg.crevice);
@@ -3927,6 +3934,7 @@ void change_row(int row, int dir)
    case kRowBump:
       g_cfg.bump = std::clamp(std::round(g_cfg.bump * 4.0f) / 4.0f + 0.25f * dir, 0.0f, 4.0f);
       break;
+   case kRowTexDetail: g_cfg.texDetail = std::clamp(g_cfg.texDetail + dir, 0, 2); break;
    case kRowCrevice:
       g_cfg.crevice = std::clamp(std::round(g_cfg.crevice * 10.0f) / 10.0f + 0.1f * dir, 0.0f, 1.0f);
       // every texture with crevices (a class with bumps; one not classed
@@ -4633,7 +4641,13 @@ void draw_frame(bool sceneDrawn)
       .sType = RG_STRUCTURE_TYPE_DRAW_FRAME_TEXTURES_PARAMS,
       .pNext = &illum,
       .dynamicSamplerFilter = RG_SAMPLER_FILTER_LINEAR,
-      .mipLodBiasOffset = 0.0f,
+      // RTGL1 samples textures 1-2 mips sharper than the render resolution
+      // (the upscaler's guidance: log2(render / output) - 1): the bump maps
+      // made from Thief's textures then turn from pixel to pixel and from
+      // frame to frame as the view jitters, which the denoiser takes for noise
+      // -- the crawl on bumpy, creviced walls. Balanced gives back half a mip,
+      // Steady a whole one (the upscaler's sharpening keeps the edges).
+      .mipLodBiasOffset = g_cfg.texDetail == 0 ? 0.0f : g_cfg.texDetail == 1 ? 0.5f : 1.0f,
       .normalMapStrength = g_cfg.materials ? g_cfg.bump : 0.0f,
       .emissionMapBoost = 50.0f,   // (as Blood RT)
       .emissionMaxScreenColor = 1.5f,

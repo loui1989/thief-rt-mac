@@ -625,7 +625,18 @@ inline void crevice_albedo(std::vector<uint8_t> &rgba, int w, int h, const Class
 {
    if (strength <= 0 || c.bump <= 0 || c.none || w < 4 || h < 4)
       return;
-   const auto hg = heights(rgba.data(), w, h);
+   const auto raw = heights(rgba.data(), w, h);
+   // (over 3x3 texels: a crack a texel wide, darkened alone, was a hard line
+   // that shimmered as the view moved and the upscaler jittered across it)
+   std::vector<float> hg(raw.size());
+   for (int y = 0; y < h; ++y)
+      for (int x = 0; x < w; ++x) {
+         float sum = 0;
+         for (int dy = -1; dy <= 1; ++dy)
+            for (int dx = -1; dx <= 1; ++dx)
+               sum += raw[size_t((y + dy + h) % h) * w + size_t((x + dx + w) % w)] * (dx == 0 && dy == 0 ? 4.0f : (dx == 0 || dy == 0) ? 2.0f : 1.0f);
+         hg[size_t(y) * w + x] = sum / 16.0f;
+      }
    double avg = 0;
    for (float v : hg)
       avg += v;
