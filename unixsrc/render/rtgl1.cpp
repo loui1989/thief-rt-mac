@@ -1147,6 +1147,8 @@ std::unordered_map<uint32_t, std::vector<uint32_t>> g_ownedLights;
 // light, often a plain static one the game never turns off when the candle
 // is doused -- the flame went, its light and the candle's glow stayed)
 std::unordered_map<uint32_t, uint32_t> g_lightFlameObj;
+// lit windows' textures when their lights were last made (build_window_lights; size_t(-1): make them again)
+size_t g_windowLitTextures = size_t(-1);
 // the level's ambient light (0..1), and the glow it gives surfaces
 float g_levelAmbient = 0.0f;
 // the player's light, by the game and by the path tracer (for the frame counter)
@@ -3387,7 +3389,7 @@ const char *kUpscaleNames[] = {"Off",
 
 enum UiRow {
    kRowUpscale, kRowScale, kRowOutput, kRowDynres, kRowBounces, kRowReach, kRowLights, kRowLightFade, kRowCandidates, kRowLightCull, kRowResponse, kRowFlicker, kRowVolumetric, kRowFog, kRowBloom, kRowVsync, kRowFrameCap,
-   kRowFps, kRowDetection, kRowLight, kRowExposure, kRowAmbient, kRowSky, kRowLightSize, kRowRough, kRowSmooth, kRowSteady, kRowFixtures, kRowFixtureLight, kRowSmallLamps, kRowLightFix, kRowGlow, kRowFlameGlow, kRowMaterials, kRowBump, kRowCrevice, kRowParallax, kRowPolish, kRowWater,
+   kRowFps, kRowDetection, kRowLight, kRowExposure, kRowAmbient, kRowSky, kRowLightSize, kRowRough, kRowSmooth, kRowSteady, kRowFixtures, kRowFixtureLight, kRowSmallLamps, kRowLightFix, kRowGlow, kRowFlameGlow, kRowMaterials, kRowBump, kRowCrevice, kRowParallax, kRowPolish, kRowStained, kRowWater,
    kRowDebug, kRowFreeze, kRowBackFaces, kRowReuse, kRowBlink, kRowPerf, kRowInspect, kRowReset, kRowCount
 };
 
@@ -3395,7 +3397,7 @@ const char *kRowLabels[kRowCount] = {
    "Upscaler", "Render resolution", "Output resolution", "Dynamic resolution", "Bounce light", "Light reach", "Lights traced",
    "Lights coming into range", "Lights tried per pixel", "Lights behind walls", "Light changes", "Light flicker",
    "Volumetric light", "Mission fog", "Bloom", "VSync", "Frame rate limit", "FPS counter", "Light gem and guards", "Light brightness", "Darkest exposure", "Ambient light", "Sky brightness",
-   "Light size (soft shadows)", "Surface roughness", "Model shading", "Model faces", "Torches and lamps", "Lamp and torch light", "Lamp reach", "Lights in walls", "Lamp glow", "Flame glow", "Materials", "Bumps", "Crevices", "Parallax depth", "Polished reflections", "Water",
+   "Light size (soft shadows)", "Surface roughness", "Model shading", "Model faces", "Torches and lamps", "Lamp and torch light", "Lamp reach", "Lights in walls", "Lamp glow", "Flame glow", "Materials", "Bumps", "Crevices", "Parallax depth", "Polished reflections", "Stained glass light", "Water",
    "Debug view", "Freeze scene (test)", "Back faces (test)", "Light sampling (test)", "Blink nearest light (test)", "Performance log", "Inspect centre of view", "Reset to defaults",
 };
 
@@ -3512,6 +3514,7 @@ std::string row_value(int row)
       snprintf(buf, sizeof(buf), "%.3f", g_cfg.parallax);
       return buf;
    case kRowPolish: return g_cfg.polish ? "Mirror (sharp)" : "Off";
+   case kRowStained: return g_cfg.stainedShadows ? "Its pattern through it" : "One colour, in front";
    case kRowWater:
       return g_cfg.water == 1 ? "Reflective (RTGL1)" : g_cfg.water == 2 ? "Opaque" : "Translucent";
    default: return "";
@@ -3688,6 +3691,10 @@ void change_row(int row, int dir)
       g_cfg.parallax = std::clamp(std::round(g_cfg.parallax * 200.0f) / 200.0f + 0.005f * dir, 0.0f, 0.1f);
       break;
    case kRowPolish: g_cfg.polish = !g_cfg.polish; break;
+   case kRowStained:
+      g_cfg.stainedShadows = !g_cfg.stainedShadows;
+      g_windowLitTextures = size_t(-1);   // (the windows' lights made again)
+      break;
    case kRowWater: g_cfg.water = (g_cfg.water + dir + 3) % 3; break;
    case kRowInspect: inspect_view(); return;
    case kRowReset: {
@@ -6679,7 +6686,6 @@ void smooth_flicker()
 // pane is large and in the pane's colour. (Not counted in the light gem: the
 // game's own windows never lit the player.)
 std::vector<PendingLight> g_windowLights;
-size_t g_windowLitTextures = size_t(-1);
 uint32_t g_windowWorldSerial = 0;
 
 void pane_stats(RtTexture &t)
@@ -6787,11 +6793,10 @@ void build_window_lights()
          // (stained glass: less of the light behind it gets through, and
          // what does is coloured -- the light from a church's windows)
          L.peak = t.cls->stained ? std::min(160.0f, 45.0f * lit) : std::min(120.0f, 30.0f * lit);
-         // (behind stained glass: pale moonlight, the glass gives its colours,
-         // a little more of it, as the glass and its lead take some)
+         // (behind stained glass: pale moonlight, the glass gives its colours;
+         // no stronger -- brighter, its pattern's noise crawled round the windows)
          static const float kPale[3] = {0.92f, 0.95f, 1.0f};
-         if (behind)
-            L.peak = std::min(200.0f, L.peak * 1.3f);
+         (void)0;
          for (int k = 0; k < 3; ++k)
             L.rgb[k] = (behind ? kPale[k] : t.paneRgb[k]) * L.peak;
          L.inner = 0.6f;    // ~53 degrees: full strength
@@ -6801,7 +6806,7 @@ void build_window_lights()
          // (stained glass's small: a big source blurred the lead's lines out
          // of the pattern, and reached past the glass into the room)
          if (behind)
-            L.size = 0.04f;
+            L.size = 0.08f;
          uint32_t h = 2166136261u;
          for (int k = 0; k < 3; ++k)
             h = (h ^ uint32_t(int32_t(std::lround(w.c[k] * 20.0f)))) * 16777619u;
