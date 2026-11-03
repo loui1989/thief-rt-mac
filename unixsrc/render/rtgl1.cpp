@@ -1353,6 +1353,7 @@ struct CaptureParts {
    double draws = 0, ends = 0, faces = 0, match = 0, world = 0, models = 0, lights = 0;
    double drawCalls = 0, fresh = 0;
    double hashes = 0;   // models' ends hashing what was drawn
+   double nearSame = 0;  // captures taken as unchanged to within 2 mm (same_within)
    double prep[5] = {};              // RenderRTPrepMark's parts
 } g_capParts;
 // What each model cost this report's frames (its capture's end, and making
@@ -1403,6 +1404,8 @@ struct CachedObject {
    // whole: the triangles of every piece seen since it last moved, so a
    // capture of pieces already known changes nothing
    std::unordered_set<uint64_t> pieceKeys;
+   // its triangles by where they lie, for same_within (built when needed)
+   std::shared_ptr<struct TolIndex> tol;
    int pieceMerges = 0;       // pieces added since; past 8 it is taken to be moving in place
    int creature = -1;         // the game's say (-1 not asked yet)
    float pose[6] = {};
@@ -1849,6 +1852,29 @@ uint64_t texture_hash(const std::string &t)
    return th;
 }
 
+// A model's triangles by where they lie (1 cm cells), to tell its capture
+// apart from a near copy of it: same_within.
+struct TolIndex {
+   uint64_t forHash = 0;
+   struct Corner { float p[3], uv[2]; };
+   std::vector<Corner> tris;   // three a triangle (copies: the model's own arrays are replaced)
+   std::vector<uint64_t> tex;
+   std::unordered_map<uint64_t, std::vector<uint32_t>> cells;
+};
+inline uint64_t tol_cell(int64_t x, int64_t y, int64_t z)
+{
+   return (uint64_t(x) * 73856093ull) ^ (uint64_t(y) * 19349663ull) ^ (uint64_t(z) * 83492791ull);
+}
+uint64_t texture_hash(const std::string &t);
+
+// Whether a capture is the model already held, to within 2 mm. A model's
+// vertices reach the capture through the camera (object to camera to world,
+// in floats): as the camera turned they wobbled by a fraction of a
+// millimetre, and its exact fingerprint (to 4 mm) changed whenever one of
+// thousands crossed a step -- Black Parade's chains between the towers,
+// 8235 vertices each, made anew nearly every frame, 9 ms a frame looking up.
+bool same_within(struct CachedObject &c, const std::vector<CapturedPrim> &cap);
+
 uint64_t hash_prims_unordered(const std::vector<CapturedPrim> &prims)
 {
    uint64_t sum = 0, x = 0;
@@ -2167,6 +2193,90 @@ std::vector<uint64_t> object_prim_ids(uint32_t obj, const std::vector<CapturedPr
       ids[i] = 0x500000000ull + (uint64_t(obj) << 12) + slot;
    }
    return ids;
+}
+
+bool same_within(CachedObject &c, const std::vector<CapturedPrim> &cap)
+{
+   constexpr float kTol = 0.002f, kCell = 0.01f;
+   size_t a = 0, b = 0;
+   for (const CapturedPrim &p : c.prims)
+      if (!p.sprite)
+         a += p.verts.size();
+   for (const CapturedPrim &p : cap) {
+      if (p.sprite)
+         return false;
+      b += p.verts.size();
+   }
+   if (a != b || a < 3)
+      return false;
+   if (!c.tol || c.tol->forHash != c.hash) {
+      auto t = std::make_shared<TolIndex>();
+      t->forHash = c.hash;
+      for (const CapturedPrim &p : c.prims) {
+         if (p.sprite)
+            continue;
+         const uint64_t th = texture_hash(p.texture);
+         for (size_t i = 0; i + 2 < p.verts.size(); i += 3) {
+            const uint32_t idx = uint32_t(t->tex.size());
+            for (int m = 0; m < 3; ++m) {
+               TolIndex::Corner k;
+               memcpy(k.p, p.verts[i + m].position, sizeof(k.p));
+               memcpy(k.uv, p.verts[i + m].texCoord, sizeof(k.uv));
+               t->tris.push_back(k);
+            }
+            t->tex.push_back(th);
+            float cen[3];
+            for (int k = 0; k < 3; ++k)
+               cen[k] = (p.verts[i].position[k] + p.verts[i + 1].position[k] + p.verts[i + 2].position[k]) / 3.0f;
+            // in every cell its centre is within the tolerance of
+            int64_t lo[3], hi[3];
+            for (int k = 0; k < 3; ++k) {
+               lo[k] = int64_t(std::floor((cen[k] - kTol) / kCell));
+               hi[k] = int64_t(std::floor((cen[k] + kTol) / kCell));
+            }
+            for (int64_t x = lo[0]; x <= hi[0]; ++x)
+               for (int64_t y = lo[1]; y <= hi[1]; ++y)
+                  for (int64_t z = lo[2]; z <= hi[2]; ++z)
+                     t->cells[tol_cell(x, y, z)].push_back(idx);
+         }
+      }
+      c.tol = std::move(t);
+   }
+   const TolIndex &t = *c.tol;
+   auto near = [](const RgPrimitiveVertex &u, const TolIndex::Corner &v) {
+      for (int k = 0; k < 3; ++k)
+         if (std::fabs(u.position[k] - v.p[k]) > kTol)
+            return false;
+      return std::fabs(u.texCoord[0] - v.uv[0]) < 0.002f && std::fabs(u.texCoord[1] - v.uv[1]) < 0.002f;
+   };
+   for (const CapturedPrim &p : cap) {
+      const uint64_t th = texture_hash(p.texture);
+      for (size_t i = 0; i + 2 < p.verts.size(); i += 3) {
+         const RgPrimitiveVertex *v = &p.verts[i];
+         int64_t q[3];
+         for (int k = 0; k < 3; ++k)
+            q[k] = int64_t(std::floor(((v[0].position[k] + v[1].position[k] + v[2].position[k]) / 3.0f) / kCell));
+         auto f = t.cells.find(tol_cell(q[0], q[1], q[2]));
+         if (f == t.cells.end())
+            return false;
+         bool found = false;
+         for (uint32_t idx : f->second) {
+            if (t.tex[idx] != th)
+               continue;
+            const TolIndex::Corner *w = &t.tris[size_t(idx) * 3];
+            bool all = true;
+            for (int m = 0; m < 3 && all; ++m)
+               all = near(v[m], w[0]) || near(v[m], w[1]) || near(v[m], w[2]);
+            if (all) {
+               found = true;
+               break;
+            }
+         }
+         if (!found)
+            return false;
+      }
+   }
+   return true;
 }
 
 void upload_objects()
@@ -3719,9 +3829,9 @@ void perf_frame(double t)
               g_worldShownGroups, g_world.size(), g_perf.lights / n, g_lightsTotal);
       const CaptureParts &cp = g_capParts;
       fprintf(f, "  capture parts (ms per frame): draws %.2f (%.0f calls), models' ends %.2f, given to the path tracer: lights %.2f, world %.2f, models %.2f; "
-                 "of these, faces made steady %.2f, matched to last frame %.2f (%.0f models captured anew)\n",
+                 "of these, faces made steady %.2f, matched to last frame %.2f (%.0f models captured anew; %.1f taken as unchanged to within 2 mm)\n",
               cp.draws * ms, cp.drawCalls / n, cp.ends * ms, cp.lights * ms, cp.world * ms, cp.models * ms,
-              cp.faces * ms, cp.match * ms, cp.fresh / n);
+              cp.faces * ms, cp.match * ms, cp.fresh / n, cp.nearSame / n);
       fprintf(f, "  more parts (ms per frame): inside the path tracer's library %.2f; models' ends hashing %.2f; "
                  "rt prep: world %.2f, lights found %.2f, their reach %.2f, objects' lights %.2f, models out of view %.2f\n",
               g_uploadLibrarySecs * 1000.0 / n, cp.hashes * ms, cp.prep[0] * ms, cp.prep[1] * ms, cp.prep[2] * ms,
@@ -5827,7 +5937,23 @@ void RenderRTObjectEnd(void)
       bool sprites = false;
       for (const CapturedPrim &p : g_currentCapture)
          sprites = sprites || p.sprite;
-      if (!sprites && h == c.hash && c.settled && c.whole && g_cfg.steadyFaces) {
+      // (the same to within 2 mm, where it has not moved and is not a
+      // creature: the camera's wobble, not a change -- same_within)
+      bool same = h == c.hash;
+      if (!same && !sprites && c.whole && g_currentWhole && g_cfg.steadyFaces && !c.prims.empty() && c.posed) {
+         if (c.creature < 0)
+            c.creature = RenderRTGameObjectIsCreature(obj);
+         float pose[6];
+         bool still = c.creature == 0 && RenderRTGameObjectPose(obj, pose) != 0;
+         for (int k = 0; k < 3 && still; ++k)
+            still = std::fabs(pose[k] - c.pose[k]) < 0.01f;
+         still = still && pose[3] == c.pose[3] && pose[4] == c.pose[4] && pose[5] == c.pose[5];
+         if (still && same_within(c, g_currentCapture)) {
+            same = true;
+            ++g_capParts.nearSame;
+         }
+      }
+      if (!sprites && same && c.settled && c.whole && g_cfg.steadyFaces) {
          ++c.unchanged;
          c.frame = g_frameNumber;
          c.posed = RenderRTGameObjectPose(obj, c.pose) != 0;
@@ -5835,7 +5961,7 @@ void RenderRTObjectEnd(void)
          return;
       }
       c.settled = false;
-      c.unchanged = (h == c.hash) ? c.unchanged + 1 : 0;
+      c.unchanged = same ? c.unchanged + 1 : 0;
       c.hash = h;
       // what was given last time becomes the one this capture is matched
       // to, swapped, not copied (a moving character's every vertex was
