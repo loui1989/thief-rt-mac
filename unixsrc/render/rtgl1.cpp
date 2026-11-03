@@ -57,6 +57,8 @@
 #include <unordered_set>
 #include <vector>
 #include <dlfcn.h>
+extern "C" int GetSkyMode(void);              // render.cpp: 0 textures, 1 stars
+extern "C" int SkyRendererUseEnhanced(void);  // skyrend.cpp: the clouds-and-moon sky
 #ifdef __APPLE__
 // (the Objective-C runtime, declared here: its headers' BOOL is not the engine's)
 extern "C" void *objc_getClass(const char *name);
@@ -121,7 +123,7 @@ struct Settings {
    int gi = 0;                // bounce light: 0 two bounces at half rate (as Blood RT),
                               // 1 one bounce, 2 two bounces, 3 one bounce at half rate
    bool volumetric = false;   // haze lit by every light
-   bool moonShafts = true;    // god rays: the haze lit by the moon alone (cheap), when volumetric is off
+   bool moonShafts = false;   // god rays: the haze lit by the moon alone (cheap), when volumetric is off
    float shafts = 1.0f;       // god rays' strength (the haze's light, times this)
    float moon = 1.0f;         // moonlight through the sky's openings, times its base (0 off)
    int moonAzimuth = 225;     // where the moon is, degrees round from the map's +x
@@ -1256,9 +1258,8 @@ void start_frame()
    resolution.frameGeneration = RG_FRAME_GENERATION_MODE_OFF;
    resolution.denoiser = RG_DENOISER_DEFAULT;
    const bool metalfx = g_cfg.upscale >= 1 && g_cfg.upscale <= 5;
-   // MetalFX's denoising upscaler (macOS 26) in place of the path tracer's
-   // denoiser and the plain MetalFX upscaler -- a choice in the panel, to
-   // compare: tried once as the only one, it read less stable than RTGL1's
+   // (MetalFX's denoising upscaler: noisier than RTGL1's, tried twice; only
+   // with metalfx_denoiser = 1 in the settings file, no longer in the panel)
    const bool mfxDenoiser = metalfx && g_cfg.mfxDenoise && metalfx_denoiser_available();
    // Dynamic resolution (the Metal backend reads RTGL1_DYNRES_* every frame):
    // the size asked for here is the largest; each frame's follows the GPU time.
@@ -2749,6 +2750,14 @@ void upload_world()
    if (g_worldFresh) {
       g_worldFresh = false;
       preload_textures();
+      // which sky the mission has (the path tracer draws a plain colour)
+      size_t skyGroups = 0, skyTris = 0;
+      for (const WorldGroup &g : g_world)
+         if (g.flags & kRenderRTWorldSky)
+            ++skyGroups, skyTris += g.indices.size() / 3;
+      fprintf(stderr, "RT: the mission's sky: %s%s; %zu sky groups, %zu triangles\n",
+              GetSkyMode() == 0 ? "textures" : "stars", SkyRendererUseEnhanced() ? ", the enhanced sky (clouds, moon)" : "",
+              skyGroups, skyTris);
    }
    static uint32_t s_reported = 0;
    size_t tris = 0, cutTris = 0;
@@ -3426,13 +3435,13 @@ const char *kUpscaleNames[] = {"Off",
                                "MetalFX Custom"};
 
 enum UiRow {
-   kRowUpscale, kRowScale, kRowOutput, kRowDynres, kRowDenoiser, kRowBounces, kRowReach, kRowLights, kRowLightFade, kRowCandidates, kRowLightCull, kRowResponse, kRowFlicker, kRowVolumetric, kRowShafts, kRowFog, kRowBloom, kRowVsync, kRowFrameCap,
+   kRowUpscale, kRowScale, kRowOutput, kRowDynres, kRowBounces, kRowReach, kRowLights, kRowLightFade, kRowCandidates, kRowLightCull, kRowResponse, kRowFlicker, kRowVolumetric, kRowShafts, kRowFog, kRowBloom, kRowVsync, kRowFrameCap,
    kRowFps, kRowDetection, kRowGemScale, kRowGemMatch, kRowGemEase, kRowLight, kRowExposure, kRowAmbient, kRowSky, kRowMoon, kRowMoonDir, kRowMoonHeight, kRowLightSize, kRowRough, kRowSmooth, kRowSteady, kRowFixtures, kRowFixtureLight, kRowSmallLamps, kRowLightFix, kRowGlow, kRowFlameGlow, kRowMaterials, kRowBump, kRowCrevice, kRowParallax, kRowPolish, kRowWater,
    kRowDebug, kRowFreeze, kRowBackFaces, kRowReuse, kRowBlink, kRowPerf, kRowInspect, kRowReset, kRowCount
 };
 
 const char *kRowLabels[kRowCount] = {
-   "Upscaler", "Render resolution", "Output resolution", "Dynamic resolution", "Denoiser", "Bounce light", "Light reach", "Lights traced",
+   "Upscaler", "Render resolution", "Output resolution", "Dynamic resolution", "Bounce light", "Light reach", "Lights traced",
    "Lights coming into range", "Lights tried per pixel", "Lights behind walls", "Light changes", "Light flicker",
    "God rays (volumetric)", "  God ray strength", "Mission fog", "Bloom", "VSync", "Frame rate limit", "FPS counter", "Light gem and guards", "  Light gem brightness", "  Light gem falloff", "  Light gem response", "Light brightness", "Darkest exposure", "Ambient light", "Sky brightness", "Moonlight", "  Moon direction", "  Moon height",
    "Light size (soft shadows)", "Surface roughness", "Model shading", "Model faces", "Torches and lamps", "Lamp and torch light", "Lamp reach", "Lights in walls", "Lamp glow", "Flame glow", "Materials", "Bumps", "Crevices", "Parallax depth", "Polished reflections", "Water",
@@ -3493,11 +3502,6 @@ std::string row_value(int row)
       return buf;
    }
    case kRowMoonHeight: snprintf(buf, sizeof(buf), "%d deg up", g_cfg.moonHeight); return buf;
-   case kRowDenoiser:
-      if (!g_cfg.mfxDenoise) return "Path tracer's own";
-      if (!metalfx_denoiser_available()) return "MetalFX (not on this Mac)";
-      if (g_cfg.upscale < 1 || g_cfg.upscale > 5) return "MetalFX (needs a MetalFX upscaler)";
-      return g_cfg.dynres > 0 ? "MetalFX (dynamic res. paused)" : "MetalFX";
    case kRowFog:
       return g_cfg.fog == 0 ? "Off" : g_cfg.fog == 1 ? "Light" : g_cfg.fog == 3 ? "Thick" : "As the mission";
    case kRowBloom: return g_cfg.bloom ? "On" : "Off";
@@ -3694,7 +3698,6 @@ void change_row(int row, int dir)
       break;
    case kRowMoonDir: g_cfg.moonAzimuth = ((g_cfg.moonAzimuth / 15) * 15 + 15 * dir + 360) % 360; break;
    case kRowMoonHeight: g_cfg.moonHeight = std::clamp((g_cfg.moonHeight / 5) * 5 + 5 * dir, 10, 90); break;
-   case kRowDenoiser: g_cfg.mfxDenoise = !g_cfg.mfxDenoise; break;
    case kRowFog: g_cfg.fog = (g_cfg.fog + dir + 4) % 4; break;
    case kRowBloom: g_cfg.bloom = !g_cfg.bloom; break;
    case kRowVsync: g_cfg.vsync = !g_cfg.vsync; break;
