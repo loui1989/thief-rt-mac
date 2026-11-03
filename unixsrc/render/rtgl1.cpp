@@ -106,6 +106,7 @@ struct Settings {
    int upscale = 3;
    float light = 1.0f;
    float sky = 1.0f;
+   float skySeen = 20.0f;     // the mission's own sky (the enhanced one) as seen, apart from its light
    float glow = 1.0f;         // light fixtures
    float fixtureLight = 2.0f; // the light of lamps and torches (lights at a glowing fixture or a flame)
    float smallLamps = 2.0f;   // small lamps (a short reach): this much more, so the light the
@@ -206,6 +207,7 @@ void load_settings()
       else if (k == "vsync") g_cfg.vsync = value != 0;
       else if (k == "light") g_cfg.light = std::clamp(value, 0.05f, 20.0f);
       else if (k == "sky") g_cfg.sky = std::clamp(value, 0.0f, 20.0f);
+      else if (k == "sky_seen") g_cfg.skySeen = std::clamp(value, 0.25f, 100.0f);
       else if (k == "light_size") g_cfg.lightSize = std::clamp(value, 0.02f, 2.0f);
       else if (k == "glow") g_cfg.glow = std::clamp(value, 0.0f, 10.0f);
       else if (k == "water") g_cfg.water = std::clamp(int(value), 0, 2);
@@ -295,6 +297,7 @@ void save_settings()
    fprintf(f, "small_lamps = %.2f\n", g_cfg.smallLamps);
    fprintf(f, "gem_match_ft = %.1f\n", g_cfg.gemMatch);
    fprintf(f, "gem_scale = %.3f\n", g_cfg.gemScale);
+   fprintf(f, "sky_seen = %.2f\n", g_cfg.skySeen);
    fprintf(f, "moon_shafts = %d\ngod_ray_strength = %.2f\nmoon = %.2f\nmoon_azimuth = %d\nmoon_height = %d\nmetalfx_denoiser = %d\n",
            int(g_cfg.moonShafts), g_cfg.shafts, g_cfg.moon, g_cfg.moonAzimuth, g_cfg.moonHeight, int(g_cfg.mfxDenoise));
    fprintf(f, "gem_ease_s = %.2f\n", g_cfg.gemEase);
@@ -1227,6 +1230,7 @@ unsigned g_skyFacesSeen = 0;   // a bit for each face drawn since the world came
 int g_skyNextFace = 0;
 uint32_t g_skyWorldSerial = ~0u;
 size_t g_skyTris = 0;
+float g_skyScale = 0.0f;   // one scale for every face's points (to ~100 m), so shared corners stay shared
 bool sky_ready();
 void upload_sky();
 
@@ -3207,19 +3211,13 @@ void sky_capture(int primitive, const sRenderBackendVertex *v, int count)
       face.back().blend = g_blend;
    }
    std::vector<RgPrimitiveVertex> &out = face.back().verts;
-   // Each triangle scaled as a whole to 100 m at its farthest: the same
-   // directions and the same perspective across it, inside the camera's reach.
+   // As drawn, at the depth it was drawn at; scaled when the face is done
+   // (RenderRTSkyFaceEnd), all by the same, inside the camera's reach. (Each
+   // triangle scaled on its own was a crack along every shared edge: black
+   // lines across the clouds.)
    auto triangle = [&](const sRenderBackendVertex *q[3], const float p[3][3]) {
-      float far = 0.0f;
       for (int i = 0; i < 3; ++i)
-         far = std::max(far, std::sqrt(p[i][0] * p[i][0] + p[i][1] * p[i][1] + p[i][2] * p[i][2]));
-      if (far <= 0.0f)
-         return;
-      const float k = 100.0f / far;
-      for (int i = 0; i < 3; ++i) {
-         const float s[3] = {p[i][0] * k, p[i][1] * k, p[i][2] * k};
-         out.push_back(vert(*q[i], s, 0.0f, 0.0f));
-      }
+         out.push_back(vert(*q[i], p[i], 0.0f, 0.0f));
       ++g_skyTris;
    };
    if (primitive == kRenderBackendTriangles) {
@@ -3538,14 +3536,14 @@ const char *kUpscaleNames[] = {"Off",
 
 enum UiRow {
    kRowUpscale, kRowScale, kRowOutput, kRowDynres, kRowBounces, kRowReach, kRowLights, kRowLightFade, kRowCandidates, kRowLightCull, kRowResponse, kRowFlicker, kRowVolumetric, kRowShafts, kRowFog, kRowBloom, kRowVsync, kRowFrameCap,
-   kRowFps, kRowDetection, kRowGemScale, kRowGemMatch, kRowGemEase, kRowLight, kRowExposure, kRowAmbient, kRowSky, kRowMoon, kRowMoonDir, kRowMoonHeight, kRowLightSize, kRowRough, kRowSmooth, kRowSteady, kRowFixtures, kRowFixtureLight, kRowSmallLamps, kRowLightFix, kRowGlow, kRowFlameGlow, kRowMaterials, kRowBump, kRowCrevice, kRowParallax, kRowPolish, kRowWater,
+   kRowFps, kRowDetection, kRowGemScale, kRowGemMatch, kRowGemEase, kRowLight, kRowExposure, kRowAmbient, kRowSkySeen, kRowSky, kRowMoon, kRowMoonDir, kRowMoonHeight, kRowLightSize, kRowRough, kRowSmooth, kRowSteady, kRowFixtures, kRowFixtureLight, kRowSmallLamps, kRowLightFix, kRowGlow, kRowFlameGlow, kRowMaterials, kRowBump, kRowCrevice, kRowParallax, kRowPolish, kRowWater,
    kRowDebug, kRowFreeze, kRowBackFaces, kRowReuse, kRowBlink, kRowPerf, kRowInspect, kRowReset, kRowCount
 };
 
 const char *kRowLabels[kRowCount] = {
    "Upscaler", "Render resolution", "Output resolution", "Dynamic resolution", "Bounce light", "Light reach", "Lights traced",
    "Lights coming into range", "Lights tried per pixel", "Lights behind walls", "Light changes", "Light flicker",
-   "God rays (volumetric)", "  God ray strength", "Mission fog", "Bloom", "VSync", "Frame rate limit", "FPS counter", "Light gem and guards", "  Light gem brightness", "  Light gem falloff", "  Light gem response", "Light brightness", "Darkest exposure", "Ambient light", "Sky brightness", "Moonlight", "  Moon direction", "  Moon height",
+   "God rays (volumetric)", "  God ray strength", "Mission fog", "Bloom", "VSync", "Frame rate limit", "FPS counter", "Light gem and guards", "  Light gem brightness", "  Light gem falloff", "  Light gem response", "Light brightness", "Darkest exposure", "Ambient light", "Sky brightness (as seen)", "Sky light (on the level)", "Moonlight", "  Moon direction", "  Moon height",
    "Light size (soft shadows)", "Surface roughness", "Model shading", "Model faces", "Torches and lamps", "Lamp and torch light", "Lamp reach", "Lights in walls", "Lamp glow", "Flame glow", "Materials", "Bumps", "Crevices", "Parallax depth", "Polished reflections", "Water",
    "Debug view", "Freeze scene (test)", "Back faces (test)", "Light sampling (test)", "Blink nearest light (test)", "Performance log", "Inspect centre of view", "Reset to defaults",
 };
@@ -3645,6 +3643,10 @@ std::string row_value(int row)
       snprintf(buf, sizeof(buf), "%.2fx the level's", g_cfg.ambient);
       return buf;
    case kRowSky: snprintf(buf, sizeof(buf), "%.2fx", g_cfg.sky); return buf;
+   case kRowSkySeen:
+      if (!sky_ready()) return "(the mission's sky only)";
+      snprintf(buf, sizeof(buf), "%.1fx", g_cfg.skySeen);
+      return buf;
    case kRowLightSize: snprintf(buf, sizeof(buf), "%.2f m", g_cfg.lightSize); return buf;
    case kRowSmooth: return g_cfg.smoothModels ? "Smooth" : "Flat (steady)";
    case kRowLightFix: return g_cfg.lightFix ? "Moved out" : "Left as placed";
@@ -3838,6 +3840,7 @@ void change_row(int row, int dir)
                                     : (g_cfg.ambient <= 0.25f && dir < 0 ? 0.0f
                                                                          : step_mul(g_cfg.ambient, dir, 0.25f, 20.0f));
       break;
+   case kRowSkySeen: g_cfg.skySeen = step_mul(g_cfg.skySeen, dir, 0.25f, 100.0f); break;
    case kRowSky: g_cfg.sky = g_cfg.sky <= 0.0f && dir > 0 ? 0.05f
                              : (g_cfg.sky <= 0.05f && dir < 0 ? 0.0f
                                                               : step_mul(g_cfg.sky, dir, 0.05f, 20.0f));
@@ -4655,7 +4658,9 @@ void draw_frame(bool sceneDrawn)
       // won few pixels, its shadows sparse and smeared (RgDrawFrameSkyParams)
       .sunRequireSky = g_cfg.moon > 0.0f ? 1.0f : 0.0f,
       .sunLeakDebug = 0.0f,
-      .sunLeakDebugMul = 1.0f,
+      // (Thief RT's patch 0018: the sky as seen, times this, apart from its
+      // light; the mission's own sky only -- the plain colour stays as it was)
+      .sunLeakDebugMul = sky_ready() ? g_cfg.skySeen / std::max(g_cfg.sky, 0.05f) : 1.0f,
       .sunSkyProbeMaxDist = 10000.0f,
       .sunSplit = g_cfg.moon > 0.0f ? 1.0f : 0.0f,
    };
@@ -5694,6 +5699,7 @@ int RenderRTSkyFaceWanted(void)
          f.clear();
       g_skyFacesSeen = 0;
       g_skyNextFace = 0;
+      g_skyScale = 0.0f;
    }
    return g_skyNextFace;
 }
@@ -5721,6 +5727,20 @@ void RenderRTSkyFaceEnd(void)
    g_skyCap.face = -1;
    if (face < 0)
       return;
+   {
+      // the first face drawn sets the scale (its farthest point to 100 m)
+      float far = 0.0f;
+      for (const SkyDraw &d : g_skyFaces[face])
+         for (const RgPrimitiveVertex &v : d.verts)
+            far = std::max(far, v.position[0] * v.position[0] + v.position[1] * v.position[1] +
+                                   v.position[2] * v.position[2]);
+      if (g_skyScale <= 0.0f && far > 0.0f)
+         g_skyScale = 100.0f / std::sqrt(far);
+      for (SkyDraw &d : g_skyFaces[face])
+         for (RgPrimitiveVertex &v : d.verts)
+            for (float &x : v.position)
+               x *= g_skyScale;
+   }
    if (!(g_skyFacesSeen & (1u << face))) {
       fprintf(stderr, "RT: sky face %d: %zu draws, %zu triangles\n", face, g_skyFaces[face].size(), g_skyTris);
       if ((g_skyFacesSeen | (1u << face)) == 0x3fu)
