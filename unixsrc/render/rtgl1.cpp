@@ -124,7 +124,6 @@ struct Settings {
    bool smoothModels = false; // models shaded smooth (their normals blended across edges)
    float ambient = 1.0f;      // the level's ambient light, as a faint glow of every surface
    float windowLight = 1.0f; // lit windows' own light (0 off)
-   bool stainedShadows = true; // stained glass: its light behind it, coloured texel by texel through it
    int candidates = 12;       // lights tried per pixel and per bounce (RTGL1: no rays, ALU only)
    int evMin = 3;             // eye adaptation's darkest exposure (EV; Blood RT 5, RTGL1 0)
    int response = 0;          // how fast lighting changes show: 0 calm (Blood RT), 1 quick, 2 instant
@@ -213,7 +212,6 @@ void load_settings()
       else if (k == "smooth_models") g_cfg.smoothModels = value != 0;
       else if (k == "light_candidates") g_cfg.candidates = std::clamp(int(value), 4, 32);
       else if (k == "window_light") g_cfg.windowLight = std::clamp(float(value), 0.0f, 4.0f);
-      else if (k == "stained_shadows") g_cfg.stainedShadows = value != 0;
       else if (k == "ev_min") g_cfg.evMin = std::clamp(int(value), 0, 7);
       else if (k == "light_response") g_cfg.response = std::clamp(int(value), 0, 2);
       else if (k == "rt_detection") g_cfg.rtDetection = value != 0;
@@ -269,7 +267,6 @@ void save_settings()
            int(g_cfg.fixturesPass), int(g_cfg.lightFix), g_cfg.response, g_cfg.evMin,
            g_cfg.candidates, int(g_cfg.steadyFaces), int(g_cfg.lightFade), int(g_cfg.bloom), int(g_cfg.rtDetection), g_cfg.reach, g_cfg.outputHeight, int(g_cfg.perfLog), g_cfg.frameCap, g_cfg.fog, int(g_cfg.materials), g_cfg.bump, g_cfg.parallax, int(g_cfg.polish), g_cfg.crevice, g_cfg.fixtureLight);
    fprintf(f, "window_light = %.2f\n", g_cfg.windowLight);
-   fprintf(f, "stained_shadows = %d\n", int(g_cfg.stainedShadows));
    fprintf(f, "small_lamps = %.2f\n", g_cfg.smallLamps);
    fprintf(f, "gem_match_ft = %.1f\n", g_cfg.gemMatch);
    fclose(f);
@@ -2698,8 +2695,6 @@ struct WorldGroup {
    // (metres): a lit window's light is put in front of it
    struct Poly { float c[3], n[3], area; };
    std::vector<Poly> polys;
-   std::vector<float> facing;        // each vertex's polygon's facing (toward its room), 3 a vertex
-   std::vector<RgPrimitiveVertex> glassVerts;   // stained glass: its copy just behind it, as glass
    float bmin[3] = {1e30f, 1e30f, 1e30f}, bmax[3] = {-1e30f, -1e30f, -1e30f};   // meters
    bool shown = false;               // given to the path tracer last frame
    bool given = false;               // given to it since the world was made (unchanged since)
@@ -2821,47 +2816,9 @@ void upload_world()
          .classicLight = 1.0f,
          .emissiveGi = 0.0f,
       };
-      // Stained glass, as Blood RT's: its light outside it (build_window_lights)
-      // shining in through a copy of it just behind it -- glass, which the
-      // shaders' glassTransmittance (Raze RT's rtgl1 0007, on with
-      // sunLeakDebugMul) colours texel by texel: the window's pattern of
-      // panes and lead on the floor. The window as seen stays as it is,
-      // glowing, but lets that light through; the glass copy behind it is
-      // not seen (from inside the window hides it).
-      const bool stainedGlass = g_cfg.stainedShadows && g_cfg.windowLight > 0.0f && tex && tex->cls &&
-                                tex->cls->stained && tex->glows &&
-                                !(flags & (RG_MESH_PRIMITIVE_TRANSLUCENT | RG_MESH_PRIMITIVE_WATER | RG_MESH_PRIMITIVE_SKY));
-      if (stainedGlass)
-         prim.flags |= RG_MESH_PRIMITIVE_NO_SHADOW;
       if (g.given)
          prim.flags |= kRtPrimUnchanged;
       upload(0x100000000ull + i, prim);
-      if (stainedGlass && g.facing.size() == g.verts.size() * 3) {
-         if (g.glassVerts.size() != g.verts.size()) {
-            g.glassVerts = g.verts;
-            for (size_t k = 0; k < g.glassVerts.size(); ++k)
-               for (int a = 0; a < 3; ++a)
-                  g.glassVerts[k].position[a] -= g.facing[k * 3 + a] * 0.03f;
-         }
-         auto glass = RgMeshPrimitiveInfo{
-            .sType = RG_STRUCTURE_TYPE_MESH_PRIMITIVE_INFO,
-            .pNext = nullptr,
-            .flags = RG_MESH_PRIMITIVE_GLASS | RG_MESH_PRIMITIVE_THIN_MEDIA | RG_MESH_PRIMITIVE_NO_SHADOW |
-                     (g.given ? kRtPrimUnchanged : 0u),
-            .primitiveIndexInMesh = 0,
-            .pVertices = g.glassVerts.data(),
-            .vertexCount = uint32_t(g.glassVerts.size()),
-            .pIndices = g.indices.data(),
-            .indexCount = uint32_t(g.indices.size()),
-            .pTextureName = texName,
-            .textureFrame = 0,
-            .color = pack_color(1, 1, 1, 1),
-            .emissive = 0.0f,
-            .classicLight = 1.0f,
-            .emissiveGi = 0.0f,
-         };
-         upload(0x180000000ull + i, glass);
-      }
       g.given = true;
       tris += g.indices.size() / 3;
       if (flags & RG_MESH_PRIMITIVE_ALPHA_TESTED)
@@ -6205,10 +6162,6 @@ void RenderRTWorldPolygon(int textureId, int flags, int count, const float *xyz,
       v.texCoord[1] = uv[i * 2 + 1];
       v.color = pack_color(1, 1, 1, 1);
       g.verts.push_back(v);
-      const float *f = facingSet ? g_nextFacing : nullptr;
-      const float nf[3] = {nx, ny, nz};
-      for (int k = 0; k < 3; ++k)
-         g.facing.push_back(f ? f[k] : nf[k]);
    }
    // A zig-zag strip across the (convex) polygon rather than a fan from one
    // corner: no long slivers, whose wide bounding boxes slow every ray.
@@ -6770,38 +6723,26 @@ void build_window_lights()
             into->c[k] = (into->c[k] * into->area + p.c[k] * p.area) / std::max(a, 1e-6f);
          into->area = a;
       }
-      // stained glass, its light behind it shining in through it (upload_world)
-      const bool behind = t.cls->stained && g_cfg.stainedShadows;
       for (const Window &w : windows) {
          const float lit = w.area * t.paneFrac;   // square metres of lit pane
          if (lit < 0.04f)
             continue;
          PendingLight L{};
-         // (a little in front of the pane, out of the wall's shadow; stained
-         // glass's behind it, behind its glass copy, inside the wall)
+         // (a little in front of the pane, out of the wall's shadow)
          for (int k = 0; k < 3; ++k) {
-            L.pos[k] = (w.c[k] + w.n[k] * (behind ? -0.06f : 0.3f)) / kMetersPerUnit;
+            L.pos[k] = (w.c[k] + w.n[k] * 0.3f) / kMetersPerUnit;
             L.dir[k] = w.n[k];
          }
          // a fill light's strength (Dark's 20-60) for a pane of a square metre or two
          // (stained glass: less of the light behind it gets through, and
          // what does is coloured -- the light from a church's windows)
          L.peak = t.cls->stained ? std::min(160.0f, 45.0f * lit) : std::min(120.0f, 30.0f * lit);
-         // (behind stained glass: pale moonlight, the glass gives its colours,
-         // a little more of it, as the glass and its lead take some)
-         static const float kPale[3] = {0.92f, 0.95f, 1.0f};
-         if (behind)
-            L.peak = std::min(200.0f, L.peak * 1.3f);
          for (int k = 0; k < 3; ++k)
-            L.rgb[k] = (behind ? kPale[k] : t.paneRgb[k]) * L.peak;
+            L.rgb[k] = t.paneRgb[k] * L.peak;
          L.inner = 0.6f;    // ~53 degrees: full strength
          L.outer = 0.08f;   // ~85 degrees: out to the wall it is in
          L.radius = 0;
          L.size = std::clamp(0.35f * std::sqrt(w.area), 0.12f, 0.6f);
-         // (stained glass's small: a big source blurred the lead's lines out
-         // of the pattern, and reached past the glass into the room)
-         if (behind)
-            L.size = 0.04f;
          uint32_t h = 2166136261u;
          for (int k = 0; k < 3; ++k)
             h = (h ^ uint32_t(int32_t(std::lround(w.c[k] * 20.0f)))) * 16777619u;
