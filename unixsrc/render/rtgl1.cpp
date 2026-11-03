@@ -3229,8 +3229,16 @@ void sky_capture(int primitive, const sRenderBackendVertex *v, int count)
       // left on the screen as it turned). (Not the see-through layers: their
       // overlap would show as lines.)
       const bool grow = g_blend == kRenderBackendBlendOpaque;
+      auto finite = [](const sRenderBackendVertex &q) {
+         return std::isfinite(q.x) && std::isfinite(q.y) && std::isfinite(q.rhw) && q.rhw > 0.0f &&
+                std::isfinite(q.u0) && std::isfinite(q.v0) && std::isfinite(q.r) && std::isfinite(q.g) &&
+                std::isfinite(q.b) && std::isfinite(q.a) && std::fabs(q.x) < 1e5f && std::fabs(q.y) < 1e5f;
+      };
       for (int i = 0; i + 2 < count; i += 3) {
          const sRenderBackendVertex *q[3] = {&v[i], &v[i + 1], &v[i + 2]};
+         // (a point that is no number, or off the face's clipping, is no triangle)
+         if (!finite(*q[0]) || !finite(*q[1]) || !finite(*q[2]))
+            continue;
          float p[3][3];
          const float cx = (q[0]->x + q[1]->x + q[2]->x) / 3.0f, cy = (q[0]->y + q[1]->y + q[2]->y) / 3.0f;
          for (int j = 0; j < 3; ++j) {
@@ -3252,6 +3260,8 @@ void sky_capture(int primitive, const sRenderBackendVertex *v, int count)
       // a star: a little square, a pixel and a half across on its face
       for (int i = 0; i < count; ++i) {
          const sRenderBackendVertex &q = v[i];
+         if (!std::isfinite(q.x) || !std::isfinite(q.y) || !std::isfinite(q.rhw) || q.rhw <= 0.0f)
+            continue;
          const float h = 0.75f;
          float p[4][3];
          at(q.x - h, q.y - h, q.rhw, p[0]);
@@ -4678,9 +4688,12 @@ void draw_frame(bool sceneDrawn)
       // won few pixels, its shadows sparse and smeared (RgDrawFrameSkyParams)
       .sunRequireSky = g_cfg.moon > 0.0f ? 1.0f : 0.0f,
       .sunLeakDebug = 0.0f,
-      // (Thief RT's patch 0018: the sky as seen, times this, apart from its
-      // light; the mission's own sky only -- the plain colour stays as it was)
-      .sunLeakDebugMul = sky_ready() ? g_cfg.skySeen / std::max(g_cfg.sky, 0.05f) : 1.0f,
+      // The sky as seen, apart from its light, the mission's own sky only (the
+      // plain colour stays as it was): its boost in this field's whole part,
+      // 1000 + 100 x the boost (rt/bin/shaders storeSky). Its fraction stays
+      // 0: Raze's glass reflection cap reads it (RtRaygenReflRefr).
+      .sunLeakDebugMul = sky_ready() ? 1000.0f + std::round(std::clamp(g_cfg.skySeen / std::max(g_cfg.sky, 0.05f), 0.01f, 2000.0f) * 100.0f)
+                                     : 1.0f,
       .sunSkyProbeMaxDist = 10000.0f,
       .sunSplit = g_cfg.moon > 0.0f ? 1.0f : 0.0f,
    };
