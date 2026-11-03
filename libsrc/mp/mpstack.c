@@ -131,6 +131,7 @@ void mp_evaluate_motion(multiped * mp, mps_motion_node * m, quat * rot,
                         mxs_vector * xlat)
 {
    int frame;
+   float fframe;   // the frame as it is, between two of the motion's
    float angle, t;
    quat q1, q2;
    mxs_matrix root_mat, mat;
@@ -146,14 +147,26 @@ void mp_evaluate_motion(multiped * mp, mps_motion_node * m, quat * rot,
          // Motion is suspended, waiting for parent transition to end. Use last
          // frame's data.
          frame = (int)motion->info.num_frames - 1;
+         fframe = (float)frame;
       }
       else
       {
          frame = (int)floorf(m->frame + 0.5f);
+         // The motion's data between its frames, not the nearest one: its
+         // joints' rotations are slerped and its translation blended by the
+         // fraction (motset.cpp's callbacks), but the frame was rounded first,
+         // so a motion captured at 15 or 30 frames a second held each pose
+         // for two to four frames drawn at 60 and jumped to the next -- the
+         // characters' jerky animation.
+         fframe = m->frame;
+         if (fframe < 0.0f)
+            fframe = 0.0f;
+         if (fframe > (float)motion->info.num_frames - 1.0f)
+            fframe = (float)motion->info.num_frames - 1.0f;
       }
 	
       // Go get the rotation and translational data of the specified motion.
-      if (!mp_get_motion_data(mp, motion, (float)frame, rot, xlat))
+      if (!mp_get_motion_data(mp, motion, fframe, rot, xlat))
       {
          m->handle |= MP_END_FLAG;
       }
@@ -186,7 +199,7 @@ void mp_evaluate_motion(multiped * mp, mps_motion_node * m, quat * rot,
          if(m->start_frame>=motion->info.num_frames-1)
             t=1.0;
          else
-            t = (float) (frame - m->start_frame) / (motion->info.num_frames - 1 - m->start_frame);
+            t = (fframe - (float)m->start_frame) / (motion->info.num_frames - 1 - m->start_frame);
 		
          angle = t * m->params.bend;
 	
@@ -217,7 +230,7 @@ void mp_evaluate_motion(multiped * mp, mps_motion_node * m, quat * rot,
          if(m->start_frame>=motion->info.num_frames-1)
             frac=1.0;
          else
-            frac = (float) (frame - m->start_frame) / (motion->info.num_frames - 1 - m->start_frame);
+            frac = (fframe - (float)m->start_frame) / (motion->info.num_frames - 1 - m->start_frame);
 
          xlat->z += m->params.vinc*frac;
       }
