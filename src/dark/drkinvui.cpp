@@ -140,6 +140,19 @@ static ObjID gGamepadLastWeapon = OBJ_NULL;
 // middle, picks a slot in whichever ring it is nearer
 static BOOL gInvRadialMouse = FALSE;
 static float gInvRadialCursor[2] = {0.0f, 0.0f};
+// each slot's picture: its object's model, as the HUD shows the one in hand
+static invRendState* gInvRadialRend[INV_RADIAL_STICK_COUNT][INV_RADIAL_MAX_ENTRIES];
+
+static void radial_free_pictures(void)
+{
+   for (int s = 0; s < INV_RADIAL_STICK_COUNT; ++s)
+      for (int i = 0; i < INV_RADIAL_MAX_ENTRIES; ++i)
+         if (gInvRadialRend[s][i])
+         {
+            invRendFreeState(gInvRadialRend[s][i]);
+            gInvRadialRend[s][i] = NULL;
+         }
+}
 
 //------------------------------------------------------------
 // OBJECT "EXPIRATION"
@@ -952,6 +965,7 @@ static int radial_find(const sInvRadialRing& ring, ObjID obj)
 
 static void radial_build(void)
 {
+   radial_free_pictures();
    memset(gInvRadial, 0, sizeof(gInvRadial));
    for (int stick = 0; stick < INV_RADIAL_STICK_COUNT; ++stick)
    {
@@ -1026,6 +1040,7 @@ static void radial_close(BOOL apply)
    }
    gInvRadialActive = FALSE;
    gInvRadialMouse = FALSE;
+   radial_free_pictures();
    SetSimTimeScale(gInvRadialSavedTimeScale);
 }
 
@@ -1511,7 +1526,7 @@ static void radial_label(ObjID obj, const char *emptyLabel,
       sprintf(buffer, "Object %d", obj);
 }
 
-static void render_radial_ring(const sInvRadialRing& ring, int centerX,
+static void render_radial_ring(int stick, const sInvRadialRing& ring, int centerX,
                                int centerY, int radius, const char *title,
                                const char *emptyLabel)
 {
@@ -1526,6 +1541,41 @@ static void render_radial_ring(const sInvRadialRing& ring, int centerX,
    gr_string_size((char *)title, &textW, &textH);
    gr_string((char *)title, centerX - textW / 2,
              centerY - radius - textH - 8);
+
+   // each slot's object, its model drawn as the HUD draws the one in hand
+   // (queued to the renderer, so the path tracer's frame has them too):
+   // as large as the ring's spacing allows, the picked one turning
+   int pic = (int)(twoPi * radius / (ring.count > 0 ? ring.count : 1) * 0.85);
+   if (pic > radius * 3 / 5)
+      pic = radius * 3 / 5;
+   if (pic < 20)
+      pic = 20;
+   for (int i = 0; i < ring.count && i < INV_RADIAL_MAX_ENTRIES; ++i)
+   {
+      const ObjID obj = ring.entries[i];
+      invRendState*& rend = gInvRadialRend[stick][i];
+      if (obj == OBJ_NULL)
+      {
+         if (rend)
+         {
+            invRendFreeState(rend);
+            rend = NULL;
+         }
+         continue;
+      }
+      const double angle = twoPi * i / ring.count - twoPi / 4.0;
+      const int x = centerX + (int)(cos(angle) * radius);
+      const int y = centerY + (int)(sin(angle) * radius);
+      const int half = (i == ring.selected ? pic * 6 / 5 : pic) / 2;
+      Rect r = {{(short)(x - half), (short)(y - half)}, {(short)(x + half), (short)(y + half)}};
+      const ulong flags = INVREND_SET | INVREND_HARDWARE_QUEUE | (i == ring.selected ? INVREND_ROTATE : 0);
+      if (rend)
+         invRendUpdateState(rend, flags, obj, &r, NULL);
+      else
+         rend = invRendBuildState(flags, obj, &r, NULL);
+      if (rend)
+         invRendDrawUpdate(rend);
+   }
 
    for (int i = 0; i < ring.count; ++i)
    {
@@ -1605,9 +1655,9 @@ static void render_radial_menu(void)
       if (radialFont)
          gr_set_font(radialFont);
    }
-   render_radial_ring(gInvRadial[0], width * 3 / 10, height / 2,
+   render_radial_ring(0, gInvRadial[0], width * 3 / 10, height / 2,
                       radius, gInvRadialMouse ? "WEAPONS" : "WEAPONS - LEFT STICK", "NO WEAPON");
-   render_radial_ring(gInvRadial[1], width * 7 / 10, height / 2,
+   render_radial_ring(1, gInvRadial[1], width * 7 / 10, height / 2,
                       radius, gInvRadialMouse ? "ITEMS" : "ITEMS - RIGHT STICK", "NO ITEM");
    if (gInvRadialMouse)
    {
