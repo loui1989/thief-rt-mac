@@ -1355,6 +1355,13 @@ struct CaptureParts {
    double hashes = 0;   // models' ends hashing what was drawn
    double prep[5] = {};              // RenderRTPrepMark's parts
 } g_capParts;
+// What each model cost this report's frames (its capture's end, and making
+// its faces steady when captured anew), for the performance log's costliest
+// models: a hitch looking up at a fan mission's rooftops was 30 more models
+// captured anew every frame, and which they were no log said.
+struct ObjCost { double secs = 0; uint32_t ends = 0, fresh = 0; size_t verts = 0; };
+std::unordered_map<uint32_t, ObjCost> g_objCost;
+
 struct PartTimer {
    double &acc;
    std::chrono::steady_clock::time_point t0 = std::chrono::steady_clock::now();
@@ -2331,11 +2338,17 @@ void upload_objects()
       const bool wasFresh = c.fresh;
       if (c.fresh) {
          g_capParts.fresh += 1;
+         const auto tf = std::chrono::steady_clock::now();
          // (a model drawn in pieces: its faces made steady once it is all in)
          if (g_cfg.steadyFaces && !c.steadied)
             steady_faces(c);
          if (g_cfg.steadyFaces)
             match_previous(c);
+         {
+            ObjCost &k = g_objCost[obj];
+            k.secs += std::chrono::duration<double>(std::chrono::steady_clock::now() - tf).count();
+            ++k.fresh;
+         }
          c.fresh = c.steadied = false;
          c.splitValid = false;
       }
@@ -3680,12 +3693,32 @@ void perf_frame(double t)
                  "rt prep: world %.2f, lights found %.2f, their reach %.2f, objects' lights %.2f, models out of view %.2f\n",
               g_uploadLibrarySecs * 1000.0 / n, cp.hashes * ms, cp.prep[0] * ms, cp.prep[1] * ms, cp.prep[2] * ms,
               cp.prep[3] * ms, cp.prep[4] * ms);
+      // when the models cost a lot: which
+      if ((cp.ends + cp.faces + cp.match) * ms > 4.0 && !g_objCost.empty()) {
+         std::vector<std::pair<double, uint32_t>> top;
+         for (const auto &e : g_objCost)
+            top.push_back({e.second.secs, e.first});
+         std::sort(top.rbegin(), top.rend());
+         fprintf(f, "  costliest models (ms per frame; captures and captures anew per frame; vertices):");
+         for (size_t i = 0; i < top.size() && i < 8; ++i) {
+            const ObjCost &k = g_objCost[top[i].second];
+            char nm[128];
+            RenderRTGameObjectName(top[i].second, nm, sizeof(nm));
+            fprintf(f, "%s %u \"%s\" %.2f (%.1f, %.1f; %zu)", i ? "," : "", top[i].second, nm, k.secs * ms,
+                    k.ends / n, k.fresh / n, k.verts);
+         }
+         double all = 0;
+         for (const auto &e : top)
+            all += e.first;
+         fprintf(f, "; %zu models, %.2f in all\n", top.size(), all * ms);
+      }
       fclose(f);
    }
    g_perf.frames.clear();
    g_perf.clients.clear();
    g_perf.wait = g_perf.draw = g_perf.capture = g_perf.prep = 0;
    g_capParts = CaptureParts{};
+   g_objCost.clear();
    g_uploadLibrarySecs = 0;
    g_perf.models = g_perf.prims = g_perf.tris = g_perf.kept = g_perf.lights = 0;
    g_perf.windowStart = t;
@@ -5593,6 +5626,21 @@ void RenderRTObjectEnd(void)
    PartTimer partTimer(g_capParts.ends);
    const uint32_t obj = g_currentObject;
    g_currentObject = 0;
+   struct CostScope {
+      uint32_t obj;
+      size_t verts = 0;
+      std::chrono::steady_clock::time_point t0 = std::chrono::steady_clock::now();
+      ~CostScope() {
+         if (!obj)
+            return;
+         ObjCost &k = g_objCost[obj];
+         k.secs += std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
+         ++k.ends;
+         k.verts = std::max(k.verts, verts);
+      }
+   } costScope{obj};
+   for (const CapturedPrim &p : g_currentCapture)
+      costScope.verts += p.verts.size();
    if (!obj || !g_inScene)
       return;
    if (g_freeze) {

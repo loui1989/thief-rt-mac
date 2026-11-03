@@ -107,8 +107,11 @@ static void ConfigureContextPath(IResMan *pResMan, const char *dataPath)
    gContextPath = newContext;
 }
 
+int g_ResContentGeneration = 0;
+
 void LGAPI ResSysRefreshContentPath(void)
 {
+   ++g_ResContentGeneration;
    char dataPath[DARK_LIMIT_RUNTIME_SEARCH_PATH_CHARS] = "";
    IResMan *pResMan = AppGetObj(IResMan);
    if (!pResMan)

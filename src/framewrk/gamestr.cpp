@@ -15,6 +15,7 @@
 #include <aggmemb.h>
 
 #include <resapi.h>
+#include <resapp.h>
 #include <resistr.h>
 #include <strrstyp.h>
 #include <filespec.h>
@@ -37,9 +38,10 @@ struct sTablePropElem
    cStr table; 
    IStringProperty* prop; 
    IStringRes* res; 
+   int generation;   // g_ResContentGeneration when res was bound
 
    sTablePropElem(const char* t = "", IStringProperty* p = NULL, IStringRes* r = NULL)
-      : table(t), prop(p), res(r)
+      : table(t), prop(p), res(r), generation(g_ResContentGeneration)
    {
       if (prop)
          prop->AddRef(); 
@@ -203,8 +205,16 @@ public:
 
    void DoResPrep(sTablePropElem* elem)
    {
+      // A fan mission picked in the game's own content picker is put in
+      // place after the tables were bound at start: they stayed the base
+      // game's, and every item the mission adds had no name and no
+      // description (Black Parade's Disruption Bomb). Bound again once the
+      // content search path has changed.
+      if (elem->res && elem->generation != g_ResContentGeneration)
+         SafeRelease(elem->res);
       if (elem->res) 
          return; 
+      elem->generation = g_ResContentGeneration;
 
       // Look up the string table resource 
       cAutoIPtr<IRes> res = mpResMan->Bind(elem->table,

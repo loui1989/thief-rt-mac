@@ -14,6 +14,9 @@ EXTERN void LGAPI ResSysCreate(void);
 // Rebuilds the named-resource roots after the in-engine content picker has
 // republished resname_base. Existing search paths observe the new context.
 EXTERN void LGAPI ResSysRefreshContentPath(void);
+// how many times the content search path was set: anything bound to a
+// resource under the old one (the game's string tables) binds again
+EXTERN int g_ResContentGeneration;
 DEFINE_LG_GUID(IID_Res, 0x1d);
 
 
