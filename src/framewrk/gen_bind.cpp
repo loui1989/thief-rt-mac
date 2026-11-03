@@ -582,6 +582,12 @@ static char *FlyProc (const char *, const char *val, BOOL)
 
 static char *MTurnProc (const char *, const char *val, BOOL)
 {
+   // the inventory wheel held open with the mouse: its cursor, not the view
+   if (InvUIRadialMouse())
+   {
+      InvUIRadialMouseMove(parse_float(val), 0.0f);
+      return NULL;
+   }
    if (gNoLookAround || GetPlayerMode() == kPM_Dead)
       return NULL;
 
@@ -600,6 +606,11 @@ static char *MTurnProc (const char *, const char *val, BOOL)
 
 static char *MLookProc (const char *, const char *val, BOOL)
 {
+   if (InvUIRadialMouse())
+   {
+      InvUIRadialMouseMove(0.0f, parse_float(val));
+      return NULL;
+   }
    if (gNoLookAround || GetPlayerMode() == kPM_Dead)
       return NULL;
 
@@ -1177,6 +1188,25 @@ static char *GamepadLookProc(const char *, const char *val, BOOL)
    return NULL;
 }
 
+// The inventory wheel, held open with a mouse button (bind mouse3
+// +inv_wheel): the gamepad's radial (weapons and items, time slowed), a
+// cursor moved by the mouse picking a slot in either ring; let go, the picks
+// are taken up.
+static char *InvWheelProc(const char *, const char *val, BOOL)
+{
+   const BOOL active = parse_float(val) != 0.0f;
+   if (active)
+   {
+      if (GetPlayerMode() == kPM_Dead || InvUIRadialActive())
+         return NULL;
+      InvUIRadialSetActive(TRUE);
+      InvUIRadialSetMouse(TRUE);
+   }
+   else if (InvUIRadialMouse())
+      InvUIRadialSetActive(FALSE);
+   return NULL;
+}
+
 #ifdef THIEF2_GAME
 static char *GamepadRadialProc(const char *, const char *val, BOOL)
 {
@@ -1255,6 +1285,7 @@ IB_var g_gen_ib_vars[] = {
    {"gamepad_lean", "0", 0, GamepadLeanProc, NULL, NULL},
 #ifdef THIEF2_GAME
    {"gamepad_radial", "0", 0, GamepadRadialProc, NULL, NULL},
+   {"inv_wheel", "0", 0, InvWheelProc, NULL, NULL},
 #endif
 
    {"mturn", "0", 0, MTurnProc, NULL, NULL},

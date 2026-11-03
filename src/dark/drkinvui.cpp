@@ -136,6 +136,10 @@ static sInvRadialRing gInvRadial[INV_RADIAL_STICK_COUNT];
 static IRes* gInvRadialFontRes = NULL;
 static char gInvRadialFontName[64];
 static ObjID gGamepadLastWeapon = OBJ_NULL;
+// opened with the mouse (+inv_wheel): a cursor, in pixels from the screen's
+// middle, picks a slot in whichever ring it is nearer
+static BOOL gInvRadialMouse = FALSE;
+static float gInvRadialCursor[2] = {0.0f, 0.0f};
 
 //------------------------------------------------------------
 // OBJECT "EXPIRATION"
@@ -1021,7 +1025,56 @@ static void radial_close(BOOL apply)
       InvUIRefresh();
    }
    gInvRadialActive = FALSE;
+   gInvRadialMouse = FALSE;
    SetSimTimeScale(gInvRadialSavedTimeScale);
+}
+
+// where the rings are drawn (render_radial_menu)
+static void radial_layout(int &width, int &height, int &radius)
+{
+   width = grd_canvas ? grd_canvas->bm.w : 640;
+   height = grd_canvas ? grd_canvas->bm.h : 480;
+   radius = width / 7;
+   if (radius > height / 4)
+      radius = height / 4;
+   if (radius < 48)
+      radius = 48;
+}
+
+void InvUIRadialSetMouse(BOOL mouse)
+{
+   gInvRadialMouse = mouse;
+   gInvRadialCursor[0] = gInvRadialCursor[1] = 0.0f;
+}
+
+BOOL InvUIRadialMouse(void)
+{
+   return gInvRadialActive && gInvRadialMouse;
+}
+
+void InvUIRadialMouseMove(float dx, float dyUp)
+{
+   if (!gInvRadialActive || !gInvRadialMouse)
+      return;
+   int width, height, radius;
+   radial_layout(width, height, radius);
+   gInvRadialCursor[0] += dx;
+   gInvRadialCursor[1] -= dyUp;   // (on screen, y grows downward)
+   const float mx = width * 0.5f - 4.0f, my = height * 0.5f - 4.0f;
+   if (gInvRadialCursor[0] < -mx) gInvRadialCursor[0] = -mx;
+   if (gInvRadialCursor[0] > mx) gInvRadialCursor[0] = mx;
+   if (gInvRadialCursor[1] < -my) gInvRadialCursor[1] = -my;
+   if (gInvRadialCursor[1] > my) gInvRadialCursor[1] = my;
+   const float px = width * 0.5f + gInvRadialCursor[0];
+   const float py = height * 0.5f + gInvRadialCursor[1];
+   // the ring the cursor is nearer, and which way from its middle
+   const float cx[2] = {width * 3.0f / 10.0f, width * 7.0f / 10.0f};
+   const float cy = height * 0.5f;
+   const int k = fabs(px - cx[0]) <= fabs(px - cx[1]) ? 0 : 1;
+   const float vx = px - cx[k], vy = py - cy;
+   const float d = (float)sqrt((double)(vx * vx + vy * vy));
+   if (d > radius * 0.3f)
+      InvUIRadialSetStick(k, vx / d, -vy / d);
 }
 
 BOOL InvUIRadialActive(void)
@@ -1518,13 +1571,8 @@ static void render_radial_menu(void)
    if (!gInvRadialActive)
       return;
 
-   const int width = grd_canvas->bm.w;
-   const int height = grd_canvas->bm.h;
-   int radius = width / 7;
-   if (radius > height / 4)
-      radius = height / 4;
-   if (radius < 48)
-      radius = 48;
+   int width, height, radius;
+   radial_layout(width, height, radius);
 
    guiStyleSetupFont(NULL, StyleFontNormal);
    grs_font* styleFont = gr_get_font();
@@ -1558,9 +1606,19 @@ static void render_radial_menu(void)
          gr_set_font(radialFont);
    }
    render_radial_ring(gInvRadial[0], width * 3 / 10, height / 2,
-                      radius, "WEAPONS - LEFT STICK", "NO WEAPON");
+                      radius, gInvRadialMouse ? "WEAPONS" : "WEAPONS - LEFT STICK", "NO WEAPON");
    render_radial_ring(gInvRadial[1], width * 7 / 10, height / 2,
-                      radius, "ITEMS - RIGHT STICK", "NO ITEM");
+                      radius, gInvRadialMouse ? "ITEMS" : "ITEMS - RIGHT STICK", "NO ITEM");
+   if (gInvRadialMouse)
+   {
+      // the mouse's cursor: point toward a slot in either ring, let go
+      const int x = width / 2 + (int)gInvRadialCursor[0];
+      const int y = height / 2 + (int)gInvRadialCursor[1];
+      gr_set_fcolor(guiStyleGetColor(NULL, StyleColorBright));
+      gr_int_line(x - 6, y, x + 6, y);
+      gr_int_line(x, y - 6, x, y + 6);
+      gr_box(x - 2, y - 2, x + 2, y + 2);
+   }
    if (radialFont)
    {
       gr_set_font(styleFont);

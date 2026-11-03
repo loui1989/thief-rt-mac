@@ -36,6 +36,11 @@ EXTERN void InvUIAbortAllFrobs(void);
 EXTERN BOOL InvUIRadialActive(void);
 EXTERN void InvUIRadialSetActive(BOOL active);
 EXTERN void InvUIRadialSetStick(int stick, float x, float y);
+// The radial held open with the mouse (bind ... +inv_wheel): its movement
+// moves a cursor over the two rings instead of turning the view.
+EXTERN void InvUIRadialSetMouse(BOOL mouse);
+EXTERN BOOL InvUIRadialMouse(void);
+EXTERN void InvUIRadialMouseMove(float dx, float dyUp);
 
 // Is it ok to give this particular object world focus
 EXTERN BOOL ValidWorldFocusTarget(ObjID obj); 
