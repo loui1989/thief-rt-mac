@@ -82,6 +82,9 @@ void RenderRTGameObjectName(uint32_t obj, char *buf, int size);
 // Implemented by the game: a particle group's on/off (a flame doused): 1 on,
 // 0 off, -1 not a particle group (or gone).
 int RenderRTGameParticleLit(uint32_t obj);
+// Implemented by the game: whether the object is a creature (its limbs move
+// where the object itself stands still).
+int RenderRTGameObjectIsCreature(uint32_t obj);
 // The game's objects within radius (feet) of a point (Dark units), one line
 // each, for the inspector.
 void RenderRTGameDescribeNearby(const float at[3], float radius,

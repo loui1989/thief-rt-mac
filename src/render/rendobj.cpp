@@ -3191,6 +3191,11 @@ extern "C" void RenderRTGameDescribeNearby(const float at[3], float radius,
    }
 }
 
+extern "C" int RenderRTGameObjectIsCreature(uint32_t obj)
+{
+   return CreatureExists((ObjID)obj) ? 1 : 0;
+}
+
 extern "C" void RenderRTGameObjectName(uint32_t obj, char *buf, int size)
 {
    const char *name = ObjEditName((ObjID)obj);

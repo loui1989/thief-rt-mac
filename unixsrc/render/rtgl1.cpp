@@ -1399,6 +1399,12 @@ struct CachedObject {
    uint32_t frame = 0;
    int unchanged = 0;
    bool posed = false;
+   // a model drawn in pieces (one in each cell it reaches into) and never
+   // whole: the triangles of every piece seen since it last moved, so a
+   // capture of pieces already known changes nothing
+   std::unordered_set<uint64_t> pieceKeys;
+   int pieceMerges = 0;       // pieces added since; past 8 it is taken to be moving in place
+   int creature = -1;         // the game's say (-1 not asked yet)
    float pose[6] = {};
    float center[3] = {};   // meters
    bool whole = false;     // captured unclipped by the view
@@ -1816,6 +1822,33 @@ void steady_faces(CachedObject &c, const float *pose = nullptr)
 }
 
 // the same as hash_prims, but the same for the same triangles in any order
+// one triangle's key, as hash_prims_unordered makes them
+uint64_t triangle_key(uint64_t textureHash, const RgPrimitiveVertex *v)
+{
+   uint64_t h = textureHash;
+   uint64_t corner[3];
+   for (int k = 0; k < 3; ++k) {
+      uint64_t ch = 0;
+      for (int j = 0; j < 3; ++j)
+         ch = ch * 1000003ull + uint64_t(int64_t(std::lround(v[k].position[j] * 256.0f)));
+      for (int j = 0; j < 2; ++j)
+         ch = ch * 1000003ull + uint64_t(int64_t(std::lround(v[k].texCoord[j] * 1024.0f)));
+      corner[k] = ch;
+   }
+   std::sort(corner, corner + 3);
+   for (uint64_t ch : corner)
+      h = (h ^ ch) * 1099511628211ull;
+   return h;
+}
+
+uint64_t texture_hash(const std::string &t)
+{
+   uint64_t th = 1469598103934665603ull;
+   for (unsigned char ch : t)
+      th = (th ^ ch) * 1099511628211ull;
+   return th;
+}
+
 uint64_t hash_prims_unordered(const std::vector<CapturedPrim> &prims)
 {
    uint64_t sum = 0, x = 0;
@@ -3704,8 +3737,10 @@ void perf_frame(double t)
             const ObjCost &k = g_objCost[top[i].second];
             char nm[128];
             RenderRTGameObjectName(top[i].second, nm, sizeof(nm));
-            fprintf(f, "%s %u \"%s\" %.2f (%.1f, %.1f; %zu)", i ? "," : "", top[i].second, nm, k.secs * ms,
-                    k.ends / n, k.fresh / n, k.verts);
+            auto co = g_objects.find(top[i].second);
+            fprintf(f, "%s %u \"%s\" %.2f (%.1f, %.1f; %zu%s)", i ? "," : "", top[i].second, nm, k.secs * ms,
+                    k.ends / n, k.fresh / n, k.verts,
+                    co == g_objects.end() ? "" : co->second.whole ? ", whole" : ", in pieces");
          }
          double all = 0;
          for (const auto &e : top)
@@ -5688,7 +5723,77 @@ void RenderRTObjectEnd(void)
          return;
       }
    }
-   if (c.frame == g_frameNumber) {
+   // A model never drawn whole -- in pieces, one in each cell it reaches
+   // into: Black Parade's chains strung between the towers, 8000 vertices
+   // each -- that has not moved: the pieces seen so far, together. Which
+   // pieces were drawn changed with where you looked, each new set taken
+   // for a new model and all its faces made steady and matched again (16
+   // chains, 9 ms a frame looking up at them). A set of known pieces now
+   // changes nothing; a new piece is added to them.
+   bool merged = false;
+   if (!g_currentWhole && !c.whole && !c.prims.empty() && c.posed && c.pieceMerges <= 8 && g_cfg.steadyFaces) {
+      if (c.creature < 0)
+         c.creature = RenderRTGameObjectIsCreature(obj);
+      float pose[6];
+      bool same = c.creature == 0 && RenderRTGameObjectPose(obj, pose) != 0;
+      for (int k = 0; k < 3 && same; ++k)
+         same = std::fabs(pose[k] - c.pose[k]) < 0.01f;
+      same = same && pose[3] == c.pose[3] && pose[4] == c.pose[4] && pose[5] == c.pose[5];
+      for (const CapturedPrim &p : g_currentCapture)
+         same = same && !p.sprite;
+      if (same) {
+         if (c.pieceKeys.empty())
+            for (const CapturedPrim &p : c.prims) {
+               const uint64_t th = texture_hash(p.texture);
+               for (size_t t = 0; t + 2 < p.verts.size(); t += 3)
+                  c.pieceKeys.insert(triangle_key(th, &p.verts[t]));
+            }
+         std::vector<CapturedPrim> add;
+         for (CapturedPrim &p : g_currentCapture) {
+            const uint64_t th = texture_hash(p.texture);
+            CapturedPrim q;
+            bool any = false;
+            for (size_t t = 0; t + 2 < p.verts.size(); t += 3)
+               if (c.pieceKeys.insert(triangle_key(th, &p.verts[t])).second) {
+                  if (!any) {
+                     q = p;
+                     q.verts.clear();
+                     any = true;
+                  }
+                  q.verts.insert(q.verts.end(), p.verts.begin() + t, p.verts.begin() + t + 3);
+               }
+            if (any)
+               add.push_back(std::move(q));
+         }
+         if (add.empty()) {
+            ++g_pieceCaptures;
+            ++c.unchanged;
+            c.frame = g_frameNumber;
+            g_currentCapture.clear();
+            return;
+         }
+         ++c.pieceMerges;
+         for (CapturedPrim &q : add)
+            c.prims.push_back(std::move(q));
+         c.hash = hash_prims_unordered(c.prims);
+         c.fresh = true;
+         c.steadied = false;
+         c.wallApplied = false;
+         c.settled = false;
+         c.frame = g_frameNumber;
+         g_currentCapture.clear();
+         merged = true;
+      } else {
+         c.pieceKeys.clear();
+         c.pieceMerges = 0;
+      }
+   } else if (g_currentWhole) {
+      c.pieceKeys.clear();
+      c.pieceMerges = 0;
+   }
+   if (merged) {
+      // (the pieces together, as above)
+   } else if (c.frame == g_frameNumber) {
       // drawn twice this frame (split across cells): keep both parts, unless
       // the first one already had all of it
       if (g_currentWhole && !c.whole) {
