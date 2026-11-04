@@ -128,7 +128,8 @@ struct Settings {
    bool volumetric = false;   // haze lit by every light
    bool moonShafts = false;   // god rays: the haze lit by the moon alone (cheap), when volumetric is off
    float shafts = 1.0f;       // god rays' strength (the haze's light, times this)
-   float moon = 1.0f;         // moonlight through the sky's openings, times its base (0 off)
+   float moon = 0.0f;         // moonlight through the sky's openings, times its base (0 off: its
+                              // light bounced off moonlit streets was the noisiest light outdoors)
    int moonAzimuth = -1;      // where the moon is, degrees round from the map's +x (-1: the sky's moon)
    int moonHeight = 50;       // and how high, degrees over the horizon
    bool mfxDenoise = false;   // MetalFX's denoising upscaler in place of the path tracer's denoiser
@@ -7346,7 +7347,7 @@ void upload_moon()
       // gives its intensity / distance^2: 400 at 5 m, 16) gives a wall nearby
       .intensity = 4.0f * g_cfg.moon * g_cfg.light,
       .direction = {{-to[0], -to[1], -to[2]}},
-      .angularDiameterDegrees = 1.0f,
+      .angularDiameterDegrees = 0.5f,   // (the moon's own: its shadows' edges less noisy)
    };
    auto info = RgLightInfo{
       .sType = RG_STRUCTURE_TYPE_LIGHT_INFO,
