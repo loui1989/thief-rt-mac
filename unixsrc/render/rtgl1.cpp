@@ -138,6 +138,7 @@ struct Settings {
    int outputHeight = 0;      // the frame's height in pixels, 0 = the screen's own (Retina)
    bool perfLog = false;      // logs/perf.log: where each frame's time goes, every 2 s
    int frameCap = 60;         // the most frames a second (the game's own pacing: 60)
+   bool frameGen = false;     // MetalFX frame interpolation: a frame made between each two (macOS 26)
    int reach = 40;            // lights fade out with their walking distance (metres); 0: nearest maxLights
    int maxLights = 64;        // lights given to the path tracer, nearest first; 0 all
    int flicker = 0;           // flickering lights: 0 smoothed, 1 as the game, 2 nearly steady
@@ -262,6 +263,7 @@ void load_settings()
       else if (k == "output_height") g_cfg.outputHeight = std::clamp(int(value), 0, 4320);
       else if (k == "perf_log") g_cfg.perfLog = value != 0;
       else if (k == "frame_cap") g_cfg.frameCap = std::clamp(int(value), 30, 240);
+      else if (k == "frame_generation") g_cfg.frameGen = value != 0;
    }
    fclose(f);
    // settings saved before version 2: the flame glow was unused (0.35)
@@ -302,6 +304,7 @@ void save_settings()
    fprintf(f, "gem_scale = %.3f\n", g_cfg.gemScale);
    fprintf(f, "sky_seen = %.2f\n", g_cfg.skySeen);
    fprintf(f, "texture_detail = %d\n", g_cfg.texDetail);
+   fprintf(f, "frame_generation = %d\n", int(g_cfg.frameGen));
    fprintf(f, "moon_shafts = %d\ngod_ray_strength = %.2f\nmoon = %.2f\nmoon_azimuth = %d\nmoon_height = %d\nmetalfx_denoiser = %d\n",
            int(g_cfg.moonShafts), g_cfg.shafts, g_cfg.moon, g_cfg.moonAzimuth, g_cfg.moonHeight, int(g_cfg.mfxDenoise));
    fprintf(f, "gem_ease_s = %.2f\n", g_cfg.gemEase);
@@ -1288,6 +1291,26 @@ uint32_t pack_color(float r, float g, float b, float a)
 
 void render_size(int &w, int &h);
 void flush_lights();
+// MetalFX frame interpolation (macOS 26, with a MetalFX upscaler): whether the
+// library can, asked once; and whether it is on this frame
+bool frame_gen_available(const char **why = nullptr)
+{
+   static int s_known = -1;
+   static const char *s_why = nullptr;
+   if (s_known < 0) {
+      s_known = rt.rgUtilIsUpscaleTechniqueAvailable &&
+                        rt.rgUtilIsUpscaleTechniqueAvailable(RG_RENDER_UPSCALE_TECHNIQUE_AMD_FSR2,
+                                                             RG_FRAME_GENERATION_MODE_ON, &s_why)
+                    ? 1 : 0;
+      if (!s_why && !s_known)
+         s_why = "not in this library";
+   }
+   if (why)
+      *why = s_why;
+   return s_known == 1;
+}
+bool frame_gen_on() { return g_cfg.frameGen && g_cfg.upscale >= 1 && g_cfg.upscale <= 5 && frame_gen_available(); }
+
 bool metalfx_denoiser_available()
 {
    return rt.rgUtilGetSupportedFeatures &&
@@ -1316,7 +1339,8 @@ void start_frame()
    const float scale = std::clamp(g_cfg.scale, g_cfg.upscale == 5 ? 0.34f : 0.25f, 1.0f);
    const RgExtent2D custom{uint32_t(std::max(1, int(g_drawableW * scale))),
                            uint32_t(std::max(1, int(g_drawableH * scale)))};
-   resolution.frameGeneration = RG_FRAME_GENERATION_MODE_OFF;
+   // a frame made between each two (the HUD laid over it as drawn, not moved)
+   resolution.frameGeneration = frame_gen_on() ? RG_FRAME_GENERATION_MODE_ON : RG_FRAME_GENERATION_MODE_OFF;
    resolution.denoiser = RG_DENOISER_DEFAULT;
    const bool metalfx = g_cfg.upscale >= 1 && g_cfg.upscale <= 5;
    // (MetalFX's denoising upscaler: noisier than RTGL1's, tried twice; only
@@ -1325,7 +1349,8 @@ void start_frame()
    // Dynamic resolution (the Metal backend reads RTGL1_DYNRES_* every frame):
    // the size asked for here is the largest; each frame's follows the GPU time.
    // Not with the MetalFX denoiser, which needs a fixed size.
-   const bool dyn = g_cfg.dynres > 0 && !mfxDenoiser;
+   // (nor with frame generation: the interpolator is made for one size)
+   const bool dyn = g_cfg.dynres > 0 && !mfxDenoiser && !frame_gen_on();
    {
       static int s_fps = -1;
       const int fps = dyn ? std::clamp(g_cfg.dynres, 20, 240) : 0;
@@ -3597,7 +3622,7 @@ const char *kUpscaleNames[] = {"Off",
                                "MetalFX Custom"};
 
 enum UiRow {
-   kRowUpscale, kRowScale, kRowOutput, kRowDynres, kRowBounces, kRowReach, kRowLights, kRowLightFade, kRowCandidates, kRowLightCull, kRowResponse, kRowFlicker, kRowVolumetric, kRowShafts, kRowFog, kRowBloom, kRowVsync, kRowFrameCap,
+   kRowUpscale, kRowScale, kRowOutput, kRowDynres, kRowBounces, kRowReach, kRowLights, kRowLightFade, kRowCandidates, kRowLightCull, kRowResponse, kRowFlicker, kRowVolumetric, kRowShafts, kRowFog, kRowBloom, kRowVsync, kRowFrameCap, kRowFrameGen,
    kRowFps, kRowDetection, kRowGemScale, kRowGemMatch, kRowGemEase, kRowLight, kRowExposure, kRowAmbient, kRowSkySeen, kRowSky, kRowMoon, kRowMoonDir, kRowMoonHeight, kRowLightSize, kRowRough, kRowSmooth, kRowSteady, kRowFixtures, kRowFixtureLight, kRowSmallLamps, kRowLightFix, kRowGlow, kRowFlameGlow, kRowMaterials, kRowBump, kRowCrevice, kRowTexDetail, kRowParallax, kRowPolish, kRowWater,
    kRowDebug, kRowFreeze, kRowBackFaces, kRowReuse, kRowBlink, kRowPerf, kRowInspect, kRowReset, kRowCount
 };
@@ -3605,7 +3630,7 @@ enum UiRow {
 const char *kRowLabels[kRowCount] = {
    "Upscaler", "Render resolution", "Output resolution", "Dynamic resolution", "Bounce light", "Light reach", "Lights traced",
    "Lights coming into range", "Lights tried per pixel", "Lights behind walls", "Light changes", "Light flicker",
-   "God rays (volumetric)", "  God ray strength", "Mission fog", "Bloom", "VSync", "Frame rate limit", "FPS counter", "Light gem and guards", "  Light gem brightness", "  Light gem falloff", "  Light gem response", "Light brightness", "Darkest exposure", "Ambient light", "Sky brightness (as seen)", "Sky light (on the level)", "Moonlight", "  Moon direction", "  Moon height",
+   "God rays (volumetric)", "  God ray strength", "Mission fog", "Bloom", "VSync", "Frame rate limit", "Frame generation", "FPS counter", "Light gem and guards", "  Light gem brightness", "  Light gem falloff", "  Light gem response", "Light brightness", "Darkest exposure", "Ambient light", "Sky brightness (as seen)", "Sky light (on the level)", "Moonlight", "  Moon direction", "  Moon height",
    "Light size (soft shadows)", "Surface roughness", "Model shading", "Model faces", "Torches and lamps", "Lamp and torch light", "Lamp reach", "Lights in walls", "Lamp glow", "Flame glow", "Materials", "Bumps", "Crevices", "Texture detail", "Parallax depth", "Polished reflections", "Water",
    "Debug view", "Freeze scene (test)", "Back faces (test)", "Light sampling (test)", "Blink nearest light (test)", "Performance log", "Inspect centre of view", "Reset to defaults",
 };
@@ -3721,8 +3746,19 @@ std::string row_value(int row)
    case kRowBackFaces: return g_dropBackFaces ? "Dropped" : "Shadows only";
    case kRowBlink: return g_blinkTest ? "On" : "Off";
    case kRowFrameCap:
-      snprintf(buf, sizeof(buf), "%d fps%s", g_cfg.frameCap, g_cfg.frameCap == 60 ? " (as the game)" : "");
+      snprintf(buf, sizeof(buf), "%d fps%s%s", g_cfg.frameCap, g_cfg.frameCap == 60 ? " (as the game)" : "",
+               frame_gen_on() ? " shown" : "");
       return buf;
+   case kRowFrameGen: {
+      if (!g_cfg.frameGen) return "Off";
+      const char *why = nullptr;
+      if (!frame_gen_available(&why)) {
+         snprintf(buf, sizeof(buf), "On: unavailable (%s)", why ? why : "?");
+         return buf;
+      }
+      if (g_cfg.upscale < 1 || g_cfg.upscale > 5) return "On (needs a MetalFX upscaler)";
+      return g_cfg.dynres > 0 ? "On, 2x (dynamic res. paused)" : "On, 2x frames";
+   }
    case kRowPerf: return g_cfg.perfLog ? "On: logs/perf.log" : "Off";
    case kRowReuse: {
       static const char *kReuse[] = {"Normal", "No spatial reuse", "No reuse", "8 shadow rays"};
@@ -3920,6 +3956,7 @@ void change_row(int row, int dir)
    case kRowReuse: g_reuseTest = (g_reuseTest + dir + 4) % 4; return;   // not saved
    case kRowBlink: g_blinkTest = !g_blinkTest; g_blinkId = ~0u; return;   // not saved
    case kRowPerf: g_cfg.perfLog = !g_cfg.perfLog; break;
+   case kRowFrameGen: g_cfg.frameGen = !g_cfg.frameGen; break;
    case kRowFrameCap: {
       static const int kCaps[] = {60, 100, 120};
       int i = 0;
@@ -4278,12 +4315,13 @@ void draw_ui(bool scene)
       int w, h;
       render_size(w, h);
       char line[128], line2[192];
-      if (g_cfg.dynres > 0)
+      const char *fgTag = frame_gen_on() ? " drawn (x2 shown)" : "";
+      if (g_cfg.dynres > 0 && !frame_gen_on())
          snprintf(line, sizeof(line), "%3.0f fps  %5.1f ms (worst %5.1f)  dynamic \x7f%dx%d",
                   g_ui.fps, g_ui.frameMs, g_ui.worstMs, g_drawableW, g_drawableH);
       else
-         snprintf(line, sizeof(line), "%3.0f fps  %5.1f ms (worst %5.1f)  %dx%d\x7f%dx%d",
-                  g_ui.fps, g_ui.frameMs, g_ui.worstMs, w, h, g_drawableW, g_drawableH);
+         snprintf(line, sizeof(line), "%3.0f fps%s  %5.1f ms (worst %5.1f)  %dx%d\x7f%dx%d",
+                  g_ui.fps, fgTag, g_ui.frameMs, g_ui.worstMs, w, h, g_drawableW, g_drawableH);
       // waiting in rgStartFrame is the GPU still busy with earlier frames
       const double game = std::max(0.0, g_ui.frameMs - g_ui.waitMs - g_ui.drawMs);
       char seen[48] = "";
@@ -5499,7 +5537,8 @@ extern "C" {
 
 int RenderRTActive(void) { return g_active ? 1 : 0; }
 
-int RenderRTFrameCap(void) { return g_active ? g_cfg.frameCap : 0; }
+// (with frame generation the limit is of the frames shown: half of them drawn)
+int RenderRTFrameCap(void) { return g_active ? (frame_gen_on() ? std::max(30, g_cfg.frameCap / 2) : g_cfg.frameCap) : 0; }
 
 int RenderRTDetectionWanted(void) { return g_active && g_cfg.rtDetection && g_frameNumber > 2 ? 1 : 0; }
 
