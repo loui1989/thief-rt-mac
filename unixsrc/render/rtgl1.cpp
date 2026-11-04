@@ -3703,7 +3703,7 @@ std::string row_value(int row)
    case kRowFog:
       return g_cfg.fog == 0 ? "Off" : g_cfg.fog == 1 ? "Light" : g_cfg.fog == 3 ? "Thick" : "As the mission";
    case kRowBloom: return g_cfg.bloom ? "On" : "Off";
-   case kRowVsync: return g_cfg.vsync ? "On" : "Off";
+   case kRowVsync: return g_cfg.vsync ? "On" : frame_gen_on() ? "On (for frame generation)" : "Off";
    case kRowFps: return g_cfg.fps ? "On" : "Off";
    case kRowLight: snprintf(buf, sizeof(buf), "%.2fx", g_cfg.light); return buf;
    case kRowDetection: return g_cfg.rtDetection ? "See the ray-traced light" : "Original lighting";
@@ -4849,7 +4849,10 @@ void Present(int drawableWidth, int drawableHeight, bool vsync)
 {
    if (!g_active)
       return;
-   g_vsync = vsync && g_cfg.vsync;
+   // (frame generation shows its frame between two by a timed present, which
+   // needs the display's sync: without it the presents backed up -- the CPU
+   // waited 300-500 ms a frame for a drawable, single-digit frame rates)
+   g_vsync = (vsync && g_cfg.vsync) || frame_gen_on();
    g_drawableW = std::max(drawableWidth, 1);
    g_drawableH = std::max(drawableHeight, 1);
    start_frame();
