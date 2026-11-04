@@ -433,6 +433,11 @@ BOOL CheckClimb(ObjID objID)
 
 // Set when the mantle under way ends in a crouch (see CheckMantle).
 static BOOL g_MantleCrouch = FALSE;
+// A mantle broken on the way up (the body knocking the ledge's edge -- run
+// into a table with jump held): not tried again by the retry below until
+// this sim time, or it began again every frame, the grunt with it, the
+// player hung against the ledge until jump was let go.
+static tSimTime g_MantleNoRetryUntil = 0;
 // where the crouched shape was found to fit, for the end of the mantle
 static mxs_vector g_MantleCrouchDest;
 
@@ -506,6 +511,11 @@ void BreakMantle(ObjID objID)
    // standing -- under the ceiling, and pushed back out of the space.)
    const BOOL end_crouched = g_MantleCrouch && pModel->GetMantlingState() >= 3;
    g_MantleCrouch = FALSE;
+   if (pModel->GetMantlingState() > 0 && pModel->GetMantlingState() < 3)
+   {
+      g_MantleNoRetryUntil = GetSimTime() + SIM_TIME_SECOND * 6 / 10;
+      MantleLog("mantle broken on the way up (the body met the ledge)");
+   }
 
    PlayerMotionActivate(kMoEnable);
    pModel->SetMantlingState(0);
@@ -776,6 +786,15 @@ BOOL CheckMantle(ObjID objID)
       }
    }
 
+   if (pModel->IsMantling() && !PhysObjValidPos(objID, NULL))
+   {
+      // wedged in something already (the body pushed into a table's edge):
+      // a climb from here only hangs, grunting -- the physics frees it first
+      MantleLog("wedged in something, not mantling from here");
+      pModel->SetMantlingState(0);
+      return FALSE;
+   }
+
    if (pModel->IsMantling())
    {
       mxs_vector target_pos;
@@ -905,7 +924,17 @@ BOOL CheckMantle(ObjID objID)
          return FALSE;
       }
 
-      // It fits: start the climb.
+      // It fits: start the climb -- from a standstill: running into the
+      // ledge, the run carried the body on into its edge as it rose, which
+      // broke the climb (as standing at the ledge and jumping does not)
+      {
+         mxs_vector vel;
+         PhysGetVelocity(objID, &vel);
+         vel.x = vel.y = 0;
+         if (vel.z < 0)
+            vel.z = 0;
+         PhysSetVelocity(objID, &vel);
+      }
       PlayerMotionActivate(kMoDisable);
       Label grunt = {"garclimb"};
       SchemaPlay(&grunt, NULL, NULL);
@@ -927,7 +956,7 @@ static void MantleRetry(cPhysModel *pModel)
    if (!pModel->IsPlayer() || pModel->IsMantling() || pModel->IsClimbing() ||
        !g_pPlayerMode->IsJumping() || g_pPlayerMode->GetMode() == kPM_Dead ||
        g_pPlayerMode->GetMode() == kPM_Swim || g_pPlayerMovement->GetGroundObj() != OBJ_NULL ||
-       PhysObjInWater(pModel->GetObjID()))
+       PhysObjInWater(pModel->GetObjID()) || GetSimTime() < g_MantleNoRetryUntil)
       return;
 
    // something right in front, at the body or the feet
