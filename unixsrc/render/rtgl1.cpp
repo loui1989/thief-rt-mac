@@ -141,7 +141,7 @@ struct Settings {
    int reach = 40;            // lights fade out with their walking distance (metres); 0: nearest maxLights
    int maxLights = 64;        // lights given to the path tracer, nearest first; 0 all
    int flicker = 0;           // flickering lights: 0 smoothed, 1 as the game, 2 nearly steady
-   bool smoothModels = false; // models shaded smooth (their normals blended across edges)
+   bool smoothModels = true;  // models shaded smooth (their normals blended across edges to 60 degrees)
    float ambient = 1.0f;      // the level's ambient light, as a faint glow of every surface
    float windowLight = 1.0f; // lit windows' own light (0 off)
    int candidates = 12;       // lights tried per pixel and per bounce (RTGL1: no rays, ALU only)
@@ -2020,10 +2020,12 @@ void upload_captured(uint64_t id, const CapturedPrim &p, bool passLight = false,
    // the light out (lit or doused, the room looked the same)
    if (passLight && (p.flags & RG_MESH_PRIMITIVE_SHADOW_ONLY))
       return;
-   // Flat: each face shaded by its own direction. RTGL1 bends a blended
-   // normal toward the viewer where it disagrees with the face (to keep
-   // reflections out of the surface), so smooth shading changes with the
-   // angle a model is seen from -- light that came and went as you moved.
+   // Flat: each face shaded by its own direction. RTGL1 bent a blended
+   // normal toward the viewer where it disagreed with the face (to keep
+   // reflections out of the surface), so smooth shading changed with the
+   // angle a model was seen from -- light that came and went as you moved.
+   // (rt/bin/shaders sanitizeNormal now bends only a normal turned away from
+   // the viewer: smooth is the default.)
    const RgMeshPrimitiveFlags shading =
       g_cfg.smoothModels ? 0u : RgMeshPrimitiveFlags(RG_MESH_PRIMITIVE_FORCE_EXACT_NORMALS);
    // A glowing part (a lamp's bulb, a torch's flame cup) as Blood RT's: it
