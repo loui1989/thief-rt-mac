@@ -1699,6 +1699,72 @@ static uint32 portal_rt_world_serial(void)
 static unsigned char portal_rt_texture_seen[PORTAL_RT_MAX_TEXTURE_IDS];
 static int portal_rt_max_texture_id = -1;
 
+// The mission's old textured sky (the sky mode "textures", no enhanced sky):
+// the background cube round the camera (portbg.c) with the sky's six faces
+// (texture ids 250-255: top, bottom, then the four round), mapped as the
+// hardware renderer maps them (ptdrawhw.c), for the path tracer's sky.
+// Every frame (their textures can change), only in that mode: in the star
+// mode (portal_sky_id is the star hack's) the stars are drawn instead.
+static void portal_rt_submit_skybox(void)
+{
+#define PORTAL_RT_BG_DIST 1200.0f
+   static const signed char corner[8][3] = {
+      { 1, 1, 1}, {-1, 1, 1}, {-1,-1, 1}, { 1,-1, 1},
+      { 1, 1,-1}, {-1, 1,-1}, {-1,-1,-1}, { 1,-1,-1}
+   };
+   extern uchar background_vertex_list[24];
+   extern PortalPolygonRenderInfo background_render_list[6];
+   extern BOOL SkyRendererUseEnhanced(void);
+   int f, i;
+   // (the enhanced sky sets the textures mode too, but draws itself)
+   if (portal_sky_id == BACKHACK_IDX || SkyRendererUseEnhanced())
+      return;
+   for (f = 0; f < 6; ++f) {
+      PortalPolygonRenderInfo *ri = &background_render_list[f];
+      r3s_texture tex = portal_get_texture(ri->texture_id);
+      mxs_vector v[4], *anchor;
+      mxs_real u2, v2, t[8], umin, vmin, w, h;
+      float xyz[12], uv[8];
+      if (!tex || tex->w <= 0 || tex->h <= 0)
+         continue;
+      for (i = 0; i < 4; ++i) {
+         const signed char *k = corner[background_vertex_list[f * 4 + i]];
+         v[i].x = k[0] * PORTAL_RT_BG_DIST;
+         v[i].y = k[1] * PORTAL_RT_BG_DIST;
+         v[i].z = k[2] * PORTAL_RT_BG_DIST;
+      }
+      anchor = &v[ri->texture_anchor < 4 ? ri->texture_anchor : 0];
+      u2 = mx_mag2_vec(&ri->tex_u);
+      v2 = mx_mag2_vec(&ri->tex_v);
+      if (u2 <= 0.0f || v2 <= 0.0f)
+         continue;
+      // As ptdrawhw.c maps the sky: the face is the texture once (not in
+      // 64-texel units, as a wall), each way from half a texel in from its
+      // edge to half a texel in from the other. Offset by whole repeats to
+      // 0..1 (the cube's own offsets put some faces at -1..0).
+      umin = vmin = 1e9f;
+      for (i = 0; i < 4; ++i) {
+         mxs_vector delta;
+         mx_sub_vec(&delta, &v[i], anchor);
+         t[i*2]   = mx_dot_vec(&delta, &ri->tex_u) / u2 + ri->u_base / 4096.0f;
+         t[i*2+1] = mx_dot_vec(&delta, &ri->tex_v) / v2 + ri->v_base / 4096.0f;
+         if (t[i*2] < umin) umin = t[i*2];
+         if (t[i*2+1] < vmin) vmin = t[i*2+1];
+      }
+      umin = (mxs_real)floor(umin + 0.5f);
+      vmin = (mxs_real)floor(vmin + 0.5f);
+      w = (mxs_real)tex->w;
+      h = (mxs_real)tex->h;
+      for (i = 0; i < 4; ++i) {
+         xyz[i*3] = v[i].x; xyz[i*3+1] = v[i].y; xyz[i*3+2] = v[i].z;
+         uv[i*2]   = (t[i*2] - umin) * (w - 1.0f) / w + 0.5f / w;
+         uv[i*2+1] = (t[i*2+1] - vmin) * (h - 1.0f) / h + 0.5f / h;
+      }
+      RenderRTSkyBoxFace(f, lgd3d_rt_texture_for_bitmap(tex), xyz, uv);
+   }
+#undef PORTAL_RT_BG_DIST
+}
+
 static void portal_rt_submit_world(void)
 {
    uint32 serial;
@@ -1858,6 +1924,7 @@ static void portal_rt_submit_world(void)
          RenderRTWorldTexture(c, handle);
       }
    }
+   portal_rt_submit_skybox();
 }
 
 // Which static lights can matter for this view: the lights the level's

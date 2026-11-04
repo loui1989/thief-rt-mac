@@ -60,6 +60,7 @@
 #include <objpos.h>
 #include <scrnman.h>
 #include <starhack.h>
+#include <star.h>
 #include <rndflash.h>
 #include <meshtex.h>
 
@@ -428,6 +429,29 @@ extern BOOL (*pSkyRenderCallback)(void);
 // which keeps each face's and gives them to its sky. Turned the six ways of
 // a cube: the four round, up and down.
 extern void lgd3d_render_flush(void);
+// The mission's old star sky (no enhanced sky): its stars, each a point in
+// its palette colour, as the game's star field turns them (starhack.c)
+extern int star_rate, star_axis;
+static BOOL rt_sky_star(struct sStarRenderCallbackData *d)
+{
+   r3s_point p = *d->pPoint;
+   gr_set_fcolor(d->color);
+   lgd3d_draw_point(&p);
+   return FALSE;   // (drawn: not the pixel path too)
+}
+static void rt_sky_stars(void)
+{
+   mxs_vector zero = {0, 0, 0};
+   r3_start_object_n(&zero, (mxs_ang)((tm_get_millisec() * star_rate / 16) & 0xffff), star_axis);
+   r3_start_block();
+   StarSetStarRenderCallback(rt_sky_star);
+   StarSetCheckBkgnd(FALSE);
+   StarSky();
+   StarRender();
+   StarSetStarRenderCallback(0);
+   r3_end_block();
+   r3_end_object();
+}
 static void rt_capture_sky_face(void)
 {
    static grs_canvas *s_canvas = NULL;
@@ -466,7 +490,10 @@ static void rt_capture_sky_face(void)
    }
    lgd3d_set_offsets(0, 0);
    RenderRTSkyFaceBegin(face, corners);
-   SkyRendererRender();
+   if (SkyRendererUseEnhanced())
+      SkyRendererRender();
+   else
+      rt_sky_stars();
    lgd3d_render_flush();
    RenderRTSkyFaceEnd();
    r3_end_frame();
@@ -525,8 +552,10 @@ void cam_render_scene(Position *pos, float zoom)
    if ((GetSkyMode() == kSkyModeStars) && !SkyRendererUseEnhanced())
       starfield_startframe(pos, zoom);
 
-   // (the path tracer's sky, drawn by the game: outside the main view)
-   if (RenderRTActive() && SkyRendererUseEnhanced())
+   // (the path tracer's sky, drawn by the game: outside the main view; the
+   // enhanced sky, or the old star field. The old textured sky: portal.c)
+   if (RenderRTActive() &&
+       (SkyRendererUseEnhanced() || GetSkyMode() == kSkyModeStars))
       rt_capture_sky_face();
 
    rendobj_init_frame();

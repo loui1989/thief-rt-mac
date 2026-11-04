@@ -158,6 +158,12 @@ int RenderRTSkyFaceWanted(void);
 int RenderRTSkyFaceSize(void);
 void RenderRTSkyFaceBegin(int face, const float corners[12]);
 void RenderRTSkyFaceEnd(void);
+// (The old star sky is drawn the same way: its stars.) The old textured sky,
+// every frame while the mission has it (portal.c): a face of the background
+// cube round the viewer (0 top, 1 bottom, 2-5 round), its corners (Dark
+// units, round the origin), their texture coordinates (0..1 across the
+// texture) and its texture (RenderBackendCreateTexture handle).
+void RenderRTSkyBoxFace(int face, void *texture, const float xyz[12], const float uv[8]);
 
 #ifdef __cplusplus
 }

@@ -1266,6 +1266,15 @@ size_t g_skyTris = 0;
 float g_skyScale = 0.0f;
 float g_skyBackdrop[3] = {0, 0, 0};   // the opaque layers' average colour (behind all)
 double g_skyBackSum[4] = {0, 0, 0, 0};   // one scale for every face's points (to ~100 m), so shared corners stay shared
+// The old textured sky (no enhanced sky, the sky mode "textures"): the
+// background cube's six faces, given every frame (RenderRTSkyBoxFace)
+struct SkyBoxFace {
+   RtTexture *tex = nullptr;
+   uint32_t serial = 0;
+   uint32_t frame = ~0u;   // g_frameNumber when given
+   RgPrimitiveVertex verts[6] = {};
+};
+SkyBoxFace g_skyBox[6];
 bool sky_ready();
 void upload_sky();
 
@@ -1293,7 +1302,7 @@ void render_size(int &w, int &h);
 void flush_lights();
 // MetalFX frame interpolation (macOS 26, with a MetalFX upscaler): whether the
 // library can, asked once; and whether it is on this frame
-bool frame_gen_available(const char **why = nullptr)
+[[maybe_unused]] bool frame_gen_available(const char **why = nullptr)
 {
    static int s_known = -1;
    static const char *s_why = nullptr;
@@ -1309,7 +1318,11 @@ bool frame_gen_available(const char **why = nullptr)
       *why = s_why;
    return s_known == 1;
 }
-bool frame_gen_on() { return g_cfg.frameGen && g_cfg.upscale >= 1 && g_cfg.upscale <= 5 && frame_gen_available(); }
+// Frame generation is off, its row gone: with two drawables to a frame, and
+// macOS handing each back only 2-3 refreshes after it is replaced (the
+// window's composition), a frame waited for a drawable from the one before:
+// 30 frames drawn at most (60 shown), fewer than without it.
+bool frame_gen_on() { return false; }
 
 bool metalfx_denoiser_available()
 {
@@ -3263,10 +3276,12 @@ void sky_capture(int primitive, const sRenderBackendVertex *v, int count)
       return d;
    };
    std::vector<SkyDraw> &face = g_skyFaces[c.face];
-   if (face.empty() || face.back().tex != g_bound[0] || face.back().blend != g_blend) {
+   // (a point -- an old sky's star -- has no texture, whatever is bound)
+   RtTexture *const tex = primitive == kRenderBackendPoints ? nullptr : g_bound[0];
+   if (face.empty() || face.back().tex != tex || face.back().blend != g_blend) {
       face.emplace_back();
-      face.back().tex = g_bound[0];
-      face.back().serial = g_bound[0] ? g_bound[0]->serial : 0;
+      face.back().tex = tex;
+      face.back().serial = tex ? tex->serial : 0;
       face.back().blend = g_blend;
    }
    std::vector<RgPrimitiveVertex> &out = face.back().verts;
@@ -3622,7 +3637,7 @@ const char *kUpscaleNames[] = {"Off",
                                "MetalFX Custom"};
 
 enum UiRow {
-   kRowUpscale, kRowScale, kRowOutput, kRowDynres, kRowBounces, kRowReach, kRowLights, kRowLightFade, kRowCandidates, kRowLightCull, kRowResponse, kRowFlicker, kRowVolumetric, kRowShafts, kRowFog, kRowBloom, kRowVsync, kRowFrameCap, kRowFrameGen,
+   kRowUpscale, kRowScale, kRowOutput, kRowDynres, kRowBounces, kRowReach, kRowLights, kRowLightFade, kRowCandidates, kRowLightCull, kRowResponse, kRowFlicker, kRowVolumetric, kRowShafts, kRowFog, kRowBloom, kRowVsync, kRowFrameCap,
    kRowFps, kRowDetection, kRowGemScale, kRowGemMatch, kRowGemEase, kRowLight, kRowExposure, kRowAmbient, kRowSkySeen, kRowSky, kRowMoon, kRowMoonDir, kRowMoonHeight, kRowLightSize, kRowRough, kRowSmooth, kRowSteady, kRowFixtures, kRowFixtureLight, kRowSmallLamps, kRowLightFix, kRowGlow, kRowFlameGlow, kRowMaterials, kRowBump, kRowCrevice, kRowTexDetail, kRowParallax, kRowPolish, kRowWater,
    kRowDebug, kRowFreeze, kRowBackFaces, kRowReuse, kRowBlink, kRowPerf, kRowInspect, kRowReset, kRowCount
 };
@@ -3630,7 +3645,7 @@ enum UiRow {
 const char *kRowLabels[kRowCount] = {
    "Upscaler", "Render resolution", "Output resolution", "Dynamic resolution", "Bounce light", "Light reach", "Lights traced",
    "Lights coming into range", "Lights tried per pixel", "Lights behind walls", "Light changes", "Light flicker",
-   "God rays (volumetric)", "  God ray strength", "Mission fog", "Bloom", "VSync", "Frame rate limit", "Frame generation", "FPS counter", "Light gem and guards", "  Light gem brightness", "  Light gem falloff", "  Light gem response", "Light brightness", "Darkest exposure", "Ambient light", "Sky brightness (as seen)", "Sky light (on the level)", "Moonlight", "  Moon direction", "  Moon height",
+   "God rays (volumetric)", "  God ray strength", "Mission fog", "Bloom", "VSync", "Frame rate limit", "FPS counter", "Light gem and guards", "  Light gem brightness", "  Light gem falloff", "  Light gem response", "Light brightness", "Darkest exposure", "Ambient light", "Sky brightness (as seen)", "Sky light (on the level)", "Moonlight", "  Moon direction", "  Moon height",
    "Light size (soft shadows)", "Surface roughness", "Model shading", "Model faces", "Torches and lamps", "Lamp and torch light", "Lamp reach", "Lights in walls", "Lamp glow", "Flame glow", "Materials", "Bumps", "Crevices", "Texture detail", "Parallax depth", "Polished reflections", "Water",
    "Debug view", "Freeze scene (test)", "Back faces (test)", "Light sampling (test)", "Blink nearest light (test)", "Performance log", "Inspect centre of view", "Reset to defaults",
 };
@@ -3749,16 +3764,6 @@ std::string row_value(int row)
       snprintf(buf, sizeof(buf), "%d fps%s%s", g_cfg.frameCap, g_cfg.frameCap == 60 ? " (as the game)" : "",
                frame_gen_on() ? " shown" : "");
       return buf;
-   case kRowFrameGen: {
-      if (!g_cfg.frameGen) return "Off";
-      const char *why = nullptr;
-      if (!frame_gen_available(&why)) {
-         snprintf(buf, sizeof(buf), "On: unavailable (%s)", why ? why : "?");
-         return buf;
-      }
-      if (g_cfg.upscale < 1 || g_cfg.upscale > 5) return "On (needs a MetalFX upscaler)";
-      return g_cfg.dynres > 0 ? "On, 2x (dynamic res. paused)" : "On, 2x frames";
-   }
    case kRowPerf: return g_cfg.perfLog ? "On: logs/perf.log" : "Off";
    case kRowReuse: {
       static const char *kReuse[] = {"Normal", "No spatial reuse", "No reuse", "8 shadow rays"};
@@ -3956,7 +3961,6 @@ void change_row(int row, int dir)
    case kRowReuse: g_reuseTest = (g_reuseTest + dir + 4) % 4; return;   // not saved
    case kRowBlink: g_blinkTest = !g_blinkTest; g_blinkId = ~0u; return;   // not saved
    case kRowPerf: g_cfg.perfLog = !g_cfg.perfLog; break;
-   case kRowFrameGen: g_cfg.frameGen = !g_cfg.frameGen; break;
    case kRowFrameCap: {
       static const int kCaps[] = {60, 100, 120};
       int i = 0;
@@ -5871,6 +5875,30 @@ void RenderRTSkyFaceEnd(void)
    g_skyNextFace = (face + 1) % 6;
 }
 
+void RenderRTSkyBoxFace(int face, void *texture, const float xyz[12], const float uv[8])
+{
+   if (!g_active || face < 0 || face > 5 || !texture || !xyz || !uv)
+      return;
+   SkyBoxFace &b = g_skyBox[face];
+   b.tex = static_cast<RtTexture *>(texture);
+   b.serial = b.tex->serial;
+   if (b.frame == ~0u || g_frameNumber - b.frame > 1u)
+      fprintf(stderr, "RT: the old textured sky's face %d: %s\n", face, texture_name(b.tex));
+   b.frame = g_frameNumber;
+   // round the origin (the sky is drawn from it), well inside the backdrop
+   const float R = 120.0f / 1200.0f;
+   static const int order[6] = {0, 1, 2, 0, 2, 3};
+   for (int i = 0; i < 6; ++i) {
+      RgPrimitiveVertex &d = b.verts[i];
+      d = {};
+      for (int k = 0; k < 3; ++k)
+         d.position[k] = xyz[order[i] * 3 + k] * R;
+      d.texCoord[0] = uv[order[i] * 2];
+      d.texCoord[1] = uv[order[i] * 2 + 1];
+      d.color = pack_color(1, 1, 1, 1);
+   }
+}
+
 int RenderRTSuppressCapture(int suppress)
 {
    const int previous = g_suppress ? 1 : 0;
@@ -7261,7 +7289,20 @@ void build_window_lights()
 // (drawn from the origin: RgDrawFrameSkyParams.skyViewerPosition). All
 // translucent, so they are laid down in the game's order, each over the last,
 // as it drew them with the depth test off; an additive draw (a glow) adds.
-bool sky_ready() { return g_skyFacesSeen == 0x3fu && SkyRendererUseEnhanced(); }
+// The mission's sky for the path tracer: the enhanced sky, or the old star
+// field, drawn into the six faces (each face once since the world came); the
+// old textured sky, any face of it given this frame or the last.
+bool skybox_given(const SkyBoxFace &f) { return f.frame != ~0u && g_frameNumber - f.frame <= 1u && f.tex && f.tex->serial == f.serial; }
+bool sky_drawn_in_faces() { return SkyRendererUseEnhanced() || GetSkyMode() == 1; }
+bool sky_ready()
+{
+   if (sky_drawn_in_faces())
+      return g_skyFacesSeen == 0x3fu;
+   for (const SkyBoxFace &f : g_skyBox)
+      if (skybox_given(f))
+         return true;
+   return false;
+}
 void upload_sky()
 {
    if (!sky_ready())
@@ -7308,6 +7349,31 @@ void upload_sky()
          .emissiveGi = 0.0f,
       };
       upload(0x37ffff000ull, prim);
+   }
+   if (!sky_drawn_in_faces()) {
+      for (int f = 0; f < 6; ++f) {
+         SkyBoxFace &b = g_skyBox[f];
+         if (!skybox_given(b))
+            continue;
+         auto prim = RgMeshPrimitiveInfo{
+            .sType = RG_STRUCTURE_TYPE_MESH_PRIMITIVE_INFO,
+            .pNext = nullptr,
+            .flags = RG_MESH_PRIMITIVE_SKY | RG_MESH_PRIMITIVE_TRANSLUCENT,
+            .primitiveIndexInMesh = 0,
+            .pVertices = b.verts,
+            .vertexCount = 6,
+            .pIndices = nullptr,
+            .indexCount = 0,
+            .pTextureName = texture_name(b.tex),
+            .textureFrame = 0,
+            .color = pack_color(1, 1, 1, 1),
+            .emissive = 0.0f,
+            .classicLight = 1.0f,
+            .emissiveGi = 0.0f,
+         };
+         upload(0x37fff0000ull + uint64_t(f), prim);
+      }
+      return;
    }
    for (int f = 0; f < 6; ++f) {
       uint64_t k = 0;
