@@ -234,9 +234,9 @@ class brick       0.90 0.00 1.00 0.00
 class stone       0.85 0.00 0.90 0.00
 class rock        0.95 0.00 1.10 0.00
 class skin        0.80 0.00 0.15 0.00
-class blood       0.10 0.00 0.00 1.30
+class blood       0.25 0.00 0.40 0.70
 
-# pools of blood: wet, they mirror the room
+# pools of blood: wet and thick, a soft, uneven sheen of the room
 *blood*          blood
 */blod*          blood
 
