@@ -6080,9 +6080,16 @@ void RenderRTDrawWorld(int primitive, const sRenderBackendVertex *v, const float
                   const RgFloat3D &l = g_lightPositions[li];
                   const float dx = l.data[0] - m[0], dy = l.data[1] - m[1], dz = l.data[2] - m[2];
                   if (dx * dx + dy * dy + dz * dz < 0.6f * 0.6f) {
+                     // (an electric lamp's light -- a lamp, a "light" -- is no flame's,
+                     // and put out by no particles: bubbles or weed by it that the colour
+                     // test took for a flame turned it off whenever none were being
+                     // made: Bafford's sewers)
+                     auto kind = g_lightOwnerKind.find(g_pendingLights[li].id);
                      g_fixtureLights.insert(g_pendingLights[li].id);
-                     g_flameLights.insert(g_pendingLights[li].id);
+                     if (kind == g_lightOwnerKind.end() || kind->second != 1)
+                        g_flameLights.insert(g_pendingLights[li].id);
                      if (g_currentObject && g_pendingLights[li].id < 0x10000u &&
+                         (kind == g_lightOwnerKind.end() || kind->second != 1) &&
                          RenderRTGameParticleLit(g_currentObject) >= 0)
                         g_lightFlameObj[g_pendingLights[li].id] = g_currentObject;
                      break;
@@ -6850,7 +6857,7 @@ void RenderRTLight(uint32_t id, const float pos[3], const float rgb[3], float ra
    // its flame put out (doused: the particle group off, or gone), the light
    // with it -- whatever the game left it at
    if (auto fl = g_lightFlameObj.find(id); fl != g_lightFlameObj.end() && peak > 0.5f &&
-       RenderRTGameParticleLit(fl->second) != 1) {
+       g_lightOwnerKind[id] != 1 && RenderRTGameParticleLit(fl->second) != 1) {
       static int s_told = 0;
       if (s_told < 20 && !g_lightState[id].flameOut) {
          ++s_told;
