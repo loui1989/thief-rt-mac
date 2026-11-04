@@ -262,6 +262,14 @@ static void render_single_obj(invRendState *us, BOOL bClearZBuffer)
          md_mat_colors_set(m);
          mld_multi_hilight = 0;
    mld_multi_ambient = 0.1f;
+#ifdef RGB_LIGHTING
+         // (the coloured ambient too: it was left as the last object lit in the
+         // world had it -- the mission's ambient plus that object's extra light,
+         // a glowing lamp's -- so the light gem and the health shields, lit
+         // here, flashed brighter and darker as the objects drawn before them
+         // changed from frame to frame)
+         mld_multi_rgb_ambient.el[0] = mld_multi_rgb_ambient.el[1] = mld_multi_rgb_ambient.el[2] = 0.1f;
+#endif
          mld_multi_ambient_only = FALSE;
          mld_multi_unlit = FALSE;
          ml_multi_set_lights_for_object(NUM_LIGHTS,tmplights,&obj_loc,2.0);
