@@ -140,6 +140,10 @@ static ObjID gGamepadLastWeapon = OBJ_NULL;
 // opened with the mouse (+inv_wheel): a cursor, in pixels from the screen's
 // middle, picks a slot in whichever ring it is nearer
 static BOOL gInvRadialMouse = FALSE;
+// the ring the mouse last chose in (-1 none): only its choice is taken when
+// the wheel closes -- the cursor starts between the rings, where a nudge the
+// wrong way chose the weapon on that side too (or instead)
+static int gInvRadialMouseRing = -1;
 static float gInvRadialCursor[2] = {0.0f, 0.0f};
 // each slot's picture: its object's model, as the HUD shows the one in hand
 static invRendState* gInvRadialRend[INV_RADIAL_STICK_COUNT][INV_RADIAL_MAX_ENTRIES];
@@ -1046,8 +1050,16 @@ static void radial_close(BOOL apply)
 
    if (apply)
    {
-      radial_apply(0);
-      radial_apply(1);
+      if (gInvRadialMouse)
+      {
+         if (gInvRadialMouseRing >= 0)
+            radial_apply(gInvRadialMouseRing);
+      }
+      else
+      {
+         radial_apply(0);
+         radial_apply(1);
+      }
       InvUIRefresh();
    }
    gInvRadialActive = FALSE;
@@ -1071,6 +1083,7 @@ static void radial_layout(int &width, int &height, int &radius)
 void InvUIRadialSetMouse(BOOL mouse)
 {
    gInvRadialMouse = mouse;
+   gInvRadialMouseRing = -1;
    gInvRadialCursor[0] = gInvRadialCursor[1] = 0.0f;
 }
 
@@ -1100,8 +1113,19 @@ void InvUIRadialMouseMove(float dx, float dyUp)
    const int k = fabs(px - cx[0]) <= fabs(px - cx[1]) ? 0 : 1;
    const float vx = px - cx[k], vy = py - cy;
    const float d = (float)sqrt((double)(vx * vx + vy * vy));
-   if (d > radius * 0.3f)
+   // (only near a ring: between the two, where the cursor starts, the
+   // nearer ring's centre is some 1.4 of its radius away -- no choice there)
+   if (d > radius * 0.3f && d < radius * 1.25f)
+   {
+      if (k != gInvRadialMouseRing)
+      {
+         // a choice in the other ring is undone: only one changes
+         const int other = 1 - k;
+         gInvRadial[other].selected = gInvRadial[other].current;
+         gInvRadialMouseRing = k;
+      }
       InvUIRadialSetStick(k, vx / d, -vy / d);
+   }
 }
 
 BOOL InvUIRadialActive(void)
