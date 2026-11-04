@@ -847,26 +847,47 @@ void cAutomap::RedrawDisplay()
    strcpy( buf, "f_scrp12" );
    config_get_raw( "automap_note_font", buf, sizeof(buf)-1 );
    pFontRes = pResMan->Bind( buf, RESTYPE_FONT, NULL, mResPath );
+   // (a mission without the note font -- Black Parade has no f_scrp12 --
+   // wrote its notes with no font at all: a crash on clicking the map.
+   // Then the panel's own font; with none, no notes drawn.)
+   grs_font* pNoteFont = NULL;
+   BOOL bPanelFont = FALSE;
    if ( pFontRes ) {
-      grs_font* pFont = (grs_font*) pFontRes->Lock(); 
-      gr_set_font( pFont );
-   }
-
-   gr_set_fcolor( 0 );
-   for ( i = 0; i < gAnnotations.Size(); i++ ) {
-      if ( gAnnotations[i].page == mPageNum ) {
-         DrawAnnotation( &(gAnnotations[i]), FALSE );
+      pNoteFont = (grs_font*) pFontRes->Lock(); 
+      if ( !pNoteFont ) {
+         pFontRes->Unlock();
+         SafeRelease( pFontRes );
+         pFontRes = NULL;
       }
    }
+   if ( !pNoteFont && mpFontRes ) {
+      pNoteFont = (grs_font*) mpFontRes->Lock();
+      if ( pNoteFont )
+         bPanelFont = TRUE;
+      else
+         mpFontRes->Unlock();
+   }
 
-   // draw the current annotation
-   if ( mMapMode == kMapModeAddText ) {
-      DrawAnnotation( &mCurAnnotation, TRUE );
+   if ( pNoteFont ) {
+      gr_set_font( pNoteFont );
+      gr_set_fcolor( 0 );
+      for ( i = 0; i < gAnnotations.Size(); i++ ) {
+         if ( gAnnotations[i].page == mPageNum ) {
+            DrawAnnotation( &(gAnnotations[i]), FALSE );
+         }
+      }
+
+      // draw the current annotation
+      if ( mMapMode == kMapModeAddText ) {
+         DrawAnnotation( &mCurAnnotation, TRUE );
+      }
    }
 
    if ( pFontRes ) {
       pFontRes->Unlock(); 
    }
+   if ( bPanelFont )
+      mpFontRes->Unlock();
 
    // restore old clip window
    gr_restore_cliprect( &oldClip.i );
@@ -1089,7 +1110,10 @@ cAutomap::MapRegionEventHandler( uiEvent  *pEvent,
                case kMapModeEraseText:
                   // find annotation which was clicked on & delete it
                   grs_font* pFont = (grs_font*) mpFontRes->Lock();
-                  for ( i = 0; i < gAnnotations.Size(); i++ ) {
+                  // (the notes' extents are measured in the current font)
+                  if ( pFont )
+                     gr_set_font( pFont );
+                  for ( i = 0; i < gAnnotations.Size() && pFont; i++ ) {
                      // get string extents...
                      if ( (gAnnotations[i].page == mPageNum) &&
                           OverlapsAnnotation( &(gAnnotations[i]), x, y ) ) {
@@ -1112,7 +1136,9 @@ cAutomap::MapRegionEventHandler( uiEvent  *pEvent,
             }
             // find annotation which was clicked on & delete it
             grs_font* pFont = (grs_font*) mpFontRes->Lock();
-            for ( i = 0; i < gAnnotations.Size(); i++ ) {
+            if ( pFont )
+               gr_set_font( pFont );
+            for ( i = 0; i < gAnnotations.Size() && pFont; i++ ) {
                if ( (gAnnotations[i].page == mPageNum) &&
                     OverlapsAnnotation( &(gAnnotations[i]), x, y ) ) {
                   gAnnotations.DeleteItem( i );
