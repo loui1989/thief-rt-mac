@@ -151,6 +151,7 @@ struct Settings {
    float windowLight = 1.0f; // lit windows' own light (0 off)
    int candidates = 12;       // lights tried per pixel and per bounce (RTGL1: no rays, ALU only)
    int evMin = 3;             // eye adaptation's darkest exposure (EV; Blood RT 5, RTGL1 0)
+   int darkAdapt = 2;         // the eyes getting used to the dark: up to this many stops brighter (0 off)
    int response = 0;          // how fast lighting changes show: 0 calm (Blood RT), 1 quick, 2 instant
    bool rtDetection = true;   // the light gem and the guards go by the ray-traced light
    bool bloom = true;         // the glow around bright light (~0.8 ms at 4K output)
@@ -248,6 +249,7 @@ void load_settings()
       else if (k == "light_candidates") g_cfg.candidates = std::clamp(int(value), 4, 32);
       else if (k == "window_light") g_cfg.windowLight = std::clamp(float(value), 0.0f, 4.0f);
       else if (k == "ev_min") g_cfg.evMin = std::clamp(int(value), 0, 7);
+      else if (k == "dark_adapt") g_cfg.darkAdapt = std::clamp(int(value), 0, 3);
       else if (k == "light_response") g_cfg.response = std::clamp(int(value), 0, 2);
       else if (k == "rt_detection") g_cfg.rtDetection = value != 0;
       else if (k == "bloom") g_cfg.bloom = value != 0;
@@ -308,6 +310,7 @@ void save_settings()
    fprintf(f, "gem_scale = %.3f\n", g_cfg.gemScale);
    fprintf(f, "sky_seen = %.2f\n", g_cfg.skySeen);
    fprintf(f, "texture_detail = %d\n", g_cfg.texDetail);
+   fprintf(f, "dark_adapt = %d\n", g_cfg.darkAdapt);
    fprintf(f, "frame_generation = %d\n", int(g_cfg.frameGen));
    fprintf(f, "moon_shafts = %d\ngod_ray_strength = %.2f\nmoon = %.2f\nmoon_azimuth = %d\nmoon_height = %d\nmetalfx_denoiser = %d\n",
            int(g_cfg.moonShafts), g_cfg.shafts, g_cfg.moon, g_cfg.moonAzimuth, g_cfg.moonHeight, int(g_cfg.mfxDenoise));
@@ -1217,6 +1220,9 @@ std::unordered_map<uint32_t, uint32_t> g_lightFlameObj;
 float g_levelAmbient = 0.0f;
 // the player's light, by the game and by the path tracer (for the frame counter)
 float g_noteOriginal = -1, g_noteTraced = -1;
+uint32_t g_noteFrame = 0;   // when the light gem last read the traced light
+// The eyes getting used to the dark: stops of exposure gained, now (draw_frame)
+float g_darkAdapted = 0.0f;
 float ambient_emissive()
 {
    // calibrated by eye against the OpenGL renderer's dark corners
@@ -3645,14 +3651,14 @@ const char *kUpscaleNames[] = {"Off",
 
 enum UiRow {
    kRowUpscale, kRowScale, kRowOutput, kRowDynres, kRowBounces, kRowReach, kRowLights, kRowLightFade, kRowCandidates, kRowLightCull, kRowResponse, kRowFlicker, kRowVolumetric, kRowShafts, kRowFog, kRowBloom, kRowVsync, kRowFrameCap,
-   kRowFps, kRowDetection, kRowGemScale, kRowGemMatch, kRowGemEase, kRowLight, kRowExposure, kRowAmbient, kRowSkySeen, kRowSky, kRowMoon, kRowMoonDir, kRowMoonHeight, kRowLightSize, kRowRough, kRowSmooth, kRowSteady, kRowFixtures, kRowFixtureLight, kRowSmallLamps, kRowLightFix, kRowGlow, kRowFlameGlow, kRowMaterials, kRowBump, kRowCrevice, kRowTexDetail, kRowParallax, kRowPolish, kRowWater,
+   kRowFps, kRowDetection, kRowGemScale, kRowGemMatch, kRowGemEase, kRowLight, kRowExposure, kRowDarkAdapt, kRowAmbient, kRowSkySeen, kRowSky, kRowMoon, kRowMoonDir, kRowMoonHeight, kRowLightSize, kRowRough, kRowSmooth, kRowSteady, kRowFixtures, kRowFixtureLight, kRowSmallLamps, kRowLightFix, kRowGlow, kRowFlameGlow, kRowMaterials, kRowBump, kRowCrevice, kRowTexDetail, kRowParallax, kRowPolish, kRowWater,
    kRowDebug, kRowFreeze, kRowBackFaces, kRowReuse, kRowBlink, kRowPerf, kRowInspect, kRowReset, kRowCount
 };
 
 const char *kRowLabels[kRowCount] = {
    "Upscaler", "Render resolution", "Output resolution", "Dynamic resolution", "Bounce light", "Light reach", "Lights traced",
    "Lights coming into range", "Lights tried per pixel", "Lights behind walls", "Light changes", "Light flicker",
-   "God rays (volumetric)", "  God ray strength", "Mission fog", "Bloom", "VSync", "Frame rate limit", "FPS counter", "Light gem and guards", "  Light gem brightness", "  Light gem falloff", "  Light gem response", "Light brightness", "Darkest exposure", "Ambient light", "Sky brightness (as seen)", "Sky light (on the level)", "Moonlight", "  Moon direction", "  Moon height",
+   "God rays (volumetric)", "  God ray strength", "Mission fog", "Bloom", "VSync", "Frame rate limit", "FPS counter", "Light gem and guards", "  Light gem brightness", "  Light gem falloff", "  Light gem response", "Light brightness", "Darkest exposure", "  Eyes adjust to the dark", "Ambient light", "Sky brightness (as seen)", "Sky light (on the level)", "Moonlight", "  Moon direction", "  Moon height",
    "Light size (soft shadows)", "Surface roughness", "Model shading", "Model faces", "Torches and lamps", "Lamp and torch light", "Lamp reach", "Lights in walls", "Lamp glow", "Flame glow", "Materials", "Bumps", "Crevices", "Texture detail", "Parallax depth", "Polished reflections", "Water",
    "Debug view", "Freeze scene (test)", "Back faces (test)", "Light sampling (test)", "Blink nearest light (test)", "Performance log", "Inspect centre of view", "Reset to defaults",
 };
@@ -3743,6 +3749,10 @@ std::string row_value(int row)
    case kRowGemEase:
       if (g_cfg.gemEase <= 0.0f) return "Instant";
       snprintf(buf, sizeof(buf), "%.2f s", g_cfg.gemEase);
+      return buf;
+   case kRowDarkAdapt:
+      if (g_cfg.darkAdapt <= 0) return "Off";
+      snprintf(buf, sizeof(buf), "Up to %dx brighter (now %.1fx)", 1 << g_cfg.darkAdapt, std::exp2(g_darkAdapted));
       return buf;
    case kRowExposure:
       snprintf(buf, sizeof(buf), "EV %d%s", g_cfg.evMin, g_cfg.evMin == 5 ? " (Blood RT)" : g_cfg.evMin == 0 ? " (brightest)" : "");
@@ -3950,6 +3960,7 @@ void change_row(int row, int dir)
       g_cfg.gemEase = std::clamp(std::round(g_cfg.gemEase * 20.0f) / 20.0f + 0.05f * dir, 0.0f, 1.0f);
       break;
    case kRowExposure: g_cfg.evMin = std::clamp(g_cfg.evMin + dir, 0, 7); break;
+   case kRowDarkAdapt: g_cfg.darkAdapt = std::clamp(g_cfg.darkAdapt + dir, 0, 3); break;
    case kRowAmbient: g_cfg.ambient = g_cfg.ambient <= 0.0f && dir > 0 ? 0.25f
                                     : (g_cfg.ambient <= 0.25f && dir < 0 ? 0.0f
                                                                          : step_mul(g_cfg.ambient, dir, 0.25f, 20.0f));
@@ -4512,8 +4523,46 @@ void draw_ui(bool scene)
                 g_drawableH, full);
 }
 
+// The eyes getting used to the dark. Out of the light a while, the darkest
+// exposure (the eye adaptation's limit, "Darkest exposure") is let down,
+// stop by stop, as eyes take in more of a dark place the longer they are in
+// it -- slowly (about half the way in 10 s, nearly all in half a minute) --
+// and what is seen loses some of its colour, as night sight does. Back in
+// the light it is gone in a couple of seconds. How much in the dark: the
+// light on the player, as the light gem has it (the path tracer's), or at the
+// camera if the gem does not read it.
+struct GemPart;
+float gem_value(const float pos[3], std::vector<GemPart> *parts);
+void update_dark_adapt(bool sceneDrawn)
+{
+   static auto s_t = std::chrono::steady_clock::now();
+   const auto now = std::chrono::steady_clock::now();
+   const float dt = std::min(std::chrono::duration<float>(now - s_t).count(), 0.25f);
+   s_t = now;
+   if (g_cfg.darkAdapt <= 0 || !g_worldValid) {
+      g_darkAdapted = 0.0f;
+      return;
+   }
+   if (!sceneDrawn)
+      return;
+   static float s_lit = 1.0f;
+   static uint32_t s_sampled = 0;
+   if (g_noteTraced >= 0 && g_frameNumber - g_noteFrame < 10)
+      s_lit = g_noteTraced;
+   else if (g_frameNumber - s_sampled >= 6) {
+      s_sampled = g_frameNumber;
+      s_lit = gem_value(g_camera.pos, nullptr) * g_cfg.gemScale;
+   }
+   // (the light gem's scale: 0.1 is deep shadow, 0.35 and up a lit place)
+   const float dark = std::clamp((0.35f - s_lit) / 0.25f, 0.0f, 1.0f);
+   const float target = float(g_cfg.darkAdapt) * dark;
+   const float tau = target > g_darkAdapted ? 14.0f : 1.5f;
+   g_darkAdapted += (target - g_darkAdapted) * (1.0f - std::exp(-dt / tau));
+}
+
 void draw_frame(bool sceneDrawn)
 {
+   update_dark_adapt(sceneDrawn);
    // (time since start: RTGL1 keeps it as a 32-bit float)
    static const double s_start = now_seconds();
    double current = now_seconds() - s_start;
@@ -4844,10 +4893,12 @@ void draw_frame(bool sceneDrawn)
       .sType = RG_STRUCTURE_TYPE_DRAW_FRAME_TONEMAPPING_PARAMS,
       .pNext = &bloom,
       .disableEyeAdaptation = false,
-      .ev100Min = float(g_cfg.evMin),
+      // (let down as the eyes get used to the dark: update_dark_adapt)
+      .ev100Min = std::max(float(g_cfg.evMin) - g_darkAdapted, -1.0f),
       .ev100Max = std::max(float(g_cfg.evMin) + 0.1f, 7.7f),
       .luminanceWhitePoint = 3.0f,
-      .saturation = {{0, 0, 0}},
+      // night sight: less colour, the reds first (a third gone when fully used to the dark)
+      .saturation = {{-0.13f * g_darkAdapted, -0.10f * g_darkAdapted, -0.07f * g_darkAdapted}},
       .crosstalk = {{1.0f, 1.0f, 1.0f / 16.0f}},
       .contrast = 0.1f,
       .hdrBrightness = 1.0f,
@@ -4959,6 +5010,22 @@ void Present(int drawableWidth, int drawableHeight, bool vsync)
    }
    const bool scene = g_cameraUploaded;
    count_frame(scene);
+   {
+      // (diagnosis: the HUD missing for a frame or two -- its icons blinking)
+      static size_t s_n[2] = {0, 0};
+      static bool s_scene[2] = {false, false};
+      static int s_told = 0;
+      const size_t n = g_overlays.size();
+      if (scene && s_scene[0] && s_scene[1] && s_n[1] >= 3 && s_n[0] * 2 <= s_n[1] && n * 2 > s_n[1] * 1 && s_told < 30) {
+         ++s_told;
+         fprintf(stderr, "RT: the HUD's 2D draws dipped for a frame: %zu, then %zu, then %zu (frame %u)\n", s_n[1], s_n[0], n,
+                 g_frameNumber);
+      }
+      s_n[1] = s_n[0];
+      s_n[0] = n;
+      s_scene[1] = s_scene[0];
+      s_scene[0] = scene;
+   }
 
    // lgd3d's 2D draws after the main view
    uint64_t id = 0x200000000ull;
@@ -5783,6 +5850,43 @@ int RenderRTPointLighting(const float pos[3], float *value)
    }
    float total = gem_value(pos, nullptr) * g_cfg.gemScale;
    {
+      // (diagnosis: the gem's light swinging up and down many times a second
+      // -- the gem blinking -- in the log, with the lights that make it)
+      static float s_hist[48];
+      static double s_histT[48];
+      static int s_histN = 0, s_told = 0;
+      static double s_lastTold = -10.0;
+      const double t = now_seconds();
+      s_hist[s_histN % 48] = total;
+      s_histT[s_histN % 48] = t;
+      ++s_histN;
+      int turns = 0, dirPrev = 0;
+      float lo = 1e9f, hi = -1e9f;
+      for (int i = std::max(0, s_histN - 48) + 1; i < s_histN; ++i) {
+         if (t - s_histT[i % 48] > 1.5)
+            continue;
+         const float d = s_hist[i % 48] - s_hist[(i - 1) % 48];
+         lo = std::min(lo, s_hist[i % 48]);
+         hi = std::max(hi, s_hist[i % 48]);
+         if (std::fabs(d) < 0.05f)
+            continue;
+         const int dir = d > 0 ? 1 : -1;
+         if (dirPrev && dir != dirPrev)
+            ++turns;
+         dirPrev = dir;
+      }
+      if (turns >= 4 && hi - lo > 0.15f && s_told < 20 && t - s_lastTold > 3.0) {
+         ++s_told;
+         s_lastTold = t;
+         std::vector<GemPart> parts;
+         gem_value(pos, &parts);
+         fprintf(stderr, "RT: light gem swinging: %d turns in 1.5 s between %.2f and %.2f (frame %u); its lights:", turns, lo, hi, g_frameNumber);
+         for (const GemPart &gp : parts)
+            fprintf(stderr, " %u=%.2f@%.1fm%s", gp.id, gp.value, gp.dist, gp.blocked ? "(shadowed)" : "");
+         fprintf(stderr, "\n");
+      }
+   }
+   {
       // eased over a moment (about a fifth of a second either way), as the
       // eye takes in a change of light: stepping out of a shadow lights the
       // gem quickly but not in a single frame. A jump of place (a load, a
@@ -5814,6 +5918,7 @@ void RenderRTNoteLighting(float original, float traced)
 {
    g_noteOriginal = original;
    g_noteTraced = traced;
+   g_noteFrame = g_frameNumber;
 }
 
 void RenderRTSceneBegin(const float pos[3], const float fwd[3], const float left[3],
