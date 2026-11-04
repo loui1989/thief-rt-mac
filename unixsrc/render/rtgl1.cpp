@@ -57,6 +57,10 @@
 #include <unordered_set>
 #include <vector>
 #include <dlfcn.h>
+#include <cerrno>
+#include <execinfo.h>
+#include <pthread.h>
+#include <signal.h>
 extern "C" int GetSkyMode(void);              // render.cpp: 0 textures, 1 stars
 extern "C" int SkyRendererUseEnhanced(void);  // skyrend.cpp: the clouds-and-moon sky
 extern "C" int SkyRendererGetCelestialDir(float dir[3]);   // and where its moon is
@@ -3005,6 +3009,8 @@ void upload_world()
 // ============================================================================
 // darkrt: called by opengl.cpp
 
+namespace { void wd_start(); }   // (the watchdog, below)
+
 namespace darkrt {
 
 bool Wanted()
@@ -3043,6 +3049,7 @@ bool Wanted()
 bool Open(SDL_Window *window)
 {
    load_settings();
+   wd_start();
    // the Metal backend's GPU timeline, every 2 seconds, in the log
    if (env_float("THIEF_RT_PERF", 0) != 0)
       g_cfg.perfLog = true;
@@ -4264,8 +4271,94 @@ void perf_frame(double t)
    g_perf.windowStart = t;
 }
 
+// The watchdog (with the performance log on): a frame that takes over a
+// quarter of a second has the main thread's stack written to the log
+// (logs/thief.log, "Watchdog:") -- a hitch at 250 ms, and a freeze again
+// every 2 s, 6 times at most -- so a stall says where the game was.
+std::atomic<int64_t> g_wdBeat{0};       // steady-clock ns of the last frame
+std::atomic<bool> g_wdScene{false};     // that frame showed the 3D view
+pthread_t g_wdMain;
+void *g_wdFrames[48];
+std::atomic<int> g_wdCount{-1};
+int64_t wd_now()
+{
+   return std::chrono::duration_cast<std::chrono::nanoseconds>(
+             std::chrono::steady_clock::now().time_since_epoch()).count();
+}
+void wd_signal(int)
+{
+   const int saved = errno;
+   g_wdCount.store(backtrace(g_wdFrames, 48));
+   errno = saved;
+}
+void wd_report(int64_t stallMs, int sample)
+{
+   const int n = g_wdCount.load();
+   if (n <= 0)
+      return;
+   fprintf(stderr, "Watchdog: the main thread %lld ms into a frame (sample %d), at:\n", (long long)stallMs, sample);
+   // (0 the handler, 1 the signal's trampoline)
+   for (int i = 2; i < n && i < 40; ++i) {
+      Dl_info info{};
+      const char *image = "?";
+      unsigned long long off = 0;
+      if (dladdr(g_wdFrames[i], &info) && info.dli_fname) {
+         image = strrchr(info.dli_fname, '/') ? strrchr(info.dli_fname, '/') + 1 : info.dli_fname;
+         off = (unsigned long long)((const char *)g_wdFrames[i] - (const char *)info.dli_fbase);
+      }
+      const char *sym = info.dli_sname ? info.dli_sname : "";
+      const unsigned long long symOff =
+         info.dli_saddr ? (unsigned long long)((const char *)g_wdFrames[i] - (const char *)info.dli_saddr) : 0;
+      fprintf(stderr, "Watchdog:   %2d %s+0x%llx %s+%llu\n", i - 2, image, off, sym, symOff);
+   }
+   fflush(stderr);
+}
+void wd_start()
+{
+   static bool started = false;
+   if (started)
+      return;
+   started = true;
+   g_wdMain = pthread_self();
+   struct sigaction sa {};
+   sa.sa_handler = wd_signal;
+   sigemptyset(&sa.sa_mask);
+   sa.sa_flags = SA_RESTART;
+   sigaction(SIGUSR2, &sa, nullptr);
+   std::thread([] {
+      int64_t beat = 0, nextMs = 0;
+      int samples = 0;
+      for (;;) {
+         std::this_thread::sleep_for(std::chrono::milliseconds(50));
+         const int64_t b = g_wdBeat.load();
+         if (b == 0 || !g_cfg.perfLog)
+            continue;
+         if (b != beat) {
+            beat = b;
+            samples = 0;
+            nextMs = 250;
+         }
+         const int64_t stallMs = (wd_now() - b) / 1000000;
+         // (in play: a frame of the 3D view before it; loading is not a stall)
+         if (!g_wdScene.load() || samples >= 6 || stallMs < nextMs)
+            continue;
+         g_wdCount.store(-1);
+         if (pthread_kill(g_wdMain, SIGUSR2) != 0)
+            continue;
+         for (int i = 0; i < 40 && g_wdCount.load() < 0; ++i)
+            std::this_thread::sleep_for(std::chrono::milliseconds(5));
+         if (g_wdBeat.load() != b)
+            continue;   // (the frame ended meanwhile: not where it stalled)
+         wd_report(stallMs, ++samples);
+         nextMs = samples < 3 ? stallMs + 250 : stallMs + 2000;
+      }
+   }).detach();
+}
+
 void count_frame(bool scene)
 {
+   g_wdBeat.store(wd_now());
+   g_wdScene.store(scene);
    const double t = now_seconds();
    if (g_ui.lastPresent > 0) {
       const double ms = (t - g_ui.lastPresent) * 1000.0;
