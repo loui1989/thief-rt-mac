@@ -17,6 +17,8 @@
 #include <objmodel.h>
 
 #include <config.h>
+#include <timer.h>
+#include <stdio.h>
 #include <cfgdbg.h>
 #include <memall.h>
 #include <dbmem.h>   // must be last header! 
@@ -172,6 +174,25 @@ static void recompute()
    }
 
    ConfigSpew("vis_meter_spew",("Player vis level at %d, using model %d on the way to %d\n",level,gState.last_val,i)); 
+
+   {
+      // (diagnosis: the gem switching picture many times a second -- blinking)
+      static int s_prev = -1, s_changes = 0, s_told = 0;
+      static ulong s_window = 0;
+      const ulong now = tm_get_millisec();
+      if (s_prev >= 0 && gState.last_val != s_prev)
+         ++s_changes;
+      s_prev = gState.last_val;
+      if (now - s_window >= 1000) {
+         if (s_changes >= 6 && s_told < 30) {
+            ++s_told;
+            fprintf(stderr, "Light gem: %d picture changes in a second (visibility %d, now picture %d of %d, heading for %d)\n",
+                    s_changes, level, gState.last_val, NUM_MODELS, i);
+         }
+         s_changes = 0;
+         s_window = now;
+      }
+   }
 
    sInvRenderType type = { kInvRenderModel };
    int model = NUM_MODELS-gState.last_val;

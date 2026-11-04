@@ -4523,14 +4523,15 @@ void draw_ui(bool scene)
                 g_drawableH, full);
 }
 
-// The eyes getting used to the dark. Out of the light a while, the darkest
-// exposure (the eye adaptation's limit, "Darkest exposure") is let down,
-// stop by stop, as eyes take in more of a dark place the longer they are in
-// it -- slowly (about half the way in 10 s, nearly all in half a minute) --
-// and what is seen loses some of its colour, as night sight does. Back in
-// the light it is gone in a couple of seconds. How much in the dark: the
-// light on the player, as the light gem has it (the path tracer's), or at the
-// camera if the gem does not read it.
+// The eyes getting used to the dark, by what the view shows. While more than
+// half of it is darker than the eye adaptation's darkest exposure takes in
+// ("Darkest exposure": the share of the frame's pixels below it, from the
+// path tracer's own luminance histogram, rgThiefSeenLight), that limit is let
+// down -- the darker the view, the quicker: up to 0.4 stops a second, so 2
+// stops in some 5 to 10 s -- until half the view is seen again; with less
+// than a third of it that dark, it comes back, quickly (in a second or two).
+// What is seen loses some colour with it, as night sight does. (A library
+// without the histogram: by the light on the player, as the light gem has it.)
 struct GemPart;
 float gem_value(const float pos[3], std::vector<GemPart> *parts);
 void update_dark_adapt(bool sceneDrawn)
@@ -4545,6 +4546,28 @@ void update_dark_adapt(bool sceneDrawn)
    }
    if (!sceneDrawn)
       return;
+   const float most = float(g_cfg.darkAdapt);
+   using SeenFn = uint32_t (*)(float *, float *);
+   static SeenFn s_seen = reinterpret_cast<SeenFn>(dlsym(RTLD_DEFAULT, "rgThiefSeenLight"));
+   if (s_seen) {
+      static uint32_t s_n = 0;
+      static float s_below = 0.0f;
+      float below = 0.0f, avg = 0.0f;
+      const uint32_t n = s_seen(&below, &avg);
+      if (n == 0)
+         return;
+      if (n != s_n) {
+         s_n = n;
+         s_below = below;
+      }
+      float rate = 0.0f;   // stops a second
+      if (s_below > 0.5f)
+         rate = 0.8f * (s_below - 0.5f);
+      else if (s_below < 0.33f)
+         rate = -4.0f * (0.33f - s_below) - 0.2f;
+      g_darkAdapted = std::clamp(g_darkAdapted + rate * dt, 0.0f, most);
+      return;
+   }
    static float s_lit = 1.0f;
    static uint32_t s_sampled = 0;
    if (g_noteTraced >= 0 && g_frameNumber - g_noteFrame < 10)
@@ -4553,10 +4576,9 @@ void update_dark_adapt(bool sceneDrawn)
       s_sampled = g_frameNumber;
       s_lit = gem_value(g_camera.pos, nullptr) * g_cfg.gemScale;
    }
-   // (the light gem's scale: 0.1 is deep shadow, 0.35 and up a lit place)
    const float dark = std::clamp((0.35f - s_lit) / 0.25f, 0.0f, 1.0f);
-   const float target = float(g_cfg.darkAdapt) * dark;
-   const float tau = target > g_darkAdapted ? 14.0f : 1.5f;
+   const float target = most * dark;
+   const float tau = target > g_darkAdapted ? 6.0f : 1.0f;
    g_darkAdapted += (target - g_darkAdapted) * (1.0f - std::exp(-dt / tau));
 }
 
@@ -5015,10 +5037,13 @@ void Present(int drawableWidth, int drawableHeight, bool vsync)
       static size_t s_n[2] = {0, 0};
       static bool s_scene[2] = {false, false};
       static int s_told = 0;
-      const size_t n = g_overlays.size();
-      if (scene && s_scene[0] && s_scene[1] && s_n[1] >= 3 && s_n[0] * 2 <= s_n[1] && n * 2 > s_n[1] * 1 && s_told < 30) {
+      // (by triangles: a picture missing may leave the number of draws as it was)
+      size_t n = 0;
+      for (const Overlay &o : g_overlays)
+         n += o.verts.size() / 3;
+      if (scene && s_scene[0] && s_scene[1] && s_n[1] >= 12 && s_n[0] * 10 <= s_n[1] * 8 && n * 10 >= s_n[1] * 9 && s_told < 30) {
          ++s_told;
-         fprintf(stderr, "RT: the HUD's 2D draws dipped for a frame: %zu, then %zu, then %zu (frame %u)\n", s_n[1], s_n[0], n,
+         fprintf(stderr, "RT: the HUD's 2D triangles dipped for a frame: %zu, then %zu, then %zu (frame %u)\n", s_n[1], s_n[0], n,
                  g_frameNumber);
       }
       s_n[1] = s_n[0];
