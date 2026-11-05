@@ -106,6 +106,8 @@ EXTERN BOOL dbFind(const char* filename, char* filebuf);
 // Fill out the buffer with the current filename
 //
 EXTERN void dbCurrentFile(char *buf, int len);
+// the gamesys file in use (its name: "dark.gam")
+EXTERN void dbCurrentGamesys(char *buf, int len);
 EXTERN void dbSetCurrentFile(char *buf);
 
 //

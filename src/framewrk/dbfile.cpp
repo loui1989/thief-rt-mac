@@ -895,6 +895,14 @@ void dbCurrentFile(char *buf, int len)
    strncpy(buf, gCurrFilename, len);
 }
 
+void dbCurrentGamesys(char *buf, int len)
+{
+   if (len <= 0)
+      return;
+   strncpy(buf, gCurrGameFile, len - 1);
+   buf[len - 1] = '\0';
+}
+
 static const char* strip_pathname(const char* filename)
 {
    const char* fn = filename;

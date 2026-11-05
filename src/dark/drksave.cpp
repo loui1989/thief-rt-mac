@@ -268,6 +268,7 @@ HRESULT DarkLoadGameInternal(ITagFile* file)
 
    if (desc.flags & kInMission)
    {
+      DMLNoteSaveLoad(TRUE);
       // load the mission file 
       ITagFile* missfile = OpenMissionFile(GetMissionData()->num); 
 
@@ -278,6 +279,7 @@ HRESULT DarkLoadGameInternal(ITagFile* file)
       if (dbMergeLoadTagFile(missfile,kFiletypeGAM|kDBMap) == 0)
       {
          SafeRelease(missfile);
+         DMLNoteSaveLoad(FALSE);
          return kDarkSaveMission; 
       }
 
@@ -285,11 +287,15 @@ HRESULT DarkLoadGameInternal(ITagFile* file)
 
       // Now merge-load the mission (& all concretes) from the save game 
       if (dbMergeLoadTagFile(file,kFiletypeMIS|kObjPartTerrain) == 0)
+      {
+         DMLNoteSaveLoad(FALSE);
          return kDarkSaveMission;
+      }
 
       // send the final post load
       DispatchData msg = { kDatabasePostLoad, 0 }; 
       DispatchMsg(kMsgDatabase,&msg); 
+      DMLNoteSaveLoad(FALSE);
 
       // merge load doesn't suspend the sim, so we do it ourselves.
       pSimMan->SuspendSim(); 

@@ -534,6 +534,9 @@ if(DARK_BUILD_ENGINE)
     # shared editor code from silently acquiring Windows dependencies.
     dark_sources_from_vcxproj(dark_application_sources
       "${CMAKE_CURRENT_SOURCE_DIR}/src/dromed.vcxproj")
+    # (ours, not in the Visual Studio project: NewDark's DML patches)
+    list(APPEND dark_application_sources
+      "${CMAKE_CURRENT_SOURCE_DIR}/src/dark/drkdml.cpp")
 
     # These generated scanners deliberately use the same private helper
     # names. Match the Visual Studio source-level definition for both apps.
