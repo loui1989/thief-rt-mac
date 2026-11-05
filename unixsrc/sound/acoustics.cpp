@@ -13,6 +13,10 @@
 // libphonon is opened at run time (the kit builds it into the app's Frameworks); without
 // it, or turned off, the game's sound is as it was.
 
+// The engine is built with byte packing (-fpack-struct=1); Steam Audio's structs, the
+// system's and the standard library's have their natural layout: all of this file has it.
+#pragma pack(push, 8)
+
 #include <acoustics.h>
 #include <resimginfo.h>
 
@@ -40,6 +44,9 @@
 #if defined(__APPLE__)
 #include <mach-o/dyld.h>
 #endif
+
+// (SDK headers end with "#pragma pack()", back to the engine's packing)
+#pragma pack(8)
 
 extern "C" unsigned portal_sound_world(void (*fn)(void *user, int n, const float *xyz,
                                                   void *texture, int flags), void *user);
@@ -793,3 +800,5 @@ const char *Acoustics_Status(void)
 }
 
 }  // extern "C"
+
+#pragma pack(pop)

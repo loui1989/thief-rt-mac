@@ -170,6 +170,7 @@ struct Settings {
    float waterAlpha = 0.55f;
    float underwaterClarity = 1.0f;   // how far one sees under water (x 14-22 m to 5%)
    float underwaterHaze = 1.0f;      // the water's own teal glow in the distance (0 off: black)
+   float underwaterLift = 1.5f;      // under water, the eyes open up this many stops more (for play)
    float scale = 0.5f;      // render scale for upscale modes 0 and 5
    bool fps = false;
    bool vsync = true;
@@ -260,6 +261,7 @@ void load_settings()
       else if (k == "wall_offset") g_cfg.wallOffset = value != 0;
       else if (k == "underwater_clarity") g_cfg.underwaterClarity = std::clamp(value, 0.2f, 5.0f);
       else if (k == "underwater_haze") g_cfg.underwaterHaze = std::clamp(value, 0.0f, 4.0f);
+      else if (k == "underwater_brighter") g_cfg.underwaterLift = std::clamp(value, 0.0f, 3.0f);
       else if (k == "heat_haze") g_cfg.heatHaze = std::clamp(value, 0.0f, 3.0f);
       else if (k == "light_soft") g_cfg.lightSoft = std::clamp(value, 0.0f, 4.0f);
       else if (k == "light_fix") g_cfg.lightFix = value != 0;
@@ -312,6 +314,7 @@ void save_settings()
    fprintf(f, "sky_seen = %.2f\n", g_cfg.skySeen);
    fprintf(f, "texture_detail = %d\n", g_cfg.texDetail);
    fprintf(f, "dark_adapt = %d\n", g_cfg.darkAdapt);
+   fprintf(f, "underwater_brighter = %.1f\n", g_cfg.underwaterLift);
    fprintf(f, "frame_generation = %d\n", int(g_cfg.frameGen));
    fprintf(f, "moon_shafts = %d\ngod_ray_strength = %.2f\nmoon = %.2f\nmoon_azimuth = %d\nmoon_height = %d\nmetalfx_denoiser = %d\n",
            int(g_cfg.moonShafts), g_cfg.shafts, g_cfg.moon, g_cfg.moonAzimuth, g_cfg.moonHeight, int(g_cfg.mfxDenoise));
@@ -1224,6 +1227,7 @@ float g_noteOriginal = -1, g_noteTraced = -1;
 uint32_t g_noteFrame = 0;   // when the light gem last read the traced light
 // The eyes getting used to the dark: stops of exposure gained, now (draw_frame)
 float g_darkAdapted = 0.0f;
+float g_underwaterLifted = 0.0f;   // stops, eased in and out (update_dark_adapt)
 float ambient_emissive()
 {
    // calibrated by eye against the OpenGL renderer's dark corners
@@ -3652,7 +3656,7 @@ const char *kUpscaleNames[] = {"Off",
 
 enum UiRow {
    kRowUpscale, kRowScale, kRowOutput, kRowDynres, kRowBounces, kRowReach, kRowLights, kRowLightFade, kRowCandidates, kRowLightCull, kRowResponse, kRowFlicker, kRowVolumetric, kRowShafts, kRowFog, kRowBloom, kRowVsync, kRowFrameCap,
-   kRowFps, kRowDetection, kRowGemScale, kRowGemMatch, kRowGemEase, kRowLight, kRowExposure, kRowDarkAdapt, kRowAmbient, kRowSkySeen, kRowSky, kRowMoon, kRowMoonDir, kRowMoonHeight, kRowLightSize, kRowRough, kRowSmooth, kRowSteady, kRowFixtures, kRowFixtureLight, kRowSmallLamps, kRowLightFix, kRowGlow, kRowFlameGlow, kRowMaterials, kRowBump, kRowCrevice, kRowTexDetail, kRowParallax, kRowPolish, kRowWater, kRowTracedSound, kRowHrtf,
+   kRowFps, kRowDetection, kRowGemScale, kRowGemMatch, kRowGemEase, kRowLight, kRowExposure, kRowDarkAdapt, kRowAmbient, kRowSkySeen, kRowSky, kRowMoon, kRowMoonDir, kRowMoonHeight, kRowLightSize, kRowRough, kRowSmooth, kRowSteady, kRowFixtures, kRowFixtureLight, kRowSmallLamps, kRowLightFix, kRowGlow, kRowFlameGlow, kRowMaterials, kRowBump, kRowCrevice, kRowTexDetail, kRowParallax, kRowPolish, kRowWater, kRowUnderwater, kRowTracedSound, kRowHrtf,
    kRowDebug, kRowFreeze, kRowBackFaces, kRowReuse, kRowBlink, kRowPerf, kRowInspect, kRowSkipMission, kRowReset, kRowCount
 };
 
@@ -3660,7 +3664,7 @@ const char *kRowLabels[kRowCount] = {
    "Upscaler", "Render resolution", "Output resolution", "Dynamic resolution", "Bounce light", "Light reach", "Lights traced",
    "Lights coming into range", "Lights tried per pixel", "Lights behind walls", "Light changes", "Light flicker",
    "God rays (volumetric)", "  God ray strength", "Mission fog", "Bloom", "VSync", "Frame rate limit", "FPS counter", "Light gem and guards", "  Light gem brightness", "  Light gem falloff", "  Light gem response", "Light brightness", "Darkest exposure", "  Eyes adjust to the dark", "Ambient light", "Sky brightness (as seen)", "Sky light (on the level)", "Moonlight", "  Moon direction", "  Moon height",
-   "Light size (soft shadows)", "Surface roughness", "Model shading", "Model faces", "Torches and lamps", "Lamp and torch light", "Lamp reach", "Lights in walls", "Lamp glow", "Flame glow", "Materials", "Bumps", "Crevices", "Texture detail", "Parallax depth", "Polished reflections", "Water", "Traced sound (Steam Audio)", "  Headphone 3D sound (HRTF)",
+   "Light size (soft shadows)", "Surface roughness", "Model shading", "Model faces", "Torches and lamps", "Lamp and torch light", "Lamp reach", "Lights in walls", "Lamp glow", "Flame glow", "Materials", "Bumps", "Crevices", "Texture detail", "Parallax depth", "Polished reflections", "Water", "  Under water: brighter", "Traced sound (Steam Audio)", "  Headphone 3D sound (HRTF)",
    "Debug view", "Freeze scene (test)", "Back faces (test)", "Light sampling (test)", "Blink nearest light (test)", "Performance log", "Inspect centre of view", "Skip to next mission (test)", "Reset to defaults",
 };
 
@@ -3831,6 +3835,10 @@ std::string row_value(int row)
    case kRowPolish: return g_cfg.polish ? "Mirror (sharp)" : "Off";
    case kRowWater:
       return g_cfg.water == 1 ? "Reflective (RTGL1)" : g_cfg.water == 2 ? "Opaque" : "Translucent";
+   case kRowUnderwater:
+      if (g_cfg.underwaterLift <= 0.0f) return "Off (as dark as the water makes it)";
+      snprintf(buf, sizeof(buf), "%.1fx brighter (+%.1f stops), and clearer", std::exp2(g_cfg.underwaterLift), g_cfg.underwaterLift);
+      return buf;
    case kRowTracedSound: return Acoustics_Status();
    case kRowHrtf: {
       static const char *const kModes[] = {"Automatic", "Always", "Never"};
@@ -4044,6 +4052,7 @@ void change_row(int row, int dir)
       break;
    case kRowPolish: g_cfg.polish = !g_cfg.polish; break;
    case kRowWater: g_cfg.water = (g_cfg.water + dir + 3) % 3; break;
+   case kRowUnderwater: g_cfg.underwaterLift = std::clamp(g_cfg.underwaterLift + 0.5f * dir, 0.0f, 3.0f); break;
    case kRowTracedSound: Acoustics_SetEnabled(!Acoustics_Enabled()); break;
    case kRowHrtf: Acoustics_SetHrtfMode((Acoustics_HrtfMode() + dir + 3) % 3); break;
    case kRowInspect: inspect_view(); return;
@@ -4554,6 +4563,11 @@ void update_dark_adapt(bool sceneDrawn)
    const auto now = std::chrono::steady_clock::now();
    const float dt = std::min(std::chrono::duration<float>(now - s_t).count(), 0.25f);
    s_t = now;
+   // under water: brighter for play, over half a second each way
+   {
+      const float target = g_underwater && g_worldValid ? g_cfg.underwaterLift : 0.0f;
+      g_underwaterLifted += (target - g_underwaterLifted) * (1.0f - std::exp(-dt / 0.5f));
+   }
    if (g_cfg.darkAdapt <= 0 || !g_worldValid) {
       g_darkAdapted = 0.0f;
       return;
@@ -4606,11 +4620,12 @@ void draw_frame(bool sceneDrawn)
    // grey that lit every outdoor surface like daylight. Linking this struct
    // Under water, the camera's medium absorbs by waterColor per metre
    // (RTGL1 Media.h): the murky 0.22/0.42/0.38 let 1-7% through at 3 m, a
-   // black soup. The view under water: to 5% at 14 m (red) to 22 m (green),
-   // and the water's own haze (the volume below) where it fades.
+   // black soup. The view under water: to 5% at 28 m (red) to 40 m (green)
+   // -- clear, for play -- and the water's own haze (the volume below)
+   // where it fades.
    RgFloat3D waterColor = {{0.22f, 0.42f, 0.38f}};
    if (g_underwater) {
-      const float reach[3] = {14.0f, 22.0f, 20.0f};
+      const float reach[3] = {28.0f, 40.0f, 36.0f};
       for (int i = 0; i < 3; ++i)
          waterColor.data[i] = std::pow(0.05f, 1.0f / (reach[i] * g_cfg.underwaterClarity));
    }
@@ -4706,7 +4721,7 @@ void draw_frame(bool sceneDrawn)
          volAmbient.data[i] = lin(g_fogRgb[i]) * g_cfg.sky;
    }
    // Under water: the water itself as a haze, teal, thickening with
-   // distance (to 63% at 11 m), so the far side of a pool fades into water,
+   // distance (to 63% at 20 m), so the far side of a pool fades into water,
    // not into black. By depth alone (RTGL1's simple volume): lit by the
    // lamps, its few light samples a pixel were blotches the denoiser smeared
    // across the view.
@@ -4719,9 +4734,9 @@ void draw_frame(bool sceneDrawn)
       volNear = volFarDens = 1.0f;
    }
    if (waterHaze) {
-      const float perMetre = 1.0f / (11.0f * g_cfg.underwaterClarity);
+      const float perMetre = 1.0f / (20.0f * g_cfg.underwaterClarity);
       volNear = perMetre / 0.00005f;   // (the simple volume's density is this x 0.00005)
-      const float teal[3] = {0.006f, 0.016f, 0.015f};
+      const float teal[3] = {0.012f, 0.032f, 0.030f};
       for (int i = 0; i < 3; ++i)
          volAmbient.data[i] = teal[i] * g_cfg.underwaterHaze;
    }
@@ -4930,7 +4945,8 @@ void draw_frame(bool sceneDrawn)
       .pNext = &bloom,
       .disableEyeAdaptation = false,
       // (let down as the eyes get used to the dark: update_dark_adapt)
-      .ev100Min = std::max(float(g_cfg.evMin) - g_darkAdapted, -1.0f),
+      // (and opened up more under water, for play)
+      .ev100Min = std::max(float(g_cfg.evMin) - g_darkAdapted - g_underwaterLifted, -1.0f - g_underwaterLifted),
       .ev100Max = std::max(float(g_cfg.evMin) + 0.1f, 7.7f),
       .luminanceWhitePoint = 3.0f,
       // night sight: less colour, the reds first (a third gone when fully used to the dark)
