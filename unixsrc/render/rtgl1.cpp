@@ -137,6 +137,7 @@ struct Settings {
                               // light bounced off moonlit streets was the noisiest light outdoors)
    int moonAzimuth = -1;      // where the moon is, degrees round from the map's +x (-1: the sky's moon)
    int moonHeight = 50;       // and how high, degrees over the horizon
+   float sun = 1.0f;          // a Thief 2 mission's sunlight (its render parameters), times this (0 off)
    bool mfxDenoise = false;   // MetalFX's denoising upscaler in place of the path tracer's denoiser
    int fog = 2;               // the mission's fog: 0 off, 1 light, 2 as the mission, 3 thick
    int dynres = 0;            // dynamic resolution's target fps, 0 off
@@ -234,6 +235,7 @@ void load_settings()
       else if (k == "moon") g_cfg.moon = std::clamp(value, 0.0f, 8.0f);
       else if (k == "moon_azimuth") g_cfg.moonAzimuth = value < 0 ? -1 : int(value) % 360;
       else if (k == "moon_height") g_cfg.moonHeight = std::clamp(int(value), 10, 90);
+      else if (k == "sun") g_cfg.sun = std::clamp(value, 0.0f, 4.0f);
       else if (k == "metalfx_denoiser") g_cfg.mfxDenoise = value != 0;
       else if (k == "fog") g_cfg.fog = std::clamp(int(value), 0, 3);
       else if (k == "materials") g_cfg.materials = value != 0;
@@ -314,6 +316,7 @@ void save_settings()
    fprintf(f, "sky_seen = %.2f\n", g_cfg.skySeen);
    fprintf(f, "texture_detail = %d\n", g_cfg.texDetail);
    fprintf(f, "dark_adapt = %d\n", g_cfg.darkAdapt);
+   fprintf(f, "sun = %.2f\n", g_cfg.sun);
    fprintf(f, "underwater_brighter = %.1f\n", g_cfg.underwaterLift);
    fprintf(f, "frame_generation = %d\n", int(g_cfg.frameGen));
    fprintf(f, "moon_shafts = %d\ngod_ray_strength = %.2f\nmoon = %.2f\nmoon_azimuth = %d\nmoon_height = %d\nmetalfx_denoiser = %d\n",
@@ -1228,6 +1231,11 @@ uint32_t g_noteFrame = 0;   // when the light gem last read the traced light
 // The eyes getting used to the dark: stops of exposure gained, now (draw_frame)
 float g_darkAdapted = 0.0f;
 float g_underwaterLifted = 0.0f;   // stops, eased in and out (update_dark_adapt)
+// a Thief 2 mission's sun (RenderRTSun): where it is, its colour and brightness
+struct Sun { bool on = false; float to[3] = {0, 0, 1}; float rgb[3] = {1, 1, 1}; float bright = 0; } g_sun;
+// a light from the sky (the mission's sun, or the moon): the sky's faces kept
+// for its test that it came in through the sky
+bool sky_light_on() { return (g_sun.on && g_cfg.sun > 0.0f) || g_cfg.moon > 0.0f; }
 float ambient_emissive()
 {
    // calibrated by eye against the OpenGL renderer's dark corners
@@ -2902,7 +2910,7 @@ void upload_world()
          // but there for the moon's test that its light came in through the
          // sky -- not out of the level through a gap (sunRequireSky). All of
          // them, near or far: few, and the moon's rays go a long way.
-         if (g_cfg.moon <= 0.0f)
+         if (!sky_light_on())
             continue;
          auto skyPrim = RgMeshPrimitiveInfo{
             .sType = RG_STRUCTURE_TYPE_MESH_PRIMITIVE_INFO,
@@ -3685,14 +3693,14 @@ const char *kUpscaleNames[] = {"Off",
 
 enum UiRow {
    kRowUpscale, kRowScale, kRowOutput, kRowDynres, kRowBounces, kRowReach, kRowLights, kRowLightFade, kRowCandidates, kRowLightCull, kRowResponse, kRowFlicker, kRowVolumetric, kRowShafts, kRowFog, kRowBloom, kRowVsync, kRowFrameCap,
-   kRowFps, kRowDetection, kRowGemScale, kRowGemMatch, kRowGemEase, kRowLight, kRowExposure, kRowDarkAdapt, kRowAmbient, kRowSkySeen, kRowSky, kRowMoon, kRowMoonDir, kRowMoonHeight, kRowLightSize, kRowRough, kRowSmooth, kRowSteady, kRowFixtures, kRowFixtureLight, kRowSmallLamps, kRowLightFix, kRowGlow, kRowFlameGlow, kRowMaterials, kRowBump, kRowCrevice, kRowTexDetail, kRowParallax, kRowPolish, kRowWater, kRowUnderwater, kRowTracedSound, kRowHrtf,
+   kRowFps, kRowDetection, kRowGemScale, kRowGemMatch, kRowGemEase, kRowLight, kRowExposure, kRowDarkAdapt, kRowAmbient, kRowSkySeen, kRowSky, kRowMoon, kRowMoonDir, kRowMoonHeight, kRowSun, kRowLightSize, kRowRough, kRowSmooth, kRowSteady, kRowFixtures, kRowFixtureLight, kRowSmallLamps, kRowLightFix, kRowGlow, kRowFlameGlow, kRowMaterials, kRowBump, kRowCrevice, kRowTexDetail, kRowParallax, kRowPolish, kRowWater, kRowUnderwater, kRowTracedSound, kRowHrtf,
    kRowDebug, kRowFreeze, kRowBackFaces, kRowReuse, kRowBlink, kRowPerf, kRowInspect, kRowSkipMission, kRowReset, kRowCount
 };
 
 const char *kRowLabels[kRowCount] = {
    "Upscaler", "Render resolution", "Output resolution", "Dynamic resolution", "Bounce light", "Light reach", "Lights traced",
    "Lights coming into range", "Lights tried per pixel", "Lights behind walls", "Light changes", "Light flicker",
-   "God rays (volumetric)", "  God ray strength", "Mission fog", "Bloom", "VSync", "Frame rate limit", "FPS counter", "Light gem and guards", "  Light gem brightness", "  Light gem falloff", "  Light gem response", "Light brightness", "Darkest exposure", "  Eyes adjust to the dark", "Ambient light", "Sky brightness (as seen)", "Sky light (on the level)", "Moonlight", "  Moon direction", "  Moon height",
+   "God rays (volumetric)", "  God ray strength", "Mission fog", "Bloom", "VSync", "Frame rate limit", "FPS counter", "Light gem and guards", "  Light gem brightness", "  Light gem falloff", "  Light gem response", "Light brightness", "Darkest exposure", "  Eyes adjust to the dark", "Ambient light", "Sky brightness (as seen)", "Sky light (on the level)", "Moonlight", "  Moon direction", "  Moon height", "Sunlight (Thief 2 missions)",
    "Light size (soft shadows)", "Surface roughness", "Model shading", "Model faces", "Torches and lamps", "Lamp and torch light", "Lamp reach", "Lights in walls", "Lamp glow", "Flame glow", "Materials", "Bumps", "Crevices", "Texture detail", "Parallax depth", "Polished reflections", "Water", "  Under water: brighter", "Traced sound (Steam Audio)", "  Headphone 3D sound (HRTF)",
    "Debug view", "Freeze scene (test)", "Back faces (test)", "Light sampling (test)", "Blink nearest light (test)", "Performance log", "Inspect centre of view", "Skip to next mission (test)", "Reset to defaults",
 };
@@ -3762,6 +3770,14 @@ std::string row_value(int row)
             return "As the sky's moon";
       }
       snprintf(buf, sizeof(buf), "%d deg up", g_cfg.moonHeight);
+      return buf;
+   case kRowSun:
+      if (g_cfg.sun <= 0.0f) return "Off";
+      if (!g_sun.on) {
+         snprintf(buf, sizeof(buf), "%.2fx (this mission has no sun)", g_cfg.sun);
+         return buf;
+      }
+      snprintf(buf, sizeof(buf), "%.2fx (the mission's sun, brightness %.0f)", g_cfg.sun, g_sun.bright);
       return buf;
    case kRowFog:
       return g_cfg.fog == 0 ? "Off" : g_cfg.fog == 1 ? "Light" : g_cfg.fog == 3 ? "Thick" : "As the mission";
@@ -3988,6 +4004,9 @@ void change_row(int row, int dir)
       break;
    }
    case kRowMoonHeight: g_cfg.moonHeight = std::clamp((g_cfg.moonHeight / 5) * 5 + 5 * dir, 10, 90); break;
+   case kRowSun: g_cfg.sun = g_cfg.sun <= 0.0f && dir > 0 ? 0.25f
+                             : (g_cfg.sun <= 0.25f && dir < 0 ? 0.0f : step_mul(g_cfg.sun, dir, 0.25f, 4.0f));
+      break;
    case kRowFog: g_cfg.fog = (g_cfg.fog + dir + 4) % 4; break;
    case kRowBloom: g_cfg.bloom = !g_cfg.bloom; break;
    case kRowVsync: g_cfg.vsync = !g_cfg.vsync; break;
@@ -4756,7 +4775,7 @@ void draw_frame(bool sceneDrawn)
    // across the view.
    const bool waterHaze = g_underwater && g_cfg.underwaterHaze > 0.0f && !fogOn;
    // god rays: the haze lit by the moon, where it comes in through the sky
-   const bool moonHaze = g_cfg.moonShafts && g_cfg.moon > 0.0f && !waterHaze;
+   const bool moonHaze = g_cfg.moonShafts && sky_light_on() && !waterHaze;
    if (moonHaze && !fogOn && !g_cfg.volumetric) {
       // a night's thin haze, enough for a shaft under a window to show
       // (6% scattered over the volume's 40 m), the rest of the view clear
@@ -5000,13 +5019,13 @@ void draw_frame(bool sceneDrawn)
       // the moon's light only where its ray reaches the sky (upload_world),
       // and shaded on its own -- a faint light drawn by lot among the lamps
       // won few pixels, its shadows sparse and smeared (RgDrawFrameSkyParams)
-      .sunRequireSky = g_cfg.moon > 0.0f ? 1.0f : 0.0f,
+      .sunRequireSky = sky_light_on() ? 1.0f : 0.0f,
       .sunLeakDebug = 0.0f,
       // (Raze's shaders read this for their debug views of the lights and
       // their glass reflection cap: kept as it was)
       .sunLeakDebugMul = 1.0f,
       .sunSkyProbeMaxDist = 10000.0f,
-      .sunSplit = g_cfg.moon > 0.0f ? 1.0f : 0.0f,
+      .sunSplit = sky_light_on() ? 1.0f : 0.0f,
    };
    // the heat haze's shimmer (on while there are fires to shimmer over)
    RgPostEffectWaves heatHaze{};
@@ -7007,6 +7026,26 @@ void RenderRTWorldTexture(int textureId, void *texture)
    g_worldTextures[textureId] = static_cast<RtTexture *>(texture);
 }
 
+void RenderRTSun(int on, const float toSun[3], const float rgb[3], float brightness)
+{
+   const float l = toSun ? std::sqrt(toSun[0] * toSun[0] + toSun[1] * toSun[1] + toSun[2] * toSun[2]) : 0.0f;
+   const bool was = g_sun.on;
+   g_sun.on = on && l > 1e-4f && brightness > 0.0f && brightness < 1000.0f;
+   if (!g_sun.on) {
+      if (was)
+         fprintf(stderr, "RT: no sunlight in this mission\n");
+      return;
+   }
+   for (int k = 0; k < 3; ++k) {
+      g_sun.to[k] = toSun[k] / l;
+      g_sun.rgb[k] = std::max(rgb[k], 0.0f);
+   }
+   if (!was || std::fabs(g_sun.bright - brightness) > 0.01f)
+      fprintf(stderr, "RT: the mission's sun: toward (%.2f %.2f %.2f), colour %.2f %.2f %.2f, brightness %.0f\n",
+              g_sun.to[0], g_sun.to[1], g_sun.to[2], g_sun.rgb[0], g_sun.rgb[1], g_sun.rgb[2], brightness);
+   g_sun.bright = brightness;
+}
+
 void RenderRTAmbient(float r, float g, float b)
 {
    // one number: RTGL1's glow takes the surface's own colour
@@ -7734,11 +7773,26 @@ bool moon_from_sky(float to[3])
 
 void upload_moon()
 {
-   if (g_cfg.moon <= 0.0f || !g_worldValid)
+   if (!sky_light_on() || !g_worldValid)
       return;
    // (to the moon, in the map's axes, z up; the light travels the other way)
    float to[3];
-   if (!(g_cfg.moonAzimuth < 0 && moon_from_sky(to))) {
+   // A Thief 2 mission's sun, as its lightmaps have it (its direction, colour
+   // and brightness: a dusk's low orange sun, a grey day's): the light that
+   // gives its outdoors their shape -- without it, only the level's ambient
+   const bool sun = g_sun.on && g_cfg.sun > 0.0f;
+   float color[3] = {0.70f, 0.78f, 1.0f};
+   float intensity = 4.0f * g_cfg.moon * g_cfg.light;
+   if (sun) {
+      for (int k = 0; k < 3; ++k)
+         to[k] = g_sun.to[k];
+      const float m = std::max({g_sun.rgb[0], g_sun.rgb[1], g_sun.rgb[2], 1e-3f});
+      for (int k = 0; k < 3; ++k)
+         color[k] = g_sun.rgb[k] / m;
+      // (the game's brightness: 20-50 in Thief 2's own missions, a few
+      // lux, a moonlit night's; 150, a sunset's 30)
+      intensity = std::min(0.2f * g_sun.bright, 60.0f) * g_cfg.sun * g_cfg.light;
+   } else if (!(g_cfg.moonAzimuth < 0 && moon_from_sky(to))) {
       const int azDeg = g_cfg.moonAzimuth < 0 ? 225 : g_cfg.moonAzimuth;
       const float az = float(azDeg) * 0.0174533f, el = float(g_cfg.moonHeight) * 0.0174533f;
       to[0] = std::cos(el) * std::cos(az);
@@ -7748,10 +7802,10 @@ void upload_moon()
    auto moon = RgLightDirectionalEXT{
       .sType = RG_STRUCTURE_TYPE_LIGHT_DIRECTIONAL_EXT,
       .pNext = nullptr,
-      .color = pack_color(0.70f, 0.78f, 1.0f, 1.0f),
-      // lux: a quarter of what a fill light of the level's strength (a sphere
-      // gives its intensity / distance^2: 400 at 5 m, 16) gives a wall nearby
-      .intensity = 4.0f * g_cfg.moon * g_cfg.light,
+      .color = pack_color(color[0], color[1], color[2], 1.0f),
+      // lux: the moon a quarter of what a fill light of the level's strength
+      // (a sphere gives its intensity / distance^2: 400 at 5 m, 16) gives a wall nearby
+      .intensity = intensity,
       .direction = {{-to[0], -to[1], -to[2]}},
       .angularDiameterDegrees = 0.5f,   // (the moon's own: its shadows' edges less noisy)
    };

@@ -638,6 +638,14 @@ void objlight_rt_submit(void)
       if (parms)
          RenderRTAmbient(parms->ambient_light.x, parms->ambient_light.y,
                          parms->ambient_light.z);
+      // and a Thief 2 mission's sun, which its lightmaps have outdoors
+      if (parms && parms->use_sun) {
+         const float to[3] = { -parms->sunlight_vector.x, -parms->sunlight_vector.y,
+                               -parms->sunlight_vector.z };
+         const float rgb[3] = { parms->sun_rgb.x, parms->sun_rgb.y, parms->sun_rgb.z };
+         RenderRTSun(1, to, rgb, parms->sun_b);
+      } else
+         RenderRTSun(0, NULL, NULL, 0.0f);
    }
    for (i = first; i < num_light + num_dyn && i < MAX_STATIC; ++i)
    {

@@ -142,6 +142,9 @@ void RenderRTNoteLighting(float original, float traced);
 
 // The level's ambient light (0..1 per channel), once a scene.
 void RenderRTAmbient(float r, float g, float b);
+// a Thief 2 mission's sunlight (its render parameters): toward the sun, its
+// colour (0..1) and its brightness on the game's scale; on 0: none
+void RenderRTSun(int on, const float toSun[3], const float rgb[3], float brightness);
 
 // reaches: the level's lighting has it shining on a cell near or in view.
 void RenderRTLight(uint32_t id, const float pos[3], const float rgb[3],
