@@ -57,6 +57,8 @@
 #include <vismeter.h>
 #include <playrobj.h>
 #include <plyrmode.h>
+#include <plycbllm.h>
+#include <drkcret.h>
 #include <pick.h>
 #include <objlight.h>
 
@@ -704,14 +706,55 @@ static void select_command(char* arg)
       BOOL weapon = pInventory->GetType(select) == kInvTypeWeapon;
       eWhichInvObj which = weapon ? kCurrentWeapon : kCurrentItem;
       set_expiration(which);
-      if (select != pInventory->Selection(which))
+      const BOOL was_selected = select == pInventory->Selection(which);
+      if (!was_selected)
       {
          abort_frob(which);
          pInventory->Select(select);
       }
+      if (weapon)
+      {
+         // An item frob left open (the use key's release never seen -- a
+         // door opened, the key let go as the window lost focus) kept every
+         // weapon key from drawing the weapon until another use closed it.
+         // A use held on for over 1.5 s that is no tool's (a lockpick's is
+         // held on purpose) is let go.
+         const tSimTime now = GetSimTime();
+         if (gItemStartTime != NO_START_TIME && now - gItemStartTime > SIM_TIME_SECOND * 3 / 2 &&
+             !(gItemStartFrob.src_loc == kFrobLocInv && gItemStartFrob.dst_loc == kFrobLocWorld))
+         {
+            fprintf(stderr, "Weapon key: an item use open for %.1f s let go\n",
+                    (now - gItemStartTime) / (float)SIM_TIME_SECOND);
+            abort_frob(kCurrentItem);
+         }
+      }
       // Auto-wield sword if possible
       if (weapon && gItemStartTime == NO_START_TIME)
          pInventory->Wield(kCurrentWeapon);
+      if (weapon && gItemStartTime == NO_START_TIME && was_selected &&
+          pInventory->WieldedObj() == select && PlayerGetMode() == kPlayerModeUnarmed &&
+          PlayerGetNextMode() == kPlayerModeInvalid && !pInventory->WieldingJunk())
+      {
+         // in hand as far as the inventory knows, but the arm holds nothing
+         // and is not getting it out: put it in hand again (to the item and
+         // back, so it is offered to the arm afresh)
+         fprintf(stderr, "Weapon key: %s in hand but not drawn: drawn again\n", ObjWarnName(select));
+         pInventory->Wield(kCurrentItem);
+         pInventory->Wield(kCurrentWeapon);
+      }
+      if (weapon)
+      {
+         // (diagnosis: the key pressed and nothing on its way out)
+         static int s_told = 0;
+         if (PlayerGetNextMode() == kPlayerModeInvalid && PlayerGetMode() == kPlayerModeUnarmed && s_told < 40)
+         {
+            ++s_told;
+            fprintf(stderr, "Weapon key: %s not drawn -- %s, in hand %s, item use %s, arm mode %d\n",
+                    ObjWarnName(select), was_selected ? "already selected" : "selected now",
+                    ObjWarnName(pInventory->WieldedObj()),
+                    gItemStartTime != NO_START_TIME ? "open" : "none", PlayerGetMode());
+         }
+      }
    }
 }
 
