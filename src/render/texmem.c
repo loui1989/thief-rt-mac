@@ -421,6 +421,36 @@ static int _texmem_get_align(IRes *pRes)
    return pal_index;
 }
 
+// A family with no palette of its own (no full.pcx), an 8-bit picture: the
+// picture's own palette, as NewDark has it. Fan missions' families of GIFs
+// each made with its own colours drew in the mission's palette's -- noise of
+// colours. (A stock family's pictures carry their family's palette: the same
+// slot, nothing changes.) With every palette slot taken, the bitmap keeps
+// the palette itself (palmgr_keep_bitmap_palette).
+static int _texmem_image_align(IRes *pRes, grs_bitmap *pbm, int align)
+{
+   IResMan *pResMan;
+   IRes *pPalRes;
+   if (align > 0 || pbm == NULL || pbm->type != BMT_FLAT8)
+      return align;
+   pResMan = AppGetObj(IResMan);
+   pPalRes = IResMan_Retype(pResMan, pRes, RESTYPE_PALETTE, 0);
+   if (pPalRes)
+   {
+      uchar *pal = (uchar *)IRes_Lock(pPalRes);
+      if (pal)
+      {
+         align = palmgr_alloc_pal(pal);
+         if (align == 0)
+            palmgr_keep_bitmap_palette(pbm, pal);
+      }
+      IRes_Unlock(pPalRes);
+      SafeRelease(pPalRes);
+   }
+   SafeRelease(pResMan);
+   return align;
+}
+
 int ectsSecretLoadIdx=0;
 int ectsSecretLoadCopy[TEXMEM_MAX];
 
@@ -490,13 +520,17 @@ BOOL texmem_interpret_new_res(IRes *pRes,
       // We *may* also need to establish the palette for this texture.
       if (texmem_find_align) {
          use_align=_texmem_get_align(pRes);
-         if (use_align!=TEXMEM_NO_ALIGN)
+         pbm = (grs_bitmap *) IRes_Lock(pRes);
          {
-            pbm = (grs_bitmap *) IRes_Lock(pRes);
-            palmgr_add_ref_slot(use_align);
-            pbm->align=use_align;
-            IRes_Unlock(pRes);
+            const int own = _texmem_image_align(pRes, pbm, use_align);
+            if (own > 0)
+               use_align = own;   // (its slot taken by palmgr_alloc_pal)
+            else if (use_align!=TEXMEM_NO_ALIGN)
+               palmgr_add_ref_slot(use_align);
          }
+         if (use_align!=TEXMEM_NO_ALIGN)
+            pbm->align=use_align;
+         IRes_Unlock(pRes);
       }
       if (use_idx != TEXMEM_NO_HND)
       {
@@ -551,10 +585,18 @@ BOOL texmem_interpret_new_res(IRes *pRes,
    if (texmem_find_align)
       use_align=_texmem_get_align(pRes);
 
-   if (use_align!=TEXMEM_NO_ALIGN)
    {
-      palmgr_add_ref_slot(use_align);
-      pbm->align=use_align;
+      const int own = _texmem_image_align(pRes, pbm, use_align);
+      if (own > 0)
+      {
+         use_align = own;   // (its slot taken by palmgr_alloc_pal)
+         pbm->align = use_align;
+      }
+      else if (use_align!=TEXMEM_NO_ALIGN)
+      {
+         palmgr_add_ref_slot(use_align);
+         pbm->align=use_align;
+      }
    }
 
    // Create a new, mipmapped version of this bitmap, in portal memory.
