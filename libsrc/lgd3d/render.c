@@ -569,6 +569,22 @@ void lgd3d_modern_reset_texture_state(void)
 extern float g_ModernUvScale[][2];
 static float modern_uv_scale[2] = { 1.0f, 1.0f };
 
+// A texture id drawn with no texture behind it (OpenGL samples nothing:
+// black). Said once for each id in logs/thief.log; drawn white instead -- a
+// lit surface without its picture, not a black hole.
+static unsigned char modern_missing_said[LGD3D_MAX_TEXTURES];
+static void *modern_texture_or_white(int n, int stage)
+{
+   if (g_ModernTextures[n])
+      return g_ModernTextures[n];
+   if (!modern_missing_said[n]) {
+      modern_missing_said[n] = 1;
+      fprintf(stderr, "GL: %s %d drawn with no texture (bitmap %s): drawn white\n",
+              stage ? "lightmap" : "texture", n, g_ModernBitmaps[n] ? "still known" : "gone");
+   }
+   return g_ModernWhiteTexture;
+}
+
 static void doPolySetup(int n)
 {
    int trans = 0;
@@ -578,7 +594,7 @@ static void doPolySetup(int n)
       RenderBackendBindTexture(0, g_ModernWhiteTexture);
    } else {
       AssertMsg1((n>=0)&&(n<LGD3D_MAX_TEXTURES), "Invalid texture id: %i", n);
-      RenderBackendBindTexture(0, g_ModernTextures[n]);
+      RenderBackendBindTexture(0, modern_texture_or_white(n, 0));
       if (g_ModernUvScale[n][0] > 0.0f && g_ModernUvScale[n][1] > 0.0f) {
          modern_uv_scale[0] = g_ModernUvScale[n][0];
          modern_uv_scale[1] = g_ModernUvScale[n][1];
@@ -632,7 +648,7 @@ static void modern_setup_second_texture(void)
       RenderBackendBindTexture(1, g_ModernWhiteTexture);
    else {
       AssertMsg1((n>=0)&&(n<LGD3D_MAX_TEXTURES), "Invalid lightmap id: %i", n);
-      RenderBackendBindTexture(1, g_ModernTextures[n]);
+      RenderBackendBindTexture(1, modern_texture_or_white(n, 1));
    }
    RenderBackendSetSampler(1, lgd3d_get_texture_wrapping(1), TRUE);
 }

@@ -2847,6 +2847,7 @@ struct WorldGroup {
 constexpr float kWorldChunk = 24.0f;      // meters
 constexpr float kWorldReach = 60.0f;      // meters walked from the camera (as Raze RT)
 constexpr float kWorldNear = 20.0f;       // meters in a straight line: always (shadows, reflections)
+constexpr float kWorldView = 300.0f;      // meters in a straight line, in the view's cone: a vista outdoors
 int g_worldCell = -1;
 float g_nextFacing[3] = {0, 0, 1};
 bool g_nextFacingSet = false;
@@ -2879,6 +2880,18 @@ void upload_world()
    size_t tris = 0, cutTris = 0;
    g_worldShownGroups = 0;
    const RgFloat3D cam = to_rt(g_camera.pos);
+   // the view's cone (a little wider than the screen): far land in view outdoors, which
+   // the game's walk through the cells may not reach -- an island across the void
+   const float tanX = 1.0f / std::max(g_camera.zoom, 0.1f);
+   const float tanY = tanX * (g_camera.width > 0 ? float(g_camera.height) / float(g_camera.width) : 0.75f);
+   const float coneA = std::min(std::atan(std::sqrt(tanX * tanX + tanY * tanY)) + 0.1f, 1.5f);
+   const float coneSin = std::sin(coneA), coneCos = std::cos(coneA);
+   float fwdN[3] = {g_camera.fwd[0], g_camera.fwd[1], g_camera.fwd[2]};
+   {
+      const float l = std::sqrt(fwdN[0] * fwdN[0] + fwdN[1] * fwdN[1] + fwdN[2] * fwdN[2]);
+      for (float &f : fwdN)
+         f = l > 0.0f ? f / l : 0.0f;
+   }
    for (size_t i = 0; i < g_world.size(); ++i) {
       WorldGroup &g = g_world[i];
       if (g.verts.empty())
@@ -2935,6 +2948,22 @@ void upload_world()
             }
             const float near = g.shown ? kWorldNear * 1.25f : kWorldNear;
             in = d2 < near * near;
+         }
+         if (!in) {
+            float c[3], r2 = 0.0f;
+            for (int k = 0; k < 3; ++k) {
+               c[k] = 0.5f * (g.bmin[k] + g.bmax[k]) - cam.data[k];
+               const float h = 0.5f * (g.bmax[k] - g.bmin[k]);
+               r2 += h * h;
+            }
+            const float r = std::sqrt(r2);
+            const float d = c[0] * fwdN[0] + c[1] * fwdN[1] + c[2] * fwdN[2];
+            const float len2 = c[0] * c[0] + c[1] * c[1] + c[2] * c[2];
+            const float view = g.shown ? kWorldView * 1.1f : kWorldView;
+            if (d > -r && len2 < (view + r) * (view + r)) {
+               const float lateral = std::sqrt(std::max(len2 - d * d, 0.0f));
+               in = lateral * coneCos - d * coneSin <= r;
+            }
          }
          g.shown = in;
          if (!in)
