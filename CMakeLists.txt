@@ -487,6 +487,7 @@ if(DARK_BUILD_ENGINE)
       unixsrc/movie/movie.cpp
       unixsrc/render/opengl.cpp
       unixsrc/script/scrptmod.cpp
+      unixsrc/sound/acoustics.cpp
       unixsrc/sound/factory.cpp
       unixsrc/sound/openal_loader.cpp
       unixsrc/sound/platform.cpp

@@ -1658,6 +1658,57 @@ BOOL portal_true_two_pass = TRUE;
 BOOL (*pSkyRenderCallback)(void) = 0;
 BOOL bRenderNewSky = FALSE;
 
+/* ----- The level's surfaces for the sound (acoustics.cpp) ---------------- *\
+
+   Steam Audio traces sound through the level's own walls: every polygon of
+   every cell, but the sky's (sound goes out there) and the plain openings
+   between cells. Water surfaces are given too (flag 1): sound bounces off
+   them. Vertices in feet, the world's axes; texture: the polygon's
+   r3s_texture (its name tells what the surface is made of), or NULL.
+   Returns a number that changes when the cells do; with no fn, only that.
+
+\* ----------------------------------------------------------------------- */
+unsigned portal_sound_world(void (*fn)(void *user, int n, const float *xyz,
+                                       void *texture, int flags), void *user)
+{
+   unsigned serial = 2166136261u;
+   int c;
+   serial = (serial ^ (unsigned)wr_num_cells) * 16777619u;
+   for (c = 0; c < wr_num_cells; ++c) {
+      PortalCell *cell = wr_cell[c];
+      serial = (serial ^ (unsigned)(uintptr_t)cell) * 16777619u;
+      if (cell)
+         serial = (serial ^ (unsigned)(cell->num_polys | (cell->num_vertices << 8))) * 16777619u;
+   }
+   if (!fn)
+      return serial;
+   for (c = 0; c < wr_num_cells; ++c) {
+      PortalCell *r = WR_CELL(c);
+      int p, voff = 0, first_portal;
+      if (!r)
+         continue;
+      first_portal = r->num_polys - r->num_portal_polys;
+      for (p = 0; p < r->num_render_polys; voff += r->poly_list[p].num_vertices, ++p) {
+         float xyz[3 * 256];
+         const int n = r->poly_list[p].num_vertices;
+         const int tid = r->render_list[p].texture_id;
+         const int water = p >= first_portal;
+         int i;
+         if (n < 3 || n > 256)
+            continue;
+         if (!water && (tid == 0 || (tid >= BACKHACK_IDX && tid < TEXMEM_RESERVED_LIMIT)))
+            continue;   /* the sky */
+         for (i = 0; i < n; ++i) {
+            const mxs_vector *w = &r->vpool[r->vertex_list[voff + i]];
+            xyz[i*3] = w->x; xyz[i*3+1] = w->y; xyz[i*3+2] = w->z;
+         }
+         fn(user, n, xyz, (tid > 0 && tid < BACKHACK_IDX && portal_get_texture) ? (void *)portal_get_texture(tid) : NULL,
+            water ? 1 : 0);
+      }
+   }
+   return serial;
+}
+
 #ifdef DARK_RT
 /* ----- Ray tracer (RTGL1) feeds ----------------------------------------- *\
 

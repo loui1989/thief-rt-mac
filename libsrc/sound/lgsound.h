@@ -269,6 +269,8 @@ extern "C" {
 #define kREVERB_FlagLevel        (1 << 1)
 #define kREVERB_FlagDecay        (1 << 2)
 #define kREVERB_FlagDamping      (1 << 3)
+// all of an EAX reverb, traced from the level (acoustics.h): the fields below
+#define kREVERB_FlagTraced       (1 << 4)
 
 	typedef struct ReverbSettings
 	{
@@ -278,6 +280,12 @@ extern "C" {
 		float level;
 		float decay;
 		float damping;
+		// kREVERB_FlagTraced (OpenAL Soft's EAX reverb, by its EFX names)
+		float gain, gainHF, gainLF;
+		float decayHFRatio, decayLFRatio;
+		float reflectionsGain, reflectionsDelay, lateGain, lateDelay;
+		float density, diffusion;
+		float reflectionsPan[3], latePan[3];
 	} ReverbSettings;
 
 	// volume limits in millibels

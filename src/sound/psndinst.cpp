@@ -343,6 +343,8 @@ BOOL cPropSndInst::PlaySoundList(cPlayerSoundList *pCurPlayerList)
       // Play sound on object
       pSoundInfo->SFXHandle = SFX_Play_Obj(SFX_3D, &pSoundInfo->AppsfxParms,
                                            pSoundInfo->SampleName, pSoundInfo->ActiveObject);
+      if (pSoundInfo->SFXHandle != SFX_NO_HND)
+         SFX_SetSourcePoint(pSoundInfo->SFXHandle, &pSoundInfo->SrcPoint);
    }
    else
    {
@@ -353,6 +355,8 @@ BOOL cPropSndInst::PlaySoundList(cPlayerSoundList *pCurPlayerList)
       // Fire and forget
       pSoundInfo->SFXHandle = SFX_Play_Vec(SFX_3D, &pSoundInfo->AppsfxParms,
                                            pSoundInfo->SampleName, &pSoundInfo->Position);
+      if (pSoundInfo->SFXHandle != SFX_NO_HND)
+         SFX_SetSourcePoint(pSoundInfo->SFXHandle, &pSoundInfo->SrcPoint);
    }
 
    // With pioritization, this should never fail, but just in case
@@ -1204,6 +1208,7 @@ void cPropSndInst::ResolveActiveSounds(ObjID hearingObj)
 
                   // Update the virtual sound's position
                   ObjTranslate(pActiveSound->ActiveObject, &pSoundInfo->Position);
+                  SFX_SetSourcePoint(pActiveSound->SFXHandle, &pSoundInfo->SrcPoint);
 
                   if ( SFX_Use_Occlusion(pActiveSound->SFXHandle) ) {
                      // EAX Occlusion is available to model attenuation due to closed doors, so

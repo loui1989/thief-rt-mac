@@ -156,6 +156,8 @@ EXTERN int  SFX_GetMusicVolume ();
 EXTERN void SFX_Slam_Dist(int hnd, int distance, BOOL force_update);
 // Distance override with blocking factor
 EXTERN void SFX_Slam_Dist_BF(int hnd, int distance, mxs_real blocking_factor, BOOL force_update);
+// where the sound really is, for traced sound (walls between it and the listener)
+EXTERN void SFX_SetSourcePoint(int hnd, const mxs_vector *src);
 
 
 // Attenuation stuff

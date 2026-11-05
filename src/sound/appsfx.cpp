@@ -47,6 +47,9 @@
 
 #include <objmedia.h>
 #include <physapi.h>
+#ifndef _WIN32
+#include <acoustics.h>   // traced sound (Steam Audio)
+#endif
 
 ////////////
 // profiling and timers
@@ -105,6 +108,9 @@ typedef struct {
    ulong  play_time; // when did we first get sample
    char* pStreamBuffer;  // Buffer used when streaming.  NULL if not streamed.
    mxs_real blocking_factor;  // current blocking factor
+   mxs_vector src;   // where the sound really is (SFX_SetSourcePoint), if has_src
+   BOOL   has_src;
+   float  traced;    // traced sound: how clear its line to the listener is, 1 clear
 } _sfx;              // maybe name should be for all, extension generates type
 
 
@@ -639,6 +645,8 @@ void _sfx_basic_setup(int which, _sfx *newfx, int type, sfx_parm *parm, const ch
    newfx->pSnd=NULL;
    newfx->pRes=NULL;
    newfx->pStreamBuffer = NULL;
+   newfx->has_src = FALSE;
+   newfx->traced = 1.0f;
 
 #ifndef SHIP   
    if (dummy_sound[0]!='\0')
@@ -693,6 +701,9 @@ static void _sfx_cleanup_fx(_sfx *fx, BOOL make_callback)
 
    fx->type=SFX_NONE;
    fx->pSnd=NULL;
+#ifndef _WIN32
+   Acoustics_SourceStop(_sfx_get_hnd_from_ptr(fx));
+#endif
 
    // Clean up streaming buffer if any.
    if ( NULL != fx->pStreamBuffer )
@@ -1240,6 +1251,27 @@ static BOOL _sfx_update(_sfx *fx, BOOL init, ulong cur_time)
       change = TRUE;
    }
 
+#ifndef _WIN32
+   // traced sound: walls between the sound's real place and the listener take its highs
+   // (as round a corner). Where it really is: as the propagation found it, or for a sound
+   // that goes the straight way, where it plays.
+   if (fx->flags & SFXFLG_POS)
+   {
+      const mxs_vector *at = fx->has_src ? &fx->src : (fx->distance < 0 ? &fx->loc : NULL);
+      float clear = 1.0f;
+      if (at)
+      {
+         const float src[3] = { at->x, at->y, at->z };
+         clear = Acoustics_SourceClear(_sfx_get_hnd_from_ptr(fx), src);
+      }
+      if (fabsf(clear - fx->traced) > 0.02f || (clear == 1.0f && fx->traced != 1.0f))
+      {
+         fx->traced = clear;
+         change = TRUE;
+      }
+   }
+#endif
+
    if ( fx->blocking_factor != fx->parm.blocking_factor ) {
       // blocking factor has changed
       fx->blocking_factor = fx->parm.blocking_factor;
@@ -1284,6 +1316,13 @@ static BOOL _sfx_update(_sfx *fx, BOOL init, ulong cur_time)
                                   * (1.0f - bfBreakOut));
          }
          occlusionLevel = (long)(modBF * (kSndMinVolume - net_gain));
+         if (fx->traced < 1.0f) {
+            // behind walls: down to about a third of the highs (-10 dB)
+            const float hf = fx->traced + (1.0f - fx->traced) * 0.32f;
+            occlusionLevel += (long)(2000.0f * log10f(hf));
+            if (occlusionLevel < kSndMinVolume)
+               occlusionLevel = kSndMinVolume;
+         }
          fx->pSnd->Set3DOcclusion( occlusionLevel );
       }
       return TRUE;
@@ -1352,8 +1391,46 @@ void SFX_Frame(mxs_vector *pos, mxs_angvec *ang)
       if (room_type==-1)
          room_type=kREVERB_Generic; // well, who knows
 
+#ifndef _WIN32
+      // traced sound: the reverb of the place itself, from its walls -- but under water,
+      // and in the designers' unreal rooms (drugged, dizzy, psychotic), theirs
+      {
+         static int sTracedFrame = 0;
+         sAcousticReverb tr;
+         if (room_type != kREVERB_UnderWater && room_type != kREVERB_Drugged &&
+             room_type != kREVERB_Dizzy && room_type != kREVERB_Psychotic &&
+             Acoustics_GetReverb(&tr))
+         {
+            if (sgLastRoomType != -2 || ++sTracedFrame >= 6)
+            {
+               ReverbSettings revSet;
+               memset(&revSet, 0, sizeof(revSet));
+               revSet.flags = kREVERB_FlagTraced;
+               revSet.gain = tr.gain;
+               revSet.gainHF = tr.gainHF;
+               revSet.gainLF = tr.gainLF;
+               revSet.decay = tr.decay;
+               revSet.decayHFRatio = tr.decayHFRatio;
+               revSet.decayLFRatio = tr.decayLFRatio;
+               revSet.reflectionsGain = tr.reflectionsGain;
+               revSet.reflectionsDelay = tr.reflectionsDelay;
+               revSet.lateGain = tr.lateGain;
+               revSet.lateDelay = tr.lateDelay;
+               revSet.density = tr.density;
+               revSet.diffusion = tr.diffusion;
+               memcpy(revSet.reflectionsPan, tr.reflectionsPan, sizeof(revSet.reflectionsPan));
+               memcpy(revSet.latePan, tr.latePan, sizeof(revSet.latePan));
+               pSndMixer->Set3DReverbSettings(&revSet);
+               sTracedFrame = 0;
+            }
+            sgLastRoomType = -2;   // (so the designer's room comes back when this stops)
+            room_type = -2;
+         }
+      }
+#endif
+
       // Only set reverb when player enters a new room.
-      if (room_type!=sgLastRoomType)
+      if (room_type!=-2 && room_type!=sgLastRoomType)
       {
 #ifndef SHIP
          if (sgLogRoomTransitions)
@@ -1378,6 +1455,19 @@ void SFX_Frame(mxs_vector *pos, mxs_angvec *ang)
       }
    }
    
+#ifndef _WIN32
+   // traced sound: where the listener is, for the next trace (only while the game runs)
+   if (IsSimTimePassing())
+   {
+      mxs_matrix lo;
+      mx_ang2mat(&lo, &head_ang);
+      const float h[3] = { head_pos.x, head_pos.y, head_pos.z };
+      const float f[3] = { lo.vec[0].x, lo.vec[0].y, lo.vec[0].z };
+      const float u[3] = { lo.vec[2].x, lo.vec[2].y, lo.vec[2].z };
+      Acoustics_Frame(h, f, u);
+   }
+#endif
+
    // lets do some 3d whackitude
    TIMER_Start(SndMixerTimer);
    if ( sfx3DMethod != kSnd3DMethodNone ) {
@@ -1571,6 +1661,16 @@ void SFX_Slam_Dist(int hnd, int distance, BOOL force_update)
 }
 
 ///////////////////////////////////////
+
+// where a sound really is (the propagation's source point; the sound itself plays where
+// its path comes from): traced sound looks for walls between there and the listener
+void SFX_SetSourcePoint(int hnd, const mxs_vector *src)
+{
+   if (hnd < 0 || hnd >= SFX_MAX_COUNT || src == NULL || fxlist[hnd].type == SFX_NONE)
+      return;
+   fxlist[hnd].src = *src;
+   fxlist[hnd].has_src = TRUE;
+}
 
 void SFX_Slam_Dist_BF(int hnd, int distance, mxs_real blocking_factor, BOOL force_update)
 {

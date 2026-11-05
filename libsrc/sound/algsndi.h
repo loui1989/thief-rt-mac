@@ -46,6 +46,8 @@ public:
    float RolloffFactor(void) const { return m3DEnvironment.rolloffFactor; }
    sOpenALApi &AL(void) { return mAL; }
    void UpdateEffect(void);
+   void ApplyHrtf(int mode);          // 0 automatic, 1 on, 2 off (acoustics.h)
+   const char *HrtfStatus(void);
 
 private:
    sOpenALApi mAL;
@@ -55,6 +57,8 @@ private:
    ALuint mEffectSlot;
    BOOL mEffectsAvailable;
    BOOL mReverbEnabled;
+   BOOL mEaxReverb;                   // the EAX reverb (OpenAL Soft): all of a traced room
+   char mHrtfStatus[96];
    ReverbSettings mReverbSettings;
 
    bool InitEffects(void);

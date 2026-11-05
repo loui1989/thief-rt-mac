@@ -12,6 +12,13 @@
 #include <mixerlck.h>
 #include <mprintf.h>
 
+// traced sound (unixsrc/sound/acoustics.cpp): the headphone setting
+extern "C" int Acoustics_HrtfMode(void);
+
+namespace {
+cALSndMixer *g_LiveMixer = NULL;   // for OpenALApplyHrtf
+}
+
 #define IS_STREAM  (mStateFlags & kSndFlagStream)
 #define IS_LOOP    (mStateFlags & kSndFlagLooped)
 #define IS_AUDIBLE (mStateFlags & kSndFlagAudible)
@@ -59,8 +66,9 @@ IMPLEMENT_UNAGGREGATABLE_SELF_DELETE(cALSndSample, ISndSample);
 
 cALSndMixer::cALSndMixer()
    : mDevice(NULL), mContext(NULL), mEffect(0), mEffectSlot(0),
-     mEffectsAvailable(FALSE), mReverbEnabled(FALSE)
+     mEffectsAvailable(FALSE), mReverbEnabled(FALSE), mEaxReverb(FALSE)
 {
+   mHrtfStatus[0] = 0;
    std::memset(&mAL, 0, sizeof(mAL));
    std::memset(&mReverbSettings, 0, sizeof(mReverbSettings));
    mReverbSettings.flags = kREVERB_FlagType;
@@ -79,6 +87,8 @@ cALSndMixer::~cALSndMixer()
       mAL.alDeleteAuxiliaryEffectSlots(1, &mEffectSlot);
       mAL.alDeleteEffects(1, &mEffect);
    }
+   if (g_LiveMixer == this)
+      g_LiveMixer = NULL;
    if (mContext != NULL)
    {
       mAL.alcMakeContextCurrent(NULL);
@@ -113,7 +123,11 @@ STDMETHODIMP_(eSndError) cALSndMixer::Init(sSndSetup *, uint32 channels,
       return kSndCantCreateDevice;
    }
 
-   const ALCint effectAttributes[] = { ALC_MAX_AUXILIARY_SENDS, 1, 0 };
+   // HRTF (headphones): automatic -- OpenAL Soft's own choice, on for headphones -- or
+   // always, or never (acoustics.h, the settings panel)
+   const int hrtfMode = Acoustics_HrtfMode();
+   const ALCint hrtf = hrtfMode == 1 ? 1 : hrtfMode == 2 ? 0 : ALC_DONT_CARE_SOFT;
+   const ALCint effectAttributes[] = { ALC_MAX_AUXILIARY_SENDS, 1, ALC_HRTF_SOFT, hrtf, 0 };
    mContext = mAL.alcCreateContext(mDevice, effectAttributes);
    if (mContext == NULL)
       mContext = mAL.alcCreateContext(mDevice, NULL);
@@ -142,6 +156,9 @@ STDMETHODIMP_(eSndError) cALSndMixer::Init(sSndSetup *, uint32 channels,
       fprintf(stderr, "OpenAL: %s %s, output \"%s\", %d Hz, %d updates a second\n",
               ren ? ren : "?", ver ? ver : "?", dev ? dev : "?", freq, refresh);
    }
+
+   g_LiveMixer = this;
+   fprintf(stderr, "OpenAL: %s\n", HrtfStatus());
 
    mNumMixerChans = static_cast<int32>(channels);
    mNumFreeMixerChans = static_cast<int32>(channels);
@@ -193,7 +210,13 @@ bool cALSndMixer::InitEffects(void)
 
    while (mAL.alGetError() != AL_NO_ERROR) {}
    mAL.alGenEffects(1, &mEffect);
-   mAL.alEffecti(mEffect, AL_EFFECT_TYPE, AL_EFFECT_REVERB);
+   // the EAX reverb if there is one (OpenAL Soft): its low band, and panned reflections,
+   // for the traced reverb; the standard reverb otherwise
+   LoadExtension(mAL.alEffectfv, mAL, "alEffectfv");
+   mAL.alEffecti(mEffect, AL_EFFECT_TYPE, AL_EFFECT_EAXREVERB);
+   mEaxReverb = mAL.alGetError() == AL_NO_ERROR;
+   if (!mEaxReverb)
+      mAL.alEffecti(mEffect, AL_EFFECT_TYPE, AL_EFFECT_REVERB);
    mAL.alGenAuxiliaryEffectSlots(1, &mEffectSlot);
    if (mAL.alGetError() != AL_NO_ERROR)
    {
@@ -332,9 +355,72 @@ STDMETHODIMP_(BOOL) cALSndMixer::Set3DReverbSettings(ReverbSettings *settings)
    if (settings->flags & kREVERB_FlagLevel) mReverbSettings.level = settings->level;
    if (settings->flags & kREVERB_FlagDecay) mReverbSettings.decay = settings->decay;
    if (settings->flags & kREVERB_FlagDamping) mReverbSettings.damping = settings->damping;
+   if (settings->flags & kREVERB_FlagTraced)
+   {
+      const uint32 flags = mReverbSettings.flags;
+      const int type = mReverbSettings.type;
+      const float lvl = mReverbSettings.level, dmp = mReverbSettings.damping;
+      // (decay is the traced decay; the rest of a designer's room is kept for later)
+      mReverbSettings = *settings;
+      mReverbSettings.flags = flags;
+      mReverbSettings.type = type;
+      mReverbSettings.level = lvl;
+      mReverbSettings.damping = dmp;
+   }
+   else if (settings->flags & kREVERB_FlagType)
+      mReverbSettings.flags &= ~kREVERB_FlagTraced;   // back to the designer's room
    mReverbSettings.flags |= settings->flags;
    UpdateEffect();
    return TRUE;
+}
+
+// HRTF on the device as it plays: OpenAL Soft resets it with the new attributes
+void cALSndMixer::ApplyHrtf(int mode)
+{
+   if (mDevice == NULL)
+      return;
+   typedef ALCboolean (*ResetFn)(ALCdevice *, const ALCint *);
+   ResetFn reset = reinterpret_cast<ResetFn>(mAL.alcGetProcAddress(mDevice, "alcResetDeviceSOFT"));
+   if (reset == NULL)
+      return;
+   const ALCint hrtf = mode == 1 ? 1 : mode == 2 ? 0 : ALC_DONT_CARE_SOFT;
+   const ALCint attributes[] = { ALC_MAX_AUXILIARY_SENDS, 1, ALC_HRTF_SOFT, hrtf, 0 };
+   reset(mDevice, attributes);
+   fprintf(stderr, "OpenAL: %s\n", HrtfStatus());
+}
+
+const char *cALSndMixer::HrtfStatus(void)
+{
+   typedef void (*GetIntegervFn)(ALCdevice *, ALCenum, ALCsizei, ALCint *);
+   typedef const ALCchar *(*GetStringFn)(ALCdevice *, ALCenum);
+   GetIntegervFn getInt = reinterpret_cast<GetIntegervFn>(mAL.alcGetProcAddress(NULL, "alcGetIntegerv"));
+   GetStringFn getString = reinterpret_cast<GetStringFn>(mAL.alcGetProcAddress(NULL, "alcGetString"));
+   ALCint on = 0, status = 0;
+   if (getInt != NULL && mDevice != NULL)
+   {
+      getInt(mDevice, ALC_HRTF_SOFT, 1, &on);
+      getInt(mDevice, ALC_HRTF_STATUS_SOFT, 1, &status);
+   }
+   // ALC_HRTF_STATUS_SOFT: 0 disabled, 1 enabled, 2 denied, 3 required, 4 headphones
+   // detected, 5 unsupported format
+   static const char *const kStatus[] = {"off", "on", "off (not allowed)", "on (required)",
+                                         "on (headphones found)", "off (output not stereo)"};
+   const char *name = (on && getString != NULL) ? getString(mDevice, ALC_HRTF_SPECIFIER_SOFT) : NULL;
+   snprintf(mHrtfStatus, sizeof(mHrtfStatus), "HRTF %s%s%s%s",
+            (status >= 0 && status <= 5) ? kStatus[status] : (on ? "on" : "off"),
+            name ? " (" : "", name ? name : "", name ? ")" : "");
+   return mHrtfStatus;
+}
+
+extern "C" void OpenALApplyHrtf(int mode)
+{
+   if (g_LiveMixer != NULL)
+      g_LiveMixer->ApplyHrtf(mode);
+}
+
+extern "C" const char *OpenALHrtfStatus(void)
+{
+   return g_LiveMixer != NULL ? g_LiveMixer->HrtfStatus() : "no sound device";
 }
 
 STDMETHODIMP_(BOOL) cALSndMixer::Get3DReverbSettings(ReverbSettings *settings)
@@ -383,19 +469,52 @@ void cALSndMixer::UpdateEffect(void)
    const float damping = (mReverbSettings.flags & kREVERB_FlagDamping)
       ? std::max(0.1f, std::min(mReverbSettings.damping, 2.0f)) : preset.decayHF;
 
-   mAL.alEffectf(mEffect, AL_REVERB_DENSITY, preset.density);
-   mAL.alEffectf(mEffect, AL_REVERB_DIFFUSION, preset.diffusion);
-   mAL.alEffectf(mEffect, AL_REVERB_GAIN, level);
-   mAL.alEffectf(mEffect, AL_REVERB_GAINHF, preset.gainHF);
-   mAL.alEffectf(mEffect, AL_REVERB_DECAY_TIME, decay);
-   mAL.alEffectf(mEffect, AL_REVERB_DECAY_HFRATIO, damping);
-   mAL.alEffectf(mEffect, AL_REVERB_REFLECTIONS_GAIN, 0.05f);
-   mAL.alEffectf(mEffect, AL_REVERB_REFLECTIONS_DELAY, 0.007f);
-   mAL.alEffectf(mEffect, AL_REVERB_LATE_REVERB_GAIN, 1.26f);
-   mAL.alEffectf(mEffect, AL_REVERB_LATE_REVERB_DELAY, 0.011f);
-   mAL.alEffectf(mEffect, AL_REVERB_AIR_ABSORPTION_GAINHF, 0.994f);
-   mAL.alEffectf(mEffect, AL_REVERB_ROOM_ROLLOFF_FACTOR, 0.0f);
-   mAL.alEffecti(mEffect, AL_REVERB_DECAY_HFLIMIT, AL_TRUE);
+   // a traced room (acoustics.h) is the whole reverb; a designer's room type gives the
+   // shape, the reflections and the late part as the game always set them
+   const bool traced = (mReverbSettings.flags & kREVERB_FlagTraced) != 0;
+   const ReverbSettings &t = mReverbSettings;
+   const float zero[3] = {0.0f, 0.0f, 0.0f};
+   if (mEaxReverb)
+   {
+      mAL.alEffectf(mEffect, AL_EAXREVERB_DENSITY, traced ? t.density : preset.density);
+      mAL.alEffectf(mEffect, AL_EAXREVERB_DIFFUSION, traced ? t.diffusion : preset.diffusion);
+      mAL.alEffectf(mEffect, AL_EAXREVERB_GAIN, traced ? t.gain : level);
+      mAL.alEffectf(mEffect, AL_EAXREVERB_GAINHF, traced ? t.gainHF : preset.gainHF);
+      mAL.alEffectf(mEffect, AL_EAXREVERB_GAINLF, traced ? t.gainLF : 1.0f);
+      mAL.alEffectf(mEffect, AL_EAXREVERB_DECAY_TIME, traced ? t.decay : decay);
+      mAL.alEffectf(mEffect, AL_EAXREVERB_DECAY_HFRATIO, traced ? t.decayHFRatio : damping);
+      mAL.alEffectf(mEffect, AL_EAXREVERB_DECAY_LFRATIO, traced ? t.decayLFRatio : 1.0f);
+      mAL.alEffectf(mEffect, AL_EAXREVERB_REFLECTIONS_GAIN, traced ? t.reflectionsGain : 0.05f);
+      mAL.alEffectf(mEffect, AL_EAXREVERB_REFLECTIONS_DELAY, traced ? t.reflectionsDelay : 0.007f);
+      mAL.alEffectf(mEffect, AL_EAXREVERB_LATE_REVERB_GAIN, traced ? t.lateGain : 1.26f);
+      mAL.alEffectf(mEffect, AL_EAXREVERB_LATE_REVERB_DELAY, traced ? t.lateDelay : 0.011f);
+      if (mAL.alEffectfv != NULL)
+      {
+         mAL.alEffectfv(mEffect, AL_EAXREVERB_REFLECTIONS_PAN, traced ? t.reflectionsPan : zero);
+         mAL.alEffectfv(mEffect, AL_EAXREVERB_LATE_REVERB_PAN, traced ? t.latePan : zero);
+      }
+      mAL.alEffectf(mEffect, AL_EAXREVERB_AIR_ABSORPTION_GAINHF, 0.994f);
+      mAL.alEffectf(mEffect, AL_EAXREVERB_HFREFERENCE, 5000.0f);
+      mAL.alEffectf(mEffect, AL_EAXREVERB_LFREFERENCE, 250.0f);
+      mAL.alEffectf(mEffect, AL_EAXREVERB_ROOM_ROLLOFF_FACTOR, 0.0f);
+      mAL.alEffecti(mEffect, AL_EAXREVERB_DECAY_HFLIMIT, AL_TRUE);
+   }
+   else
+   {
+      mAL.alEffectf(mEffect, AL_REVERB_DENSITY, traced ? t.density : preset.density);
+      mAL.alEffectf(mEffect, AL_REVERB_DIFFUSION, traced ? t.diffusion : preset.diffusion);
+      mAL.alEffectf(mEffect, AL_REVERB_GAIN, traced ? t.gain : level);
+      mAL.alEffectf(mEffect, AL_REVERB_GAINHF, traced ? t.gainHF : preset.gainHF);
+      mAL.alEffectf(mEffect, AL_REVERB_DECAY_TIME, traced ? t.decay : decay);
+      mAL.alEffectf(mEffect, AL_REVERB_DECAY_HFRATIO, traced ? t.decayHFRatio : damping);
+      mAL.alEffectf(mEffect, AL_REVERB_REFLECTIONS_GAIN, traced ? t.reflectionsGain : 0.05f);
+      mAL.alEffectf(mEffect, AL_REVERB_REFLECTIONS_DELAY, traced ? t.reflectionsDelay : 0.007f);
+      mAL.alEffectf(mEffect, AL_REVERB_LATE_REVERB_GAIN, traced ? t.lateGain : 1.26f);
+      mAL.alEffectf(mEffect, AL_REVERB_LATE_REVERB_DELAY, traced ? t.lateDelay : 0.011f);
+      mAL.alEffectf(mEffect, AL_REVERB_AIR_ABSORPTION_GAINHF, 0.994f);
+      mAL.alEffectf(mEffect, AL_REVERB_ROOM_ROLLOFF_FACTOR, 0.0f);
+      mAL.alEffecti(mEffect, AL_REVERB_DECAY_HFLIMIT, AL_TRUE);
+   }
    mAL.alAuxiliaryEffectSloti(mEffectSlot, AL_EFFECTSLOT_EFFECT,
                               static_cast<ALint>(mEffect));
 }
