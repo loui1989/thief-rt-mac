@@ -29,6 +29,9 @@ public:
 
    STDMETHOD(Equip)(object weapon, int type)
    {
+      // (thief.log: a weapon drawn by its script -- a selection that draws
+      // nothing shows whether its script got this far)
+      fprintf(stderr, "weapon: script draws weapon %d (type %d)\n", (int)weapon, type);
       return EquipWeapon(PlayerObject(), weapon, type);
    }
 

@@ -30,6 +30,7 @@ public:
 
    STDMETHOD(Equip)()
    {
+      fprintf(stderr, "weapon: script draws the bow\n");
       return EquipBow();
    }
 

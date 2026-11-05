@@ -674,6 +674,7 @@ static void select_command(char* arg)
    if (obj == OBJ_NULL)
    {
       Warning(("select_command: No object named %s\n",arg));
+      fprintf(stderr, "inv_select %s: no object or archetype of that name\n", arg);
       return ;
    }
 
@@ -697,6 +698,9 @@ static void select_command(char* arg)
       pContainSys->IterEnd(iter);
    }
 
+   if (select == OBJ_NULL)
+      fprintf(stderr, "inv_select %s: the player carries none\n", arg);
+
    if (select !=OBJ_NULL)
    {
       Camera *cam = PlayerCamera();
@@ -705,6 +709,8 @@ static void select_command(char* arg)
 
       BOOL weapon = pInventory->GetType(select) == kInvTypeWeapon;
       eWhichInvObj which = weapon ? kCurrentWeapon : kCurrentItem;
+      fprintf(stderr, "inv_select %s: object %d (inventory type %d)\n", arg, select,
+              (int)pInventory->GetType(select));
       set_expiration(which);
       const BOOL was_selected = select == pInventory->Selection(which);
       if (!was_selected)

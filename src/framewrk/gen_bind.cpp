@@ -1201,6 +1201,11 @@ static char *InvWheelProc(const char *, const char *val, BOOL)
          return NULL;
       InvUIRadialSetActive(TRUE);
       InvUIRadialSetMouse(TRUE);
+      // the view stops: the mouse now moves the wheel's cursor, so the turn
+      // it was making (a rate, set again by each mouse report) was never
+      // set back to nothing and the view kept turning while the wheel was open
+      headmoveSetRelPosX(0.0f);
+      headmoveSetRelPosY(0.0f);
    }
    else if (InvUIRadialMouse())
       InvUIRadialSetActive(FALSE);
@@ -1218,6 +1223,8 @@ static char *GamepadRadialProc(const char *, const char *val, BOOL)
       SetSidestepState(0.0f);
       headmoveSetGamepadTurn(0.0f);
       headmoveSetGamepadLook(0.0f);
+      headmoveSetRelPosX(0.0f);
+      headmoveSetRelPosY(0.0f);
       InvUIRadialSetStick(0, g_gamepadSidestepAxis,
                          g_gamepadForwardAxis);
       InvUIRadialSetStick(1, g_gamepadTurnAxis, g_gamepadLookAxis);
@@ -1691,6 +1698,31 @@ void InitIBVars ()
       g_pInputBinder->LoadBndFile (gamebnd_path, HK_GAME_MODE|HK_GAME2_MODE, NULL);
       g_pInputBinder->LoadBndFile (gamebnd_path, HK_GAME_MODE, "game");
       g_pInputBinder->LoadBndFile (gamebnd_path, HK_GAME2_MODE, "game2");
+
+      // The game's own keys (no user.bnd yet -- Thief 2 ships none): this
+      // port's additions, as Thief Gold's user.bnd has them -- the middle
+      // button holds the inventory wheel open (it blocked, as B still does),
+      // and Shift with Q or E leans as Q or E alone does. Saving the
+      // controls writes them to user.bnd, where they can be changed.
+      {
+         static const char *const port_binds[][3] = {
+            // control, its stock command (or "" for none), this port's
+            {"mouse3", "+block", "+inv_wheel"},
+            {"q+shift", "", "+leanleft"},
+            {"e+shift", "", "+leanright"},
+         };
+         ulong old_context = 0;
+         g_pInputBinder->GetContext(&old_context);
+         g_pInputBinder->SetContext(HK_GAME_MODE, TRUE);
+         for (int i = 0; i < (int)(sizeof(port_binds) / sizeof(port_binds[0])); ++i)
+         {
+            char current[256] = {};
+            g_pInputBinder->QueryBind(port_binds[i][0], current, sizeof(current));
+            if (!strcmp(current, port_binds[i][1]))
+               g_pInputBinder->Bind((char *)port_binds[i][0], (char *)port_binds[i][2]);
+         }
+         g_pInputBinder->SetContext(old_context, TRUE);
+      }
    }
 
 #if defined(EDITOR) || defined(THIEF2_GAME)
