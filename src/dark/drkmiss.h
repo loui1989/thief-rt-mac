@@ -26,6 +26,8 @@ EXTERN const sMissionData* GetMissionData();
 // Pre-load mission data
 F_DECLARE_INTERFACE(ITagFile); 
 EXTERN void LoadMissionData(ITagFile* file); 
+// the mission's DML TagBlocks (NewDark text patches from the mods' folders)
+EXTERN void MissionApplyDMLs(void);
 EXTERN void SaveMissionData(ITagFile* file); 
 
 //

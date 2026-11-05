@@ -44,6 +44,7 @@
 #include <scrptapi.h>
 
 #include <drkamap.h>
+#include <drkmiss.h>
 
 // Must be last header
 #include <dbmem.h>
@@ -93,6 +94,10 @@ static void db_message(DispatchData* msg)
    switch (DB_MSG(msg->subtype))
    {
       case kDatabasePostLoad:
+         // (once a whole load is done: a fresh mission or a saved game)
+         if ((msg->subtype & kFiletypeAll) == 0)
+            MissionApplyDMLs();
+         // fall through
       case kDatabaseDefault:
          InitProjectileArchetype();
          InitParticleArchetype();

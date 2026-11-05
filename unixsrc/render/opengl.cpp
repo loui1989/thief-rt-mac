@@ -97,6 +97,38 @@ bool g_samplerWrap[2];
 bool g_samplerSmooth[2] = {true, true};
 GLuint g_sceneProgram, g_sceneBuffer, g_sceneVertexArray;
 GLint g_viewportUniform, g_useTexture1Uniform, g_fogEnabledUniform;
+GLint g_minLightUniform = -1;
+// The least light a lit-map surface gets (gl_settings.txt: min_light, 0 to 0.5):
+// the corners no lamp reaches show a hint of their texture, not black. 0 is
+// the original look.
+float g_minLight = 0.06f;
+void load_gl_settings()
+{
+   const char *home = getenv("HOME");
+   std::string path = home && *home ?
+#if defined(__APPLE__)
+      std::string(home) + "/Library/Application Support/Dark Engine Restored/gl_settings.txt"
+#else
+      std::string(home) + "/.config/dark-engine-restored/gl_settings.txt"
+#endif
+      : std::string("gl_settings.txt");
+   if (FILE *f = fopen(path.c_str(), "r")) {
+      char key[64];
+      float value;
+      while (fscanf(f, "%63s %f", key, &value) == 2)
+         if (!strcmp(key, "min_light"))
+            g_minLight = std::clamp(value, 0.0f, 0.5f);
+      fclose(f);
+   } else if (FILE *w = fopen(path.c_str(), "w")) {
+      // (written once with the default, to be edited)
+      fprintf(w, "min_light %.2f\n", g_minLight);
+      fclose(w);
+   }
+   if (const char *env = getenv("THIEF_GL_MIN_LIGHT"))
+      g_minLight = std::clamp(float(atof(env)), 0.0f, 0.5f);
+   fprintf(stderr, "OpenGL: unlit surfaces lifted to %.0f%% of full light (gl_settings.txt min_light)\n",
+           g_minLight * 100.0f);
+}
 GLint g_fogColorUniform, g_alphaTestUniform, g_transparentBlackUniform;
 
 void window_drawable_size(int &w, int &h);
@@ -203,6 +235,7 @@ const char kSceneFragmentShader[] =
    "uniform sampler2D texture0;\n"
    "uniform sampler2D texture1;\n"
    "uniform float useTexture1;\n"
+   "uniform float minLight;\n"
    "uniform float fogEnabled;\n"
    "uniform vec3 fogColor;\n"
    "uniform float alphaTest;\n"
@@ -213,7 +246,8 @@ const char kSceneFragmentShader[] =
    " vec4 texel=texture(texture0,uv0);\n"
    " if(transparentBlack>0.5&&all(equal(texel.rgb,vec3(0.0))))texel.a=0.0;\n"
    " vec4 color=(linearColor/weight)*texel;\n"
-   " if(useTexture1>0.5)color*=texture(texture1,uv1);\n"
+   " if(useTexture1>0.5){vec4 light=texture(texture1,uv1);"
+      "light.rgb+=minLight*(vec3(1.0)-light.rgb);color*=light;}\n"
    " if(alphaTest>0.5&&color.a<0.5)discard;\n"
    " if(fogEnabled>0.5)color.rgb=mix(fogColor,color.rgb,"
       "clamp(linearFog/weight,0.0,1.0));\n"
@@ -275,6 +309,8 @@ bool create_scene_pipeline()
    glUniform1i(glGetUniformLocation(g_sceneProgram, "texture1"), 1);
    g_viewportUniform = glGetUniformLocation(g_sceneProgram, "viewportSize");
    g_useTexture1Uniform = glGetUniformLocation(g_sceneProgram, "useTexture1");
+   g_minLightUniform = glGetUniformLocation(g_sceneProgram, "minLight");
+   load_gl_settings();
    g_fogEnabledUniform = glGetUniformLocation(g_sceneProgram, "fogEnabled");
    g_fogColorUniform = glGetUniformLocation(g_sceneProgram, "fogColor");
    g_alphaTestUniform = glGetUniformLocation(g_sceneProgram, "alphaTest");
@@ -566,6 +602,7 @@ bool draw_vertices(GLenum primitive, const sRenderBackendVertex *vertices,
    glUniform2f(g_viewportUniform, static_cast<float>(width),
       static_cast<float>(height));
    glUniform1f(g_useTexture1Uniform, second ? 1.0f : 0.0f);
+   glUniform1f(g_minLightUniform, g_minLight);
    glUniform1f(g_fogEnabledUniform, fog ? 1.0f : 0.0f);
    glUniform3f(g_fogColorUniform, ((fogColor >> 16) & 255) / 255.0f,
       ((fogColor >> 8) & 255) / 255.0f, (fogColor & 255) / 255.0f);
