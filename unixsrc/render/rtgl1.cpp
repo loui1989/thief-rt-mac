@@ -3652,7 +3652,7 @@ const char *kUpscaleNames[] = {"Off",
 enum UiRow {
    kRowUpscale, kRowScale, kRowOutput, kRowDynres, kRowBounces, kRowReach, kRowLights, kRowLightFade, kRowCandidates, kRowLightCull, kRowResponse, kRowFlicker, kRowVolumetric, kRowShafts, kRowFog, kRowBloom, kRowVsync, kRowFrameCap,
    kRowFps, kRowDetection, kRowGemScale, kRowGemMatch, kRowGemEase, kRowLight, kRowExposure, kRowDarkAdapt, kRowAmbient, kRowSkySeen, kRowSky, kRowMoon, kRowMoonDir, kRowMoonHeight, kRowLightSize, kRowRough, kRowSmooth, kRowSteady, kRowFixtures, kRowFixtureLight, kRowSmallLamps, kRowLightFix, kRowGlow, kRowFlameGlow, kRowMaterials, kRowBump, kRowCrevice, kRowTexDetail, kRowParallax, kRowPolish, kRowWater,
-   kRowDebug, kRowFreeze, kRowBackFaces, kRowReuse, kRowBlink, kRowPerf, kRowInspect, kRowReset, kRowCount
+   kRowDebug, kRowFreeze, kRowBackFaces, kRowReuse, kRowBlink, kRowPerf, kRowInspect, kRowSkipMission, kRowReset, kRowCount
 };
 
 const char *kRowLabels[kRowCount] = {
@@ -3660,11 +3660,12 @@ const char *kRowLabels[kRowCount] = {
    "Lights coming into range", "Lights tried per pixel", "Lights behind walls", "Light changes", "Light flicker",
    "God rays (volumetric)", "  God ray strength", "Mission fog", "Bloom", "VSync", "Frame rate limit", "FPS counter", "Light gem and guards", "  Light gem brightness", "  Light gem falloff", "  Light gem response", "Light brightness", "Darkest exposure", "  Eyes adjust to the dark", "Ambient light", "Sky brightness (as seen)", "Sky light (on the level)", "Moonlight", "  Moon direction", "  Moon height",
    "Light size (soft shadows)", "Surface roughness", "Model shading", "Model faces", "Torches and lamps", "Lamp and torch light", "Lamp reach", "Lights in walls", "Lamp glow", "Flame glow", "Materials", "Bumps", "Crevices", "Texture detail", "Parallax depth", "Polished reflections", "Water",
-   "Debug view", "Freeze scene (test)", "Back faces (test)", "Light sampling (test)", "Blink nearest light (test)", "Performance log", "Inspect centre of view", "Reset to defaults",
+   "Debug view", "Freeze scene (test)", "Back faces (test)", "Light sampling (test)", "Blink nearest light (test)", "Performance log", "Inspect centre of view", "Skip to next mission (test)", "Reset to defaults",
 };
 
 // rows that do something when chosen rather than having a value
-bool row_is_action(int row) { return row == kRowInspect || row == kRowReset; }
+bool row_is_action(int row) { return row == kRowInspect || row == kRowSkipMission || row == kRowReset; }
+bool g_skipMission = false;   // (RenderRTTakeSkipMission)
 
 std::string row_value(int row)
 {
@@ -4037,6 +4038,10 @@ void change_row(int row, int dir)
    case kRowPolish: g_cfg.polish = !g_cfg.polish; break;
    case kRowWater: g_cfg.water = (g_cfg.water + dir + 3) % 3; break;
    case kRowInspect: inspect_view(); return;
+   case kRowSkipMission:
+      g_skipMission = true;
+      fprintf(stderr, "RT panel: skip to the next mission\n");
+      return;
    case kRowReset: {
       const bool debug = g_cfg.debug, flip = g_cfg.flip;
       g_cfg = kDefaults;
@@ -5730,6 +5735,13 @@ extern "C" {
 int RenderRTActive(void) { return g_active ? 1 : 0; }
 
 // (with frame generation the limit is of the frames shown: half of them drawn)
+int RenderRTTakeSkipMission(void)
+{
+   const bool skip = g_skipMission;
+   g_skipMission = false;
+   return skip ? 1 : 0;
+}
+
 int RenderRTFrameCap(void) { return g_active ? (frame_gen_on() ? std::max(30, g_cfg.frameCap / 2) : g_cfg.frameCap) : 0; }
 
 int RenderRTDetectionWanted(void) { return g_active && g_cfg.rtDetection && g_frameNumber > 2 ? 1 : 0; }

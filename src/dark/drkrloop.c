@@ -31,6 +31,10 @@
 #include <drkrend.h>
 #include <mnumprop.h>
 #include <drkinvui.h>
+#include <command.h>
+#ifdef DARK_RT
+#include <render_rt.h>
+#endif
 #include <memall.h>
 #include <dbmem.h>   // must be last header! 
 
@@ -82,6 +86,11 @@ static eLoopMessageResult LGAPI _LoopFunc(void* data, eLoopMessage msg, tLoopMes
          break;
 
       case kMsgNormalFrame:
+#ifdef DARK_RT
+         // the path tracer's panel: "Skip to next mission (test)"
+         if (RenderRTTakeSkipMission())
+            CommandExecute("win_mission");
+#endif
          if (SimStateCheckFlags(kSimRender))
          {
             dark_rend_update_frame();

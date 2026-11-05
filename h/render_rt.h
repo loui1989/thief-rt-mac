@@ -129,6 +129,9 @@ void RenderRTPrepBegin(void);
 // The frame rate setting: the fewest milliseconds a frame takes are 1000 /
 // this (60, 100 or 120); 0 when not set.
 int RenderRTFrameCap(void);
+// Nonzero once after the panel's "Skip to next mission (test)" was chosen:
+// the game wins the mission (its "win_mission" command) on its next frame.
+int RenderRTTakeSkipMission(void);
 void RenderRTPrepEnd(void);
 // Within the preparations: the time since the last mark (or their start) is
 // put to this part of them (0 the world, 1 the lights found, 2 their reach,
