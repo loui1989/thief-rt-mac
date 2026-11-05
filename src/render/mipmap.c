@@ -197,6 +197,7 @@ r3s_texture create_mipmapped_texture(grs_bitmap *src_orig)
    int bytes_per_pixel;
    uchar *bits;
    grs_bitmap temp, *src = &temp;
+   const uchar *own_pal;
 
    *src = *src_orig;
 
@@ -209,6 +210,12 @@ r3s_texture create_mipmapped_texture(grs_bitmap *src_orig)
 
    tmap_pal  = palmgr_get_pal(src->align);
    tmap_ipal = palmgr_get_ipal(src->align);
+   // a slot-0 texture that keeps its own palette (no slot was left): the
+   // copy keeps it too; no palette mipmaps (they'd be made in the game's)
+   own_pal = (src->type == BMT_FLAT8 && src->align == 0)
+           ? palmgr_bitmap_palette(src_orig) : NULL;
+   if (own_pal)
+      tmap_ipal = NULL;
 
    // The legacy downsampler is palette based. True-colour replacement art
    // still needs a correctly sized base texture, but cannot use that indexed
@@ -262,6 +269,8 @@ r3s_texture create_mipmapped_texture(grs_bitmap *src_orig)
    mm_copy_bitmap_to_texture(tmap[0].bits, src);
 
    tmap[0].align=src->align;
+   if (own_pal)
+      palmgr_keep_bitmap_palette(&tmap[0], own_pal);
 
    // set up the last level
 
@@ -293,6 +302,8 @@ void free_mipmapped_texture(r3s_texture dest, bool free_rect)
          ++temp;
       }
    }
+   while (palmgr_bitmap_palette(dest))
+      palmgr_forget_bitmap_palette(dest);
 
    Free(dest);
 }

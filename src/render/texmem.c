@@ -378,7 +378,7 @@ static BOOL _texmem_check_size(int w, int h)
 // Get the palette for this resource, which is a stream in the same
 // storage, with the name "full".  Or in Deep Cover, get the palette
 // from the resource itself.  Cuz we rebels.
-static int _texmem_get_align(IRes *pRes)
+static int _texmem_get_align(IRes *pRes, grs_bitmap *pbm, BOOL *pFamilyPal)
 {
    int pal_index = 0;
 
@@ -397,6 +397,7 @@ static int _texmem_get_align(IRes *pRes)
    char *pCanonPath;
    IStore_GetCanonPath(pStore, &pCanonPath);
 
+   *pFamilyPal = FALSE;
 #ifdef DEEPC
    // In Deep Cover we get the palette from the texture.  So if we want,
    // we can have a separate palette for every texture.
@@ -408,7 +409,14 @@ static int _texmem_get_align(IRes *pRes)
 
    if (pPalRes) {
       // Okay, we've got the palette -- set it up and dump it
-      pal_index = palmgr_alloc_pal(IRes_Lock(pPalRes));
+      uchar *pal = (uchar *)IRes_Lock(pPalRes);
+      *pFamilyPal = TRUE;
+      pal_index = palmgr_alloc_pal(pal);
+      // Every slot taken (a big mission's model textures each bring their
+      // own palette): the family's palette goes with the bitmap instead of
+      // it falling back to the game palette -- noise of colours.
+      if (pal_index == 0 && pal && pbm && pbm->type == BMT_FLAT8)
+         palmgr_keep_bitmap_palette(pbm, pal);
       IRes_Unlock(pPalRes);
       SafeRelease(pPalRes);
    }
@@ -424,15 +432,16 @@ static int _texmem_get_align(IRes *pRes)
 // A family with no palette of its own (no full.pcx), an 8-bit picture: the
 // picture's own palette, as NewDark has it. Fan missions' families of GIFs
 // each made with its own colours drew in the mission's palette's -- noise of
-// colours. (A stock family's pictures carry their family's palette: the same
-// slot, nothing changes.) With every palette slot taken, the bitmap keeps
-// the palette itself (palmgr_keep_bitmap_palette).
-static int _texmem_image_align(IRes *pRes, grs_bitmap *pbm, int align)
+// colours. With every palette slot taken, the bitmap keeps the palette
+// itself (palmgr_keep_bitmap_palette). Only for a family without full.pcx:
+// a stock family's pictures need not carry their family's colours.
+static int _texmem_image_align(IRes *pRes, grs_bitmap *pbm)
 {
    IResMan *pResMan;
    IRes *pPalRes;
-   if (align > 0 || pbm == NULL || pbm->type != BMT_FLAT8)
-      return align;
+   int align = 0;
+   if (pbm == NULL || pbm->type != BMT_FLAT8)
+      return 0;
    pResMan = AppGetObj(IResMan);
    pPalRes = IResMan_Retype(pResMan, pRes, RESTYPE_PALETTE, 0);
    if (pPalRes)
@@ -449,6 +458,40 @@ static int _texmem_image_align(IRes *pRes, grs_bitmap *pbm, int align)
    }
    SafeRelease(pResMan);
    return align;
+}
+
+// the palette texmemSetPalette found no slot for (every slot taken)
+static uchar texmem_cur_pal[768];
+static BOOL texmem_cur_pal_kept = FALSE;
+
+// The palette of a new texture: its family's (full.pcx), or its own picture's
+// when the family has none. Returns the slot to set in align (0: the game
+// palette, or the palette kept with the bitmap), with *pTookRef set when the
+// slot was taken here for the bitmap (else the caller adds the reference).
+static int _texmem_new_align(IRes *pRes, grs_bitmap *pbm, int use_align, BOOL *pTookRef)
+{
+   BOOL familyPal = FALSE;
+   *pTookRef = FALSE;
+   if (texmem_find_align)
+      use_align = _texmem_get_align(pRes, pbm, &familyPal);
+   else if (use_align == 0 && texmem_cur_pal_kept)
+   {
+      familyPal = TRUE;
+      if (pbm && pbm->type == BMT_FLAT8)
+         palmgr_keep_bitmap_palette(pbm, texmem_cur_pal);
+   }
+   else if (use_align > 0)
+      familyPal = TRUE;
+   if (!familyPal)
+   {
+      const int own = _texmem_image_align(pRes, pbm);
+      if (own > 0)
+      {
+         *pTookRef = TRUE;   // (its slot taken by palmgr_alloc_pal)
+         return own;
+      }
+   }
+   return use_align;
 }
 
 int ectsSecretLoadIdx=0;
@@ -519,15 +562,11 @@ BOOL texmem_interpret_new_res(IRes *pRes,
       use_idx = GetResTexIdx(pRes);
       // We *may* also need to establish the palette for this texture.
       if (texmem_find_align) {
-         use_align=_texmem_get_align(pRes);
+         BOOL took;
          pbm = (grs_bitmap *) IRes_Lock(pRes);
-         {
-            const int own = _texmem_image_align(pRes, pbm, use_align);
-            if (own > 0)
-               use_align = own;   // (its slot taken by palmgr_alloc_pal)
-            else if (use_align!=TEXMEM_NO_ALIGN)
-               palmgr_add_ref_slot(use_align);
-         }
+         use_align=_texmem_new_align(pRes, pbm, use_align, &took);
+         if (use_align!=TEXMEM_NO_ALIGN && !took)
+            palmgr_add_ref_slot(use_align);
          if (use_align!=TEXMEM_NO_ALIGN)
             pbm->align=use_align;
          IRes_Unlock(pRes);
@@ -582,19 +621,13 @@ BOOL texmem_interpret_new_res(IRes *pRes,
       }
    }
 
-   if (texmem_find_align)
-      use_align=_texmem_get_align(pRes);
-
    {
-      const int own = _texmem_image_align(pRes, pbm, use_align);
-      if (own > 0)
+      BOOL took;
+      use_align=_texmem_new_align(pRes, pbm, use_align, &took);
+      if (use_align!=TEXMEM_NO_ALIGN)
       {
-         use_align = own;   // (its slot taken by palmgr_alloc_pal)
-         pbm->align = use_align;
-      }
-      else if (use_align!=TEXMEM_NO_ALIGN)
-      {
-         palmgr_add_ref_slot(use_align);
+         if (!took)
+            palmgr_add_ref_slot(use_align);
          pbm->align=use_align;
       }
    }
@@ -602,7 +635,9 @@ BOOL texmem_interpret_new_res(IRes *pRes,
    // Create a new, mipmapped version of this bitmap, in portal memory.
    // Then substitute it in for the resource's own data, and tell it
    // to look at this index.
-   pbm_new = texmem_convert_tmap(pbm);
+   pbm_new = texmem_convert_tmap(pbm);   // (takes any palette kept with pbm)
+   while (palmgr_bitmap_palette(pbm))
+      palmgr_forget_bitmap_palette(pbm);
    // the copy keeps the image's file name, material file and full colour
    // (resimage.cpp): the resource's own data is replaced by it
    if (pbm_new && pbm_new->w == pbm->w && pbm_new->h == pbm->h)
@@ -778,7 +813,11 @@ BOOL texmemSetPalette(char *dirname, char *fname)
       SafeRelease(pResMan);
       if (pRes)
       {
-         texmem_cur_align = palmgr_alloc_pal(IRes_Lock(pRes));
+         uchar *pal = (uchar *)IRes_Lock(pRes);
+         texmem_cur_align = palmgr_alloc_pal(pal);
+         texmem_cur_pal_kept = (texmem_cur_align == 0 && pal != NULL);
+         if (texmem_cur_pal_kept)
+            memcpy(texmem_cur_pal, pal, sizeof(texmem_cur_pal));
          IRes_Unlock(pRes);
          SafeRelease(pRes);
          return TRUE;
@@ -789,12 +828,14 @@ BOOL texmemSetPalette(char *dirname, char *fname)
          Warning(("Could not find palette %s%s\n",dirname,fname));
 #endif // ~DEEPC
          texmem_cur_align=TEXMEM_NO_ALIGN;
+         texmem_cur_pal_kept=FALSE;
          return FALSE;  // dont fall through and release the slot we never allocated!!!!
       }
    }
    if (texmem_cur_align!=TEXMEM_NO_ALIGN)
       palmgr_release_slot(texmem_cur_align);
    texmem_cur_align=TEXMEM_NO_ALIGN;
+   texmem_cur_pal_kept=FALSE;
    return FALSE;
 }
 
