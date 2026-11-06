@@ -83,6 +83,74 @@ void SetOutputPeriod()
     fprintf(stderr, "CoreAudio: output \"%s\" (%s), %.0f Hz, period %u frames -> %u (allowed %.0f-%.0f)\n",
             name, transport ? tr : "?", rate, frames, now, range.lo, range.hi);
 }
+
+bool NameHas(const char *name, const char *const *words)
+{
+    char low[256];
+    size_t i = 0;
+    for (; name[i] && i < sizeof(low) - 1; ++i)
+        low[i] = (name[i] >= 'A' && name[i] <= 'Z') ? char(name[i] - 'A' + 'a') : name[i];
+    low[i] = 0;
+    for (; *words; ++words)
+        if (strstr(low, *words))
+            return true;
+    return false;
+}
+}
+
+// Headphones: the Mac's headphone socket in use (its data source 'hdpn'), a
+// Bluetooth output that isn't a speaker by its name (AirPods, Beats, most
+// Bluetooth audio on a Mac), or a USB one that says it is.
+int OpenALOutputHeadphones(char *outName, int len)
+{
+    static void *ca = dlopen("/System/Library/Frameworks/CoreAudio.framework/CoreAudio", RTLD_NOW | RTLD_LOCAL);
+    if (outName && len > 0)
+        outName[0] = 0;
+    if (!ca)
+        return -1;
+    tCAGet get = reinterpret_cast<tCAGet>(dlsym(ca, "AudioObjectGetPropertyData"));
+    if (!get)
+        return -1;
+    const uint32_t glob = FourCC("glob");
+    uint32_t device = 0, size = sizeof(device);
+    sCAAddress a{FourCC("dOut"), glob, 0};
+    if (get(1, &a, 0, nullptr, &size, &device) != 0 || !device)
+        return -1;
+    char name[256] = "";
+    size = sizeof(name) - 1;
+    a = {FourCC("name"), glob, 0};
+    if (get(device, &a, 0, nullptr, &size, name) != 0)
+        name[0] = 0;
+    if (outName && len > 0) {
+        strncpy(outName, name, size_t(len) - 1);
+        outName[len - 1] = 0;
+    }
+    uint32_t transport = 0;
+    size = sizeof(transport);
+    a = {FourCC("tran"), glob, 0};
+    get(device, &a, 0, nullptr, &size, &transport);
+    static const char *const kPhones[] = {"airpods", "beats", "buds", "headphone", "headset", "earphone",
+                                          "earbud", "wh-", "wf-", "quietcomfort", "qc", nullptr};
+    static const char *const kSpeakers[] = {"speaker", "homepod", "soundbar", "sonos", "boom", "flip",
+                                            "charge", "soundlink", "tv", "display", "receiver", nullptr};
+    if (transport == FourCC("blue") || transport == FourCC("blea"))
+        return NameHas(name, kSpeakers) && !NameHas(name, kPhones) ? 0 : 1;
+    if (transport == FourCC("bltn")) {
+        uint32_t source = 0;
+        size = sizeof(source);
+        a = {FourCC("ssrc"), FourCC("outp"), 0};
+        if (get(device, &a, 0, nullptr, &size, &source) == 0)
+            return source == FourCC("hdpn") ? 1 : 0;
+        return NameHas(name, kPhones) ? 1 : 0;
+    }
+    return NameHas(name, kPhones) ? 1 : 0;
+}
+#else
+int OpenALOutputHeadphones(char *name, int len)
+{
+    if (name && len > 0)
+        name[0] = 0;
+    return -1;
 }
 #endif
 

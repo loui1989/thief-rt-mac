@@ -42,6 +42,7 @@ const char *Acoustics_Status(void);      // a line for the settings panel
 // (openal.cpp) applies the HRTF mode to the playing device
 void OpenALApplyHrtf(int mode);
 const char *OpenALHrtfStatus(void);
+void OpenALCheckHeadphones(void);        // (each frame; looks every 2 s)
 
 #ifdef __cplusplus
 }

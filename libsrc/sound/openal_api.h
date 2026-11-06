@@ -153,3 +153,7 @@ typedef struct sOpenALApi
 
 bool OpenALLoad(sOpenALApi *api);
 void OpenALUnload(void);
+// whether the system's sound output is headphones (1), not (0), or unknown (-1),
+// with its name: OpenAL Soft knows only the Mac's own headphone socket, not
+// Bluetooth headphones (AirPods), for its automatic HRTF
+int OpenALOutputHeadphones(char *name, int len);

@@ -1457,6 +1457,7 @@ void SFX_Frame(mxs_vector *pos, mxs_angvec *ang)
    
 #ifndef _WIN32
    // traced sound: where the listener is, for the next trace (only while the game runs)
+   OpenALCheckHeadphones();   // (AirPods connected or taken out)
    if (IsSimTimePassing())
    {
       mxs_matrix lo;

@@ -69,6 +69,8 @@ cALSndMixer::cALSndMixer()
      mEffectsAvailable(FALSE), mReverbEnabled(FALSE), mEaxReverb(FALSE)
 {
    mHrtfStatus[0] = 0;
+   mPhones = -1;
+   mPhonesName[0] = 0;
    std::memset(&mAL, 0, sizeof(mAL));
    std::memset(&mReverbSettings, 0, sizeof(mReverbSettings));
    mReverbSettings.flags = kREVERB_FlagType;
@@ -126,7 +128,8 @@ STDMETHODIMP_(eSndError) cALSndMixer::Init(sSndSetup *, uint32 channels,
    // HRTF (headphones): automatic -- OpenAL Soft's own choice, on for headphones -- or
    // always, or never (acoustics.h, the settings panel)
    const int hrtfMode = Acoustics_HrtfMode();
-   const ALCint hrtf = hrtfMode == 1 ? 1 : hrtfMode == 2 ? 0 : ALC_DONT_CARE_SOFT;
+   mPhones = OpenALOutputHeadphones(mPhonesName, sizeof(mPhonesName));
+   const ALCint hrtf = hrtfMode == 1 ? 1 : hrtfMode == 2 ? 0 : mPhones > 0 ? 1 : ALC_DONT_CARE_SOFT;
    const ALCint effectAttributes[] = { ALC_MAX_AUXILIARY_SENDS, 1, ALC_HRTF_SOFT, hrtf, 0 };
    mContext = mAL.alcCreateContext(mDevice, effectAttributes);
    if (mContext == NULL)
@@ -383,10 +386,33 @@ void cALSndMixer::ApplyHrtf(int mode)
    ResetFn reset = reinterpret_cast<ResetFn>(mAL.alcGetProcAddress(mDevice, "alcResetDeviceSOFT"));
    if (reset == NULL)
       return;
-   const ALCint hrtf = mode == 1 ? 1 : mode == 2 ? 0 : ALC_DONT_CARE_SOFT;
+   mPhones = OpenALOutputHeadphones(mPhonesName, sizeof(mPhonesName));
+   const ALCint hrtf = mode == 1 ? 1 : mode == 2 ? 0 : mPhones > 0 ? 1 : ALC_DONT_CARE_SOFT;
    const ALCint attributes[] = { ALC_MAX_AUXILIARY_SENDS, 1, ALC_HRTF_SOFT, hrtf, 0 };
    reset(mDevice, attributes);
    fprintf(stderr, "OpenAL: %s\n", HrtfStatus());
+}
+
+// Automatic HRTF: every two seconds, whether the system's output has become
+// headphones or stopped being them (AirPods connected or taken out in play)
+void cALSndMixer::CheckHeadphones(void)
+{
+   static double s_next = 0.0;
+   const double now = std::chrono::duration<double>(
+      std::chrono::steady_clock::now().time_since_epoch()).count();
+   if (mDevice == NULL || now < s_next)
+      return;
+   s_next = now + 2.0;
+   if (Acoustics_HrtfMode() != 0)
+      return;
+   char name[64];
+   const int phones = OpenALOutputHeadphones(name, sizeof(name));
+   if (phones != mPhones || strcmp(name, mPhonesName) != 0)
+   {
+      fprintf(stderr, "OpenAL: output now \"%s\" (%s)\n", name,
+              phones > 0 ? "headphones" : phones == 0 ? "not headphones" : "unknown");
+      ApplyHrtf(0);
+   }
 }
 
 const char *cALSndMixer::HrtfStatus(void)
@@ -406,9 +432,10 @@ const char *cALSndMixer::HrtfStatus(void)
    static const char *const kStatus[] = {"off", "on", "off (not allowed)", "on (required)",
                                          "on (headphones found)", "off (output not stereo)"};
    const char *name = (on && getString != NULL) ? getString(mDevice, ALC_HRTF_SPECIFIER_SOFT) : NULL;
-   snprintf(mHrtfStatus, sizeof(mHrtfStatus), "HRTF %s%s%s%s",
+   snprintf(mHrtfStatus, sizeof(mHrtfStatus), "HRTF %s%s%s%s%s%s",
             (status >= 0 && status <= 5) ? kStatus[status] : (on ? "on" : "off"),
-            name ? " (" : "", name ? name : "", name ? ")" : "");
+            name ? " (" : "", name ? name : "", name ? ")" : "",
+            mPhonesName[0] ? ", output " : "", mPhonesName);
    return mHrtfStatus;
 }
 
@@ -416,6 +443,12 @@ extern "C" void OpenALApplyHrtf(int mode)
 {
    if (g_LiveMixer != NULL)
       g_LiveMixer->ApplyHrtf(mode);
+}
+
+extern "C" void OpenALCheckHeadphones(void)
+{
+   if (g_LiveMixer != NULL)
+      g_LiveMixer->CheckHeadphones();
 }
 
 extern "C" const char *OpenALHrtfStatus(void)

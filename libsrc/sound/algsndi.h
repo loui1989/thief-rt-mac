@@ -48,6 +48,7 @@ public:
    void UpdateEffect(void);
    void ApplyHrtf(int mode);          // 0 automatic, 1 on, 2 off (acoustics.h)
    const char *HrtfStatus(void);
+   void CheckHeadphones(void);        // automatic: the output changed to or from headphones
 
 private:
    sOpenALApi mAL;
@@ -58,7 +59,9 @@ private:
    BOOL mEffectsAvailable;
    BOOL mReverbEnabled;
    BOOL mEaxReverb;                   // the EAX reverb (OpenAL Soft): all of a traced room
-   char mHrtfStatus[96];
+   char mHrtfStatus[160];
+   int mPhones;                       // the output was headphones (OpenALOutputHeadphones)
+   char mPhonesName[64];
    ReverbSettings mReverbSettings;
 
    bool InitEffects(void);

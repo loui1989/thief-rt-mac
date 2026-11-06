@@ -4594,15 +4594,18 @@ void draw_ui(bool scene)
                 g_drawableH, full);
 }
 
-// The eyes getting used to the dark, by what the view shows. While more than
-// half of it is darker than the eye adaptation's darkest exposure takes in
-// ("Darkest exposure": the share of the frame's pixels below it, from the
-// path tracer's own luminance histogram, rgThiefSeenLight), that limit is let
-// down -- the darker the view, the quicker: up to 0.4 stops a second, so 2
-// stops in some 5 to 10 s -- until half the view is seen again; with less
-// than a third of it that dark, it comes back, quickly (in a second or two).
-// What is seen loses some colour with it, as night sight does. (A library
-// without the histogram: by the light on the player, as the light gem has it.)
+// The eyes getting used to the dark, by what the view shows. When for two
+// seconds running more than 70% of it is darker than the eye adaptation's
+// darkest exposure takes in ("Darkest exposure": the share of the frame's
+// pixels below it, from the path tracer's own luminance histogram,
+// rgThiefSeenLight), that limit is let down -- the darker the view, the
+// quicker: up to 0.36 stops a second -- until no more than 70% is that dark;
+// with less than half of it that dark, it comes back, quickly (in a second or
+// two). (It began at half the view, at once: a lit room of dark wood and
+// carpet, a moment's look into a corner, was enough.) What is seen loses a
+// little colour with it, evenly (the reds going first tinted it purple).
+// (A library without the histogram: by the light on the player, as the light
+// gem has it.)
 struct GemPart;
 float gem_value(const float pos[3], std::vector<GemPart> *parts);
 void update_dark_adapt(bool sceneDrawn)
@@ -4636,11 +4639,13 @@ void update_dark_adapt(bool sceneDrawn)
          s_n = n;
          s_below = below;
       }
+      static float s_darkFor = 0.0f;   // s the view has been that dark
+      s_darkFor = s_below > 0.7f ? s_darkFor + dt : 0.0f;
       float rate = 0.0f;   // stops a second
-      if (s_below > 0.5f)
-         rate = 0.8f * (s_below - 0.5f);
-      else if (s_below < 0.33f)
-         rate = -4.0f * (0.33f - s_below) - 0.2f;
+      if (s_below > 0.7f && s_darkFor > 2.0f)
+         rate = 1.2f * (s_below - 0.7f);
+      else if (s_below < 0.5f)
+         rate = -3.0f * (0.5f - s_below) - 0.2f;
       g_darkAdapted = std::clamp(g_darkAdapted + rate * dt, 0.0f, most);
       return;
    }
@@ -4997,8 +5002,8 @@ void draw_frame(bool sceneDrawn)
       .ev100Min = std::max(float(g_cfg.evMin) - g_darkAdapted - g_underwaterLifted, -1.0f - g_underwaterLifted),
       .ev100Max = std::max(float(g_cfg.evMin) + 0.1f, 7.7f),
       .luminanceWhitePoint = 3.0f,
-      // night sight: less colour, the reds first (a third gone when fully used to the dark)
-      .saturation = {{-0.13f * g_darkAdapted, -0.10f * g_darkAdapted, -0.07f * g_darkAdapted}},
+      // night sight: a little less colour, evenly (a sixth gone when fully used to the dark)
+      .saturation = {{-0.08f * g_darkAdapted, -0.08f * g_darkAdapted, -0.08f * g_darkAdapted}},
       .crosstalk = {{1.0f, 1.0f, 1.0f / 16.0f}},
       .contrast = 0.1f,
       .hdrBrightness = 1.0f,
