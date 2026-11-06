@@ -16,6 +16,7 @@
 
 #include <lg.h>
 #include <sndseg.h>
+#include <string.h>
 
 // TBD: stereo ADPCM
 // TBD: stereo with frequency doubling
@@ -23,6 +24,57 @@
 // !!! must decide what sample positions mean when frequency
 // !!! doubling is in effect
 
+
+// Stereo IMA ADPCM (a WAV's format 0x11 with two channels: A Night in
+// Rockburg's sounds; LGT's own were all mono, and its decoder left stereo
+// "TBD" -- each such sound was decoded as mono, a loud garble). A block: for
+// each channel a header (its first sample, 16 bits, its step index, a byte,
+// a byte spare), then the channels in turn, 4 bytes (8 samples, low nybble
+// first) of each. Decodes a whole block, interleaved; returns its frames.
+static uint32
+DecodeIMAStereoBlock( const unsigned char *pIn, uint32 nBytes, short *pOut, uint32 maxFrames )
+{
+   static const int kIndex[16] = { -1, -1, -1, -1, 2, 4, 6, 8, -1, -1, -1, -1, 2, 4, 6, 8 };
+   static const int kStep[89] = {
+      7, 8, 9, 10, 11, 12, 13, 14, 16, 17, 19, 21, 23, 25, 28, 31, 34, 37, 41, 45,
+      50, 55, 60, 66, 73, 80, 88, 97, 107, 118, 130, 143, 157, 173, 190, 209, 230,
+      253, 279, 307, 337, 371, 408, 449, 494, 544, 598, 658, 724, 796, 876, 963,
+      1060, 1166, 1282, 1411, 1552, 1707, 1878, 2066, 2272, 2499, 2749, 3024, 3327,
+      3660, 4026, 4428, 4871, 5358, 5894, 6484, 7132, 7845, 8630, 9493, 10442, 11487,
+      12635, 13899, 15289, 16818, 18500, 20350, 22385, 24623, 27086, 29794, 32767 };
+   if ( nBytes < 8 || maxFrames == 0 )
+      return 0;
+   int pred[2], index[2];
+   for ( int c = 0; c < 2; c++ ) {
+      pred[c] = (short) ( pIn[c * 4] | ( pIn[c * 4 + 1] << 8 ) );
+      index[c] = pIn[c * 4 + 2];
+      if ( index[c] > 88 ) index[c] = 88;
+      pOut[c] = (short) pred[c];
+   }
+   uint32 frames = 1;
+   for ( uint32 at = 8; at + 8 <= nBytes && frames + 8 <= maxFrames; at += 8 ) {
+      for ( int c = 0; c < 2; c++ ) {
+         const unsigned char *p = pIn + at + c * 4;
+         for ( int k = 0; k < 8; k++ ) {
+            const int code = ( k & 1 ) ? ( p[k >> 1] >> 4 ) : ( p[k >> 1] & 0xF );
+            const int step = kStep[index[c]];
+            int diff = step >> 3;
+            if ( code & 4 ) diff += step;
+            if ( code & 2 ) diff += step >> 1;
+            if ( code & 1 ) diff += step >> 2;
+            pred[c] += ( code & 8 ) ? -diff : diff;
+            if ( pred[c] > 32767 ) pred[c] = 32767;
+            else if ( pred[c] < -32768 ) pred[c] = -32768;
+            index[c] += kIndex[code];
+            if ( index[c] < 0 ) index[c] = 0;
+            else if ( index[c] > 88 ) index[c] = 88;
+            pOut[( frames + k ) * 2 + c] = (short) pred[c];
+         }
+      }
+      frames += 8;
+   }
+   return frames;
+}
 
 uint32 cSndSegment::mSegsMade = 0;
 uint32 cSndSegment::mSegsDestroyed = 0;
@@ -40,6 +92,8 @@ cSndSegment::cSndSegment( void )
    mInited = FALSE;
    mpInBuffer = NULL;
    mpOutBuffer = NULL;
+   mpBlockPcm = NULL;
+   mBlockFrames = mBlockAt = mBlockSkip = 0;
    mSegsMade++;
 }
 
@@ -52,6 +106,7 @@ cSndSegment::~cSndSegment( void )
    if ( mpOutBuffer != NULL ) {
       delete mpOutBuffer;
    }
+   delete [] mpBlockPcm;
    mSegsDestroyed++;
 }
 
@@ -86,6 +141,11 @@ cSndSegment::InitBase( uint32       offset,
    //
    if ( mAttribs.dataType == kSndDataIMAADPCM ) {
       mpInBuffer = new char[mAttribs.bytesPerBlock];
+      if ( mAttribs.nChannels == 2 ) {
+         delete [] mpBlockPcm;
+         mpBlockPcm = new short[2 * (mAttribs.samplesPerBlock + 8)];
+         mBlockFrames = mBlockAt = mBlockSkip = 0;
+      }
    }
 
    //
@@ -272,6 +332,42 @@ cSndSegment::GetData( void    *pDst,
       //
       ///////////////////////////////////////////////////
 
+    if ( mAttribs.nChannels == 2 && mpBlockPcm != NULL ) {
+      // stereo: block by block (DecodeIMAStereoBlock), frames of 4 bytes
+      if ( mNeedsSeek ) {
+         blockNum = mNewPos / mAttribs.samplesPerBlock;
+         mBlockSkip = mNewPos - blockNum * mAttribs.samplesPerBlock;
+         mSrcOffset = mStartOffset + (blockNum * mAttribs.bytesPerBlock);
+         mSrcPos = mNewPos;
+         mBlockFrames = mBlockAt = 0;
+      }
+      short *pFrames = (short *) pDst;
+      uint32 framesNeeded = nBytes / 4;
+      while ( framesNeeded > 0 ) {
+         if ( mBlockAt >= mBlockFrames ) {
+            const unsigned char *pBlock =
+               (const unsigned char *) GetRawData( mpInBuffer, mAttribs.bytesPerBlock );
+            mSrcOffset += mAttribs.bytesPerBlock;
+            mBlockFrames = DecodeIMAStereoBlock( pBlock, mAttribs.bytesPerBlock, mpBlockPcm,
+                                                 mAttribs.samplesPerBlock );
+            mBlockAt = mBlockSkip < mBlockFrames ? mBlockSkip : mBlockFrames;
+            mBlockSkip = 0;
+            if ( mBlockFrames == 0 ) {
+               memset( pFrames, 0, framesNeeded * 4 );
+               break;
+            }
+         }
+         uint32 n = mBlockFrames - mBlockAt;
+         if ( n > framesNeeded )
+            n = framesNeeded;
+         memcpy( pFrames, mpBlockPcm + mBlockAt * 2, n * 4 );
+         pFrames += n * 2;
+         mBlockAt += n;
+         framesNeeded -= n;
+      }
+      pActualDst = pDst;
+    } else {
+
       // handle seeking
       if ( mNeedsSeek ) {
          // see how many samples to skip after block start to get
@@ -344,6 +440,7 @@ cSndSegment::GetData( void    *pDst,
 
 
       } // end while nSamplesOutNeeded > 0
+    }
 
    }
    assert( mBytesLeft >= nBytes );

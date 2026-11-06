@@ -77,6 +77,12 @@ protected:
    int            mBytesPerSample;  // size of output samples
 
    uint32         mDecompState;     // IMA ADPCM decompressor state
+
+   // stereo IMA ADPCM: a block decoded whole, its frames handed out from it
+   short          *mpBlockPcm;      // the block's frames, left and right interleaved
+   uint32         mBlockFrames;     // frames in it
+   uint32         mBlockAt;         // the next frame to hand out
+   uint32         mBlockSkip;       // frames to skip in the next block (after a seek)
 };
 
 #endif

@@ -136,8 +136,13 @@ SndCrackWaveHeader(
       const uint32 blocks = *pDataLen / pAttribs->bytesPerBlock;
       const uint32 partial = *pDataLen % pAttribs->bytesPerBlock;
       uint32 maxSamples = blocks * pAttribs->samplesPerBlock;
-      if (partial >= 4)
+      // (a block's header is 4 bytes a channel, then 4 bytes a channel
+      // give 8 samples of each)
+      const uint32 hdr = 4u * pAttribs->nChannels;
+      if (pAttribs->nChannels == 1 && partial >= 4)
          maxSamples += 1 + 2 * (partial - 4);
+      else if (partial >= hdr)
+         maxSamples += 1 + 8 * ((partial - hdr) / hdr);
       // An ADPCM file whose "fact" chunk (its exact sample count) comes
       // after its data, or is missing: the data's own length gives it.
       if (!haveFact || *pNumSamples > maxSamples)
