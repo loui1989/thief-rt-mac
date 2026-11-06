@@ -3556,6 +3556,7 @@ int Draw(int primitive, const sRenderBackendVertex *v, int count, int canvasW, i
             d.texCoord[0] = v[i].u0;
             d.texCoord[1] = v[i].v0;
             d.color = pack_color(v[i].r, v[i].g, v[i].b, v[i].a);
+            memcpy(&d._pad0, &v[i].rhw, sizeof(float));   // (its depth: sort_overlay_models)
          }
          return 1;
       }
@@ -3576,6 +3577,7 @@ int Draw(int primitive, const sRenderBackendVertex *v, int count, int canvasW, i
       d.texCoord[0] = v[i].u0;
       d.texCoord[1] = v[i].v0;
       d.color = pack_color(v[i].r, v[i].g, v[i].b, v[i].a);
+      memcpy(&d._pad0, &v[i].rhw, sizeof(float));   // (its depth: sort_overlay_models)
    }
    g_overlays.push_back(std::move(o));
    return 1;
@@ -3632,6 +3634,73 @@ void SetCanvas(const void *pixels, int width, int height, int rowBytes, int dept
 namespace {
 
 // 2D, in canvas coordinates (0..w, 0..h, y down), drawn into viewport.
+// A model drawn on the screen (the HUD's item, an inventory picture) comes as
+// the game's triangles in its own order; drawn with a depth buffer, as in
+// OpenGL, the nearest face shows. The path tracer draws these with none, so a
+// face behind (a chalice's far side, its inside) painted over the one in
+// front: faces missing. Runs of such draws -- their triangles at depths, not
+// flat 2D at one -- are put in order, the farthest first, by each triangle's
+// depth (1/rhw, kept in the vertices' spare word by Draw).
+void sort_overlay_models(std::vector<Overlay> &overlays)
+{
+   auto rhw_of = [](const RgPrimitiveVertex &v) { float r; memcpy(&r, &v._pad0, sizeof(r)); return r; };
+   auto is3d = [&](const Overlay &o) {
+      if (o.verts.size() < 3 || o.verts.size() % 3)
+         return false;
+      const float r0 = rhw_of(o.verts[0]);
+      if (!(r0 > 0.0f) || std::fabs(r0 - 1.0f) > 1e-4f)
+         return true;
+      for (const RgPrimitiveVertex &v : o.verts)
+         if (std::fabs(rhw_of(v) - r0) > 1e-6f * std::max(1.0f, r0))
+            return true;
+      return false;
+   };
+   std::vector<Overlay> out;
+   out.reserve(overlays.size());
+   size_t i = 0;
+   while (i < overlays.size()) {
+      if (!is3d(overlays[i])) {
+         out.push_back(std::move(overlays[i++]));
+         continue;
+      }
+      size_t j = i + 1;
+      const Overlay &first = overlays[i];
+      while (j < overlays.size() && is3d(overlays[j]) && overlays[j].canvasW == first.canvasW &&
+             overlays[j].canvasH == first.canvasH && overlays[j].viewport.x == first.viewport.x &&
+             overlays[j].viewport.y == first.viewport.y && overlays[j].viewport.w == first.viewport.w &&
+             overlays[j].viewport.h == first.viewport.h)
+         ++j;
+      struct Tri { size_t o, t; float depth; };
+      std::vector<Tri> tris;
+      for (size_t k = i; k < j; ++k)
+         for (size_t t = 0; t + 2 < overlays[k].verts.size(); t += 3) {
+            float d = 0.0f;
+            for (int q = 0; q < 3; ++q) {
+               const float r = rhw_of(overlays[k].verts[t + size_t(q)]);
+               d += r > 1e-12f ? 1.0f / r : 1e12f;
+            }
+            tris.push_back({k, t, d});
+         }
+      std::stable_sort(tris.begin(), tris.end(), [](const Tri &a, const Tri &b) { return a.depth > b.depth; });
+      const size_t runStart = out.size();   // (a run's draws are not merged into what came before)
+      for (const Tri &tr : tris) {
+         const Overlay &src = overlays[tr.o];
+         if (out.size() == runStart || out.back().texture != src.texture || out.back().blend != src.blend) {
+            Overlay o;
+            o.texture = src.texture;
+            o.blend = src.blend;
+            o.canvasW = src.canvasW;
+            o.canvasH = src.canvasH;
+            o.viewport = src.viewport;
+            out.push_back(std::move(o));
+         }
+         out.back().verts.insert(out.back().verts.end(), src.verts.begin() + long(tr.t), src.verts.begin() + long(tr.t) + 3);
+      }
+      i = j;
+   }
+   overlays.swap(out);
+}
+
 void upload_2d(uint64_t id, const RgPrimitiveVertex *verts, uint32_t count,
                const char *texture, bool blend, int canvasW, int canvasH,
                const darkrt::Rect &vp)
@@ -5271,6 +5340,7 @@ void Present(int drawableWidth, int drawableHeight, bool vsync)
    }
 
    // lgd3d's 2D draws after the main view
+   sort_overlay_models(g_overlays);
    uint64_t id = 0x200000000ull;
    g_perf.overlays += g_overlays.size();
    for (Overlay &o : g_overlays) {
