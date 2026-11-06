@@ -101,6 +101,41 @@ static mxs_real two_to_n(int n)
 #define two_to_n(n) (two_to_n_minus_fifteen[(n)+15])
 #endif
 
+
+extern int ResImageTerrainScale(const void *bitmap, int *w, int *h);
+
+// The size the world lays a texture at, as the path tracer has it (portal.c):
+// an HD replacement at its .mtl's terrain_scale (its original's size), any
+// other true-colour texture at its own width -- not log2 of its row, which is
+// in bytes (twice its width at 16 bits). Laid at its row's size, an HD
+// replacement (HDMOD's .dds) was stretched over a floor many times over,
+// a blur, in OpenGL only. 8-bit textures (and their mip levels): as they were.
+static int hw_tex_log2(int v)
+{
+   int l = 0;
+   while (l < 14 && (1 << l) < v)
+      ++l;
+   return l;
+}
+static int hw_wlog(grs_bitmap *bm)
+{
+   int tw, th;
+   if (bm->type == BMT_FLAT8)
+      return bm->wlog;
+   if (ResImageTerrainScale(bm, &tw, &th))
+      return hw_tex_log2(tw);
+   return hw_tex_log2(bm->w);
+}
+static int hw_hlog(grs_bitmap *bm)
+{
+   int tw, th;
+   if (bm->type == BMT_FLAT8)
+      return bm->hlog;
+   if (ResImageTerrainScale(bm, &tw, &th))
+      return hw_tex_log2(th);
+   return hw_tex_log2(bm->h);
+}
+
 extern BOOL g_zbuffer;
 extern int max_draw_polys;
 extern bool show_lightmap;
@@ -600,8 +635,8 @@ void draw_surface_lgd3d(PortalPolygonCore *poly, PortalPolygonRenderInfo *render
       mxs_real u_base, v_base;
       mxs_real u2, v2;
 
-      u_scale = two_to_n(6 - hw.tex->wlog);
-      v_scale = two_to_n(6 - hw.tex->hlog);
+      u_scale = two_to_n(6 - hw_wlog(hw.tex));
+      v_scale = two_to_n(6 - hw_hlog(hw.tex));
       u_scale /= portal_worldrep_texture_scale;
       v_scale /= portal_worldrep_texture_scale;
 
@@ -773,8 +808,8 @@ void draw_surface_lgd3d(PortalPolygonCore *poly, PortalPolygonRenderInfo *render
          info.v0 = two_to_n(-hw.tex->hlog - 1);
       } else {
          int mip_log = 6 - hw.mip_level;
-         info.scale_u = two_to_n(mip_log - hw.tex->wlog);
-         info.scale_v = two_to_n(mip_log - hw.tex->hlog);
+         info.scale_u = two_to_n(mip_log - hw_wlog(hw.tex));
+         info.scale_v = two_to_n(mip_log - hw_hlog(hw.tex));
          info.u0 = info.v0 = 0.0;
       }
       info.scale_u /= portal_worldrep_texture_scale;
@@ -784,8 +819,8 @@ void draw_surface_lgd3d(PortalPolygonCore *poly, PortalPolygonRenderInfo *render
 
    if (hw.lm != NULL) {
       int pix_per_lm = 4 - hw.mip_level;
-      int log_scale_u = hw.tex->wlog - pix_per_lm;
-      int log_scale_v = hw.tex->hlog - pix_per_lm;
+      int log_scale_u = hw_wlog(hw.tex) - pix_per_lm;
+      int log_scale_v = hw_hlog(hw.tex) - pix_per_lm;
 // This is necessary because wlog is actually log2(row), _not_ log2(w)
 // Shoot me now; it's my own fault. -kevin
 #ifdef RGB_LIGHTING
@@ -953,8 +988,8 @@ void draw_surface_multitexture(PortalPolygonCore *poly, PortalPolygonRenderInfo 
       mxs_real u_base, v_base;
       mxs_real u2, v2;
 
-      u_scale = two_to_n(6 - hw.tex->wlog);
-      v_scale = two_to_n(6 - hw.tex->hlog);
+      u_scale = two_to_n(6 - hw_wlog(hw.tex));
+      v_scale = two_to_n(6 - hw_hlog(hw.tex));
       u_scale /= portal_worldrep_texture_scale;
       v_scale /= portal_worldrep_texture_scale;
 
@@ -1125,8 +1160,8 @@ void draw_surface_multitexture(PortalPolygonCore *poly, PortalPolygonRenderInfo 
          info.v0 = two_to_n(-hw.tex->hlog - 1);
       } else {
          int mip_log = 6 - hw.mip_level;
-         info.scale_u = two_to_n(mip_log - hw.tex->wlog);
-         info.scale_v = two_to_n(mip_log - hw.tex->hlog);
+         info.scale_u = two_to_n(mip_log - hw_wlog(hw.tex));
+         info.scale_v = two_to_n(mip_log - hw_hlog(hw.tex));
          info.u0 = info.v0 = 0.0;
       }
       info.scale_u /= portal_worldrep_texture_scale;
@@ -1136,8 +1171,8 @@ void draw_surface_multitexture(PortalPolygonCore *poly, PortalPolygonRenderInfo 
 
    if (hw.lm != NULL) {
       int pix_per_lm = 4 - hw.mip_level;
-      int log_scale_u = hw.tex->wlog - pix_per_lm;
-      int log_scale_v = hw.tex->hlog - pix_per_lm;
+      int log_scale_u = hw_wlog(hw.tex) - pix_per_lm;
+      int log_scale_v = hw_hlog(hw.tex) - pix_per_lm;
 // This is necessary because wlog is actually log2(row), _not_ log2(w)
 // Shoot me now; it's my own fault. -kevin
 #ifdef RGB_LIGHTING
@@ -1264,8 +1299,8 @@ void draw_surface_texture_only(PortalPolygonCore *poly, PortalPolygonRenderInfo 
       mxs_real u_base, v_base;
       mxs_real u2, v2;
 
-      u_scale = two_to_n(6 - hw.tex->wlog);
-      v_scale = two_to_n(6 - hw.tex->hlog);
+      u_scale = two_to_n(6 - hw_wlog(hw.tex));
+      v_scale = two_to_n(6 - hw_hlog(hw.tex));
       u_scale /= portal_worldrep_texture_scale;
       v_scale /= portal_worldrep_texture_scale;
 
@@ -1427,8 +1462,8 @@ void draw_surface_texture_only(PortalPolygonCore *poly, PortalPolygonRenderInfo 
          info.v0 = two_to_n(-hw.tex->hlog - 1);
       } else {
          int mip_log = 6 - hw.mip_level;
-         info.scale_u = two_to_n(mip_log - hw.tex->wlog);
-         info.scale_v = two_to_n(mip_log - hw.tex->hlog);
+         info.scale_u = two_to_n(mip_log - hw_wlog(hw.tex));
+         info.scale_v = two_to_n(mip_log - hw_hlog(hw.tex));
          info.u0 = info.v0 = 0.0;
       }
       info.scale_u /= portal_worldrep_texture_scale;
