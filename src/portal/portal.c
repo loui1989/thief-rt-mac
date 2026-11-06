@@ -1816,6 +1816,225 @@ static void portal_rt_submit_skybox(void)
 #undef PORTAL_RT_BG_DIST
 }
 
+// ---- The game's own light, for the path tracer's ambient glow ----------------
+// Each lit polygon's lightmap -- the light the game baked for it, the light the
+// light gem goes by -- packed into pages (rtgl1.cpp, RenderRTLightmapRect), and
+// where it lies there given with the polygon (RenderRTWorldPolygonLight): the
+// path tracer's ambient glow follows it, dimmer and cooler where the game has
+// it dark. Lightmaps lit by animated lights (switches, torches put out, lamps
+// that flicker) are made again when those lights change much.
+typedef struct { int cell; short poly; uchar page; ushort x, y; } PortalRtLm;
+static PortalRtLm *portal_rt_lm_anim;
+static int portal_rt_lm_anim_n, portal_rt_lm_anim_cap;
+static uchar *portal_rt_lm_used, *portal_rt_lm_changed;   // the anim lights' brightness, as made
+static int portal_rt_lm_used_n;
+static int portal_rt_lm_page, portal_rt_lm_x, portal_rt_lm_y, portal_rt_lm_shelf, portal_rt_lm_frame;
+static int portal_rt_lm_count, portal_rt_lm_texels;
+
+static void portal_rt_lm_reset(void)
+{
+   portal_rt_lm_page = portal_rt_lm_x = portal_rt_lm_y = portal_rt_lm_shelf = 0;
+   portal_rt_lm_anim_n = portal_rt_lm_count = portal_rt_lm_texels = 0;
+   if (portal_anim_light_intensity && num_anim_lights > 0) {
+      portal_rt_lm_used = (uchar *)realloc(portal_rt_lm_used, num_anim_lights);
+      portal_rt_lm_changed = (uchar *)realloc(portal_rt_lm_changed, num_anim_lights);
+      if (portal_rt_lm_used && portal_rt_lm_changed) {
+         memcpy(portal_rt_lm_used, portal_anim_light_intensity, num_anim_lights);
+         portal_rt_lm_used_n = num_anim_lights;
+      } else
+         portal_rt_lm_used_n = 0;
+   } else
+      portal_rt_lm_used_n = 0;
+}
+
+// room for a w x h rectangle: its page, or -1 (all pages full)
+static int portal_rt_lm_alloc(int w, int h, int *px, int *py)
+{
+   const int P = RENDER_RT_LIGHTMAP_PAGE;
+   if (w > P || h > P)
+      return -1;
+   if (portal_rt_lm_x + w > P) {
+      portal_rt_lm_x = 0;
+      portal_rt_lm_y += portal_rt_lm_shelf;
+      portal_rt_lm_shelf = 0;
+   }
+   if (portal_rt_lm_y + h > P) {
+      ++portal_rt_lm_page;
+      portal_rt_lm_x = portal_rt_lm_y = portal_rt_lm_shelf = 0;
+   }
+   if (portal_rt_lm_page >= RENDER_RT_LIGHTMAP_PAGES)
+      return -1;
+   *px = portal_rt_lm_x;
+   *py = portal_rt_lm_y;
+   portal_rt_lm_x += w;
+   if (h > portal_rt_lm_shelf)
+      portal_rt_lm_shelf = h;
+   return portal_rt_lm_page;
+}
+
+#if defined(RGB_LIGHTING) && !defined(RGB_888)
+#define PORTAL_RT_LM_MAX 31
+#define PORTAL_RT_LM_GET(e, c) ((c) == 0 ? ((e) & 0x1f) : (c) == 1 ? (((e) >> 5) & 0x1f) : (((e) >> 10) & 0x1f))
+#elif defined(RGB_LIGHTING)
+#define PORTAL_RT_LM_MAX 255
+#define PORTAL_RT_LM_GET(e, c) ((e).A[c])
+#else
+#define PORTAL_RT_LM_MAX 255
+#define PORTAL_RT_LM_GET(e, c) (e)
+#endif
+
+// A polygon's lightmap as the game has it now (its static light and its
+// animated lights at their present brightness, as compute_lightmap adds them),
+// RGBA, (w+2) x (h+2): a border of its edge texels, so filtering at its edges
+// takes nothing from its neighbours on the page.
+static void portal_rt_lm_pixels(PortalCell *r, PortalLightMap *lt, uchar *out)
+{
+   static int acc[64 * 64 * 3];
+   const int w = lt->w, h = lt->h, W = w + 2, row = lt->pixel_row, size = lt->h * lt->pixel_row;
+   LightmapEntry *bits = lt->data;
+   int x, y, k;
+   uint mask = lt->anim_light_bitmask;
+   ushort *idx = r->anim_light_index_list;
+   for (y = 0; y < h; ++y)
+      for (x = 0; x < w; ++x)
+         for (k = 0; k < 3; ++k)
+            acc[(y * w + x) * 3 + k] = PORTAL_RT_LM_GET(bits[y * row + x], k);
+   while (mask && idx && portal_anim_light_intensity) {
+      if (mask & 1) {
+         const int inten = portal_anim_light_intensity[*idx];
+         bits += size;
+         if (inten > 0)
+            for (y = 0; y < h; ++y)
+               for (x = 0; x < w; ++x)
+                  for (k = 0; k < 3; ++k)
+                     acc[(y * w + x) * 3 + k] += (PORTAL_RT_LM_GET(bits[y * row + x], k) * inten) >> 8;
+      }
+      ++idx;
+      mask >>= 1;
+   }
+   for (y = -1; y <= h; ++y)
+      for (x = -1; x <= w; ++x) {
+         const int sx = x < 0 ? 0 : x >= w ? w - 1 : x, sy = y < 0 ? 0 : y >= h ? h - 1 : y;
+         uchar *o = out + ((y + 1) * W + (x + 1)) * 4;
+         for (k = 0; k < 3; ++k) {
+            int v = acc[(sy * w + sx) * 3 + k];
+            if (v > PORTAL_RT_LM_MAX)
+               v = PORTAL_RT_LM_MAX;
+            o[k] = (uchar)(v * 255 / PORTAL_RT_LM_MAX);
+         }
+         o[3] = 255;
+      }
+}
+
+// the polygon's lightmap onto a page, and where it lies there for each corner
+// (the lightmap-only pass's mapping, ptdrawhw.c: a lightmap texel every quarter
+// of a texture unit, from its base); 0 if it has none (or no room is left)
+static int portal_rt_lm_polygon(int c, int p, PortalCell *r, PortalPolygonRenderInfo *ri,
+                                const mxs_vector *anchor, int voff, int n, float *lmuv, int *page)
+{
+   static uchar pixels[66 * 66 * 4];
+   PortalLightMap *lt;
+   mxs_real uvdot, u2, v2, tbu, tbv;
+   int i, x, y, pg;
+   if (!r->light_list || p >= r->num_render_polys)
+      return 0;
+   lt = &r->light_list[p];
+   if (!lt->data || lt->w == 0 || lt->h == 0 || lt->w > 64 || lt->h > 64)
+      return 0;
+   uvdot = mx_dot_vec(&ri->tex_u, &ri->tex_v);
+   u2 = mx_mag2_vec(&ri->tex_u);
+   v2 = mx_mag2_vec(&ri->tex_v);
+   if (u2 <= 0.0f || v2 <= 0.0f)
+      return 0;
+   pg = portal_rt_lm_alloc(lt->w + 2, lt->h + 2, &x, &y);
+   if (pg < 0)
+      return 0;
+   portal_rt_lm_pixels(r, lt, pixels);
+   RenderRTLightmapRect(pg, x, y, lt->w + 2, lt->h + 2, pixels);
+   ++portal_rt_lm_count;
+   portal_rt_lm_texels += (lt->w + 2) * (lt->h + 2);
+   if (lt->anim_light_bitmask) {
+      if (portal_rt_lm_anim_n >= portal_rt_lm_anim_cap) {
+         int cap = portal_rt_lm_anim_cap ? portal_rt_lm_anim_cap * 2 : 1024;
+         PortalRtLm *grown = (PortalRtLm *)realloc(portal_rt_lm_anim, cap * sizeof(PortalRtLm));
+         if (grown) {
+            portal_rt_lm_anim = grown;
+            portal_rt_lm_anim_cap = cap;
+         }
+      }
+      if (portal_rt_lm_anim_n < portal_rt_lm_anim_cap) {
+         PortalRtLm *a = &portal_rt_lm_anim[portal_rt_lm_anim_n++];
+         a->cell = c;
+         a->poly = (short)p;
+         a->page = (uchar)pg;
+         a->x = (ushort)x;
+         a->y = (ushort)y;
+      }
+   }
+   tbu = portal_wrext_u_base[c] ? portal_wrext_u_base[c][p] : ri->u_base / 4096.0f;
+   tbv = portal_wrext_v_base[c] ? portal_wrext_v_base[c][p] : ri->v_base / 4096.0f;
+   for (i = 0; i < n; ++i) {
+      mxs_vector *w = &r->vpool[r->vertex_list[voff + i]];
+      mxs_vector delta;
+      mxs_real du, dv, U, V;
+      mx_sub_vec(&delta, w, (mxs_vector *)anchor);
+      du = mx_dot_vec(&delta, &ri->tex_u);
+      dv = mx_dot_vec(&delta, &ri->tex_v);
+      if (uvdot == 0.0f) {
+         U = tbu + du / u2;
+         V = tbv + dv / v2;
+      } else {
+         const mxs_real denom = 1.0f / (u2 * v2 - uvdot * uvdot);
+         U = tbu + v2 * denom * du - denom * uvdot * dv;
+         V = tbv + u2 * denom * dv - denom * uvdot * du;
+      }
+      lmuv[i * 2] = (x + 1.5f + 4.0f * U - lt->base_u) / RENDER_RT_LIGHTMAP_PAGE;
+      lmuv[i * 2 + 1] = (y + 1.5f + 4.0f * V - lt->base_v) / RENDER_RT_LIGHTMAP_PAGE;
+   }
+   *page = pg;
+   return 1;
+}
+
+// every few frames: the lightmaps lit by animated lights that have changed
+// much since they were made (put out, switched, a lamp's flicker swinging far)
+static void portal_rt_lm_update(void)
+{
+   static uchar pixels[66 * 66 * 4];
+   int i, any = 0;
+   if (portal_rt_lm_anim_n <= 0 || !portal_anim_light_intensity ||
+       portal_rt_lm_used_n != num_anim_lights || (++portal_rt_lm_frame & 7))
+      return;
+   for (i = 0; i < num_anim_lights; ++i) {
+      const int a = portal_rt_lm_used[i], b = portal_anim_light_intensity[i];
+      const int d = a > b ? a - b : b - a;
+      portal_rt_lm_changed[i] = (uchar)(((a == 0) != (b == 0)) || d > 64);
+      if (portal_rt_lm_changed[i]) {
+         portal_rt_lm_used[i] = (uchar)b;
+         any = 1;
+      }
+   }
+   if (!any)
+      return;
+   for (i = 0; i < portal_rt_lm_anim_n; ++i) {
+      const PortalRtLm *a = &portal_rt_lm_anim[i];
+      PortalCell *r = (a->cell >= 0 && a->cell < wr_num_cells) ? WR_CELL(a->cell) : NULL;
+      PortalLightMap *lt;
+      uint mask;
+      ushort *idx;
+      int hit = 0;
+      if (!r || !r->light_list || !r->anim_light_index_list)
+         continue;
+      lt = &r->light_list[a->poly];
+      for (mask = lt->anim_light_bitmask, idx = r->anim_light_index_list; mask && !hit; mask >>= 1, ++idx)
+         if ((mask & 1) && *idx < num_anim_lights && portal_rt_lm_changed[*idx])
+            hit = 1;
+      if (!hit)
+         continue;
+      portal_rt_lm_pixels(r, lt, pixels);
+      RenderRTLightmapRect(a->page, a->x, a->y, lt->w + 2, lt->h + 2, pixels);
+   }
+}
+
 static void portal_rt_submit_world(void)
 {
    uint32 serial;
@@ -1847,9 +2066,11 @@ static void portal_rt_submit_world(void)
             }
          }
       }
+      const int game_light = RenderRTLightmapWanted();
       memset(portal_rt_texture_seen, 0, sizeof(portal_rt_texture_seen));
       portal_rt_max_texture_id = -1;
       RenderRTWorldBegin(serial);
+      portal_rt_lm_reset();
       for (c = 0; c < wr_num_cells; ++c) {
          PortalCell *r = WR_CELL(c);
          int p, voff = 0;
@@ -1949,6 +2170,13 @@ static void portal_rt_submit_world(void)
                const PortalPlane *pl = &r->plane_list[pc->planeid];
                RenderRTWorldPolygonFacing(pl->normal.x, pl->normal.y, pl->normal.z);
             }
+            if (game_light && !(flags & (kRenderRTWorldSky | kRenderRTWorldWater | kRenderRTWorldFullbright)) &&
+                !portal_rt_is_sky(tid)) {
+               float lmuv[2 * 256];
+               int page;
+               if (portal_rt_lm_polygon(c, p, r, ri, anchor, voff, n, lmuv, &page))
+                  RenderRTWorldPolygonLight(page, n, lmuv);
+            }
             RenderRTWorldPolygon(tid, flags, n, xyz, uv);
             if (!(flags & kRenderRTWorldSky) && !portal_rt_is_sky(tid) &&
                 tid < PORTAL_RT_MAX_TEXTURE_IDS) {
@@ -1961,7 +2189,13 @@ static void portal_rt_submit_world(void)
          }
       }
       RenderRTWorldEnd();
+      if (game_light)
+         mprintf("RT: the game's light: %d lightmaps on %d pages (%d%% of the last), %d lit by animated lights\n",
+                 portal_rt_lm_count, portal_rt_lm_count ? portal_rt_lm_page + 1 : 0,
+                 portal_rt_lm_count ? (portal_rt_lm_y + portal_rt_lm_shelf) * 100 / RENDER_RT_LIGHTMAP_PAGE : 0,
+                 portal_rt_lm_anim_n);
    }
+   portal_rt_lm_update();
 
    // the current frame of every world texture
    for (c = 0; c <= portal_rt_max_texture_id; ++c) {

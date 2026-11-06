@@ -150,6 +150,8 @@ struct Settings {
    int flicker = 0;           // flickering lights: 0 smoothed, 1 as the game, 2 nearly steady
    bool smoothModels = true;  // models shaded smooth (their normals blended across edges to 60 degrees)
    float ambient = 1.0f;      // the level's ambient light, as a faint glow of every surface
+   float ambientFollow = 0.6f; // how far that glow follows the game's own light (0..1): dimmer where the light gem says dark
+   float shadowCool = 0.5f;   // how cool and grey the glow is where the game has it dark (0..1)
    float windowLight = 1.0f; // lit windows' own light (0 off)
    int candidates = 12;       // lights tried per pixel and per bounce (RTGL1: no rays, ALU only)
    int evMin = 3;             // eye adaptation's darkest exposure (EV; Blood RT 5, RTGL1 0)
@@ -269,6 +271,8 @@ void load_settings()
       else if (k == "light_fix") g_cfg.lightFix = value != 0;
       else if (k == "fixtures_pass") g_cfg.fixturesPass = value != 0;
       else if (k == "ambient") g_cfg.ambient = std::clamp(value, 0.0f, 20.0f);
+      else if (k == "ambient_follows_light") g_cfg.ambientFollow = std::clamp(value, 0.0f, 1.0f);
+      else if (k == "shadow_cool") g_cfg.shadowCool = std::clamp(value, 0.0f, 1.0f);
       else if (k == "light_cull") g_cfg.lightCull = value != 0;
       else if (k == "min_roughness") g_cfg.minRoughness = std::clamp(value, 0.0f, 1.0f);
       else if (k == "output_height") g_cfg.outputHeight = std::clamp(int(value), 0, 4320);
@@ -310,6 +314,8 @@ void save_settings()
            int(g_cfg.fixturesPass), int(g_cfg.lightFix), g_cfg.response, g_cfg.evMin,
            g_cfg.candidates, int(g_cfg.steadyFaces), int(g_cfg.lightFade), int(g_cfg.bloom), int(g_cfg.rtDetection), g_cfg.reach, g_cfg.outputHeight, int(g_cfg.perfLog), g_cfg.frameCap, g_cfg.fog, int(g_cfg.materials), g_cfg.bump, g_cfg.parallax, int(g_cfg.polish), g_cfg.crevice, g_cfg.fixtureLight);
    fprintf(f, "window_light = %.2f\n", g_cfg.windowLight);
+   fprintf(f, "ambient_follows_light = %.2f\n", g_cfg.ambientFollow);
+   fprintf(f, "shadow_cool = %.2f\n", g_cfg.shadowCool);
    fprintf(f, "small_lamps = %.2f\n", g_cfg.smallLamps);
    fprintf(f, "gem_match_ft = %.1f\n", g_cfg.gemMatch);
    fprintf(f, "gem_scale = %.3f\n", g_cfg.gemScale);
@@ -2851,6 +2857,8 @@ struct WorldGroup {
    float bmin[3] = {1e30f, 1e30f, 1e30f}, bmax[3] = {-1e30f, -1e30f, -1e30f};   // meters
    bool shown = false;               // given to the path tracer last frame
    bool given = false;               // given to it since the world was made (unchanged since)
+   int lmPage = -1;                  // the game's light: its lightmaps' page of the atlas
+   std::vector<RgFloat2D> lmuv;      // and where on it, a u,v for each vertex
 };
 constexpr float kWorldChunk = 24.0f;      // meters
 constexpr float kWorldReach = 60.0f;      // meters walked from the camera (as Raze RT)
@@ -2864,6 +2872,69 @@ uint32_t g_worldSerial = 0;
 bool g_worldValid = false;
 std::vector<WorldGroup> g_world;
 std::unordered_map<uint64_t, size_t> g_worldIndex;
+
+// The game's own light: its lightmaps (portal.c), packed into pages for the
+// path tracer, where the ambient glow follows them -- dimmer and cooler where
+// the game (and the light gem) has it dark, so a shadow the light gem calls
+// black looks it, while the path tracer's own light still lights the scene.
+// (RTGL1 with patches/rtgl1-lib/0025 only: rgThiefGameLight.)
+struct LmPage {
+   std::vector<uint8_t> rgba;
+   bool dirty = false, provided = false;
+   double uploaded = 0;
+   char name[32] = {};
+};
+std::vector<LmPage> g_lmPages;
+uint32_t g_lmGeneration = 0;       // (the pages' names: a new world's are new)
+int g_nextLmPage = -1;
+std::vector<RgFloat2D> g_nextLmUv;
+bool game_light_supported()
+{
+   static int s = -1;
+   if (s < 0)
+      s = dlsym(RTLD_DEFAULT, "rgThiefGameLight") ? 1 : 0;
+   return s == 1;
+}
+const char *game_light_status()
+{
+   if (!game_light_supported())
+      return " (needs the updated path tracer)";
+   if (g_lmPages.empty())
+      return " (the mission's light not read yet)";
+   return "";
+}
+double lm_now()
+{
+   return std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count();
+}
+// pages changed (a light put out, a switch): given again, at most 4 times a second each
+void upload_lightmaps()
+{
+   const double now = lm_now();
+   for (LmPage &pg : g_lmPages) {
+      if (!pg.dirty || pg.rgba.empty() || (pg.provided && now - pg.uploaded < 0.25))
+         continue;
+      if (pg.provided)
+         rt.rgMarkOriginalTextureAsDeleted(pg.name);
+      auto details = RgOriginalTextureDetailsEXT{
+         .sType = RG_STRUCTURE_TYPE_ORIGINAL_TEXTURE_DETAILS_EXT,
+         .pNext = nullptr, .flags = 0, .format = RG_FORMAT_R8G8B8A8_UNORM,
+      };
+      auto info = RgOriginalTextureInfo{
+         .sType = RG_STRUCTURE_TYPE_ORIGINAL_TEXTURE_INFO,
+         .pNext = &details,
+         .pTextureName = pg.name,
+         .pPixels = pg.rgba.data(),
+         .size = {uint32_t(RENDER_RT_LIGHTMAP_PAGE), uint32_t(RENDER_RT_LIGHTMAP_PAGE)},
+         .filter = RG_SAMPLER_FILTER_LINEAR,
+         .addressModeU = RG_SAMPLER_ADDRESS_MODE_CLAMP,
+         .addressModeV = RG_SAMPLER_ADDRESS_MODE_CLAMP,
+      };
+      pg.provided = rt.rgProvideOriginalTexture(&info) == RG_RESULT_SUCCESS;
+      pg.dirty = false;
+      pg.uploaded = now;
+   }
+}
 std::unordered_map<int, RtTexture *> g_worldTextures;
 
 bool g_worldFresh = false;   // a new world: its textures to preload
@@ -2887,6 +2958,15 @@ void upload_world()
    static uint32_t s_reported = 0;
    size_t tris = 0, cutTris = 0;
    g_worldShownGroups = 0;
+   upload_lightmaps();
+   const bool gameLight = game_light_supported() && (g_cfg.ambientFollow > 0.0f || g_cfg.shadowCool > 0.0f);
+   // how the ambient glow takes the game's light (HitInfo.inl, patch 0025): the
+   // glow's colour in the dark, how far it follows the light, how grey it goes
+   const float cool = g_cfg.shadowCool;
+   const int followBits = int(std::lround(g_cfg.ambientFollow * 15.0f));
+   const int greyBits = int(std::lround(cool * 0.7f * 15.0f));
+   const RgColor4DPacked32 lmParams =
+      pack_color(1.0f - 0.45f * cool, 1.0f - 0.25f * cool, 1.0f, float(followBits * 16 + greyBits) / 255.0f);
    const RgFloat3D cam = to_rt(g_camera.pos);
    // the view's cone (a little wider than the screen): far land in view outdoors, which
    // the game's walk through the cells may not reach -- an island across the void
@@ -3037,6 +3117,29 @@ void upload_world()
          .classicLight = 1.0f,
          .emissiveGi = 0.0f,
       };
+      // its ambient glow as the game's own light has it (not a lit window's
+      // or a self-lit face's glow: their own)
+      RgTextureLayer lmLayer{};
+      RgMeshPrimitiveTextureLayersEXT lmLayers{};
+      if (gameLight && g.lmPage >= 0 && g.lmPage < int(g_lmPages.size()) && g_lmPages[g.lmPage].provided &&
+          g.lmuv.size() == g.verts.size() && !(g.flags & kRenderRTWorldFullbright) && !(tex && tex->glows) &&
+          !(flags & (RG_MESH_PRIMITIVE_TRANSLUCENT | RG_MESH_PRIMITIVE_SKY | RG_MESH_PRIMITIVE_WATER))) {
+         lmLayer = RgTextureLayer{
+            .pTexCoord = g.lmuv.data(),
+            .pTextureName = g_lmPages[g.lmPage].name,
+            .blend = RG_TEXTURE_LAYER_BLEND_TYPE_OPAQUE,
+            .color = lmParams,
+         };
+         lmLayers = RgMeshPrimitiveTextureLayersEXT{
+            .sType = RG_STRUCTURE_TYPE_MESH_PRIMITIVE_TEXTURE_LAYERS_EXT,
+            .pNext = prim.pNext,
+            .baseLayerBlend = RG_TEXTURE_LAYER_BLEND_TYPE_OPAQUE,
+            .pLayer1 = nullptr,
+            .pLayer2 = nullptr,
+            .pLayer3 = &lmLayer,
+         };
+         prim.pNext = &lmLayers;
+      }
       if (g.given)
          prim.flags |= kRtPrimUnchanged;
       upload(0x100000000ull + i, prim);
@@ -3693,14 +3796,14 @@ const char *kUpscaleNames[] = {"Off",
 
 enum UiRow {
    kRowUpscale, kRowScale, kRowOutput, kRowDynres, kRowBounces, kRowReach, kRowLights, kRowLightFade, kRowCandidates, kRowLightCull, kRowResponse, kRowFlicker, kRowVolumetric, kRowShafts, kRowFog, kRowBloom, kRowVsync, kRowFrameCap,
-   kRowFps, kRowDetection, kRowGemScale, kRowGemMatch, kRowGemEase, kRowLight, kRowExposure, kRowDarkAdapt, kRowAmbient, kRowSkySeen, kRowSky, kRowMoon, kRowMoonDir, kRowMoonHeight, kRowSun, kRowLightSize, kRowRough, kRowSmooth, kRowSteady, kRowFixtures, kRowFixtureLight, kRowSmallLamps, kRowLightFix, kRowGlow, kRowFlameGlow, kRowMaterials, kRowBump, kRowCrevice, kRowTexDetail, kRowParallax, kRowPolish, kRowWater, kRowUnderwater, kRowTracedSound, kRowHrtf,
+   kRowFps, kRowDetection, kRowGemScale, kRowGemMatch, kRowGemEase, kRowLight, kRowExposure, kRowDarkAdapt, kRowAmbient, kRowAmbientFollow, kRowShadowCool, kRowSkySeen, kRowSky, kRowMoon, kRowMoonDir, kRowMoonHeight, kRowSun, kRowLightSize, kRowRough, kRowSmooth, kRowSteady, kRowFixtures, kRowFixtureLight, kRowSmallLamps, kRowLightFix, kRowGlow, kRowFlameGlow, kRowMaterials, kRowBump, kRowCrevice, kRowTexDetail, kRowParallax, kRowPolish, kRowWater, kRowUnderwater, kRowTracedSound, kRowHrtf,
    kRowDebug, kRowFreeze, kRowBackFaces, kRowReuse, kRowBlink, kRowPerf, kRowInspect, kRowSkipMission, kRowReset, kRowCount
 };
 
 const char *kRowLabels[kRowCount] = {
    "Upscaler", "Render resolution", "Output resolution", "Dynamic resolution", "Bounce light", "Light reach", "Lights traced",
    "Lights coming into range", "Lights tried per pixel", "Lights behind walls", "Light changes", "Light flicker",
-   "God rays (volumetric)", "  God ray strength", "Mission fog", "Bloom", "VSync", "Frame rate limit", "FPS counter", "Light gem and guards", "  Light gem brightness", "  Light gem falloff", "  Light gem response", "Light brightness", "Darkest exposure", "  Eyes adjust to the dark", "Ambient light", "Sky brightness (as seen)", "Sky light (on the level)", "Moonlight", "  Moon direction", "  Moon height", "Sunlight (Thief 2 missions)",
+   "God rays (volumetric)", "  God ray strength", "Mission fog", "Bloom", "VSync", "Frame rate limit", "FPS counter", "Light gem and guards", "  Light gem brightness", "  Light gem falloff", "  Light gem response", "Light brightness", "Darkest exposure", "  Eyes adjust to the dark", "Ambient light", "  Follows the game's light", "  Shadow colour", "Sky brightness (as seen)", "Sky light (on the level)", "Moonlight", "  Moon direction", "  Moon height", "Sunlight (Thief 2 missions)",
    "Light size (soft shadows)", "Surface roughness", "Model shading", "Model faces", "Torches and lamps", "Lamp and torch light", "Lamp reach", "Lights in walls", "Lamp glow", "Flame glow", "Materials", "Bumps", "Crevices", "Texture detail", "Parallax depth", "Polished reflections", "Water", "  Under water: brighter", "Traced sound (Steam Audio)", "  Headphone 3D sound (HRTF)",
    "Debug view", "Freeze scene (test)", "Back faces (test)", "Light sampling (test)", "Blink nearest light (test)", "Performance log", "Inspect centre of view", "Skip to next mission (test)", "Reset to defaults",
 };
@@ -3807,6 +3910,15 @@ std::string row_value(int row)
       return buf;
    case kRowExposure:
       snprintf(buf, sizeof(buf), "EV %d%s", g_cfg.evMin, g_cfg.evMin == 5 ? " (Blood RT)" : g_cfg.evMin == 0 ? " (brightest)" : "");
+      return buf;
+   case kRowAmbientFollow:
+      if (g_cfg.ambientFollow <= 0.0f) return "Off (even everywhere)";
+      snprintf(buf, sizeof(buf), "%d%%: dimmer where the light gem says dark%s", int(g_cfg.ambientFollow * 100.0f + 0.5f),
+               game_light_status());
+      return buf;
+   case kRowShadowCool:
+      if (g_cfg.shadowCool <= 0.0f) return "Off (the surfaces' own colour)";
+      snprintf(buf, sizeof(buf), "%d%%: cool and grey in the dark", int(g_cfg.shadowCool * 100.0f + 0.5f));
       return buf;
    case kRowAmbient:
       if (g_cfg.ambient <= 0.0f) return "Off";
@@ -4025,6 +4137,8 @@ void change_row(int row, int dir)
       break;
    case kRowExposure: g_cfg.evMin = std::clamp(g_cfg.evMin + dir, 0, 7); break;
    case kRowDarkAdapt: g_cfg.darkAdapt = std::clamp(g_cfg.darkAdapt + dir, 0, 3); break;
+   case kRowAmbientFollow: g_cfg.ambientFollow = std::clamp(std::round((g_cfg.ambientFollow + 0.1f * dir) * 10.0f) / 10.0f, 0.0f, 1.0f); break;
+   case kRowShadowCool: g_cfg.shadowCool = std::clamp(std::round((g_cfg.shadowCool + 0.1f * dir) * 10.0f) / 10.0f, 0.0f, 1.0f); break;
    case kRowAmbient: g_cfg.ambient = g_cfg.ambient <= 0.0f && dir > 0 ? 0.25f
                                     : (g_cfg.ambient <= 0.25f && dir < 0 ? 0.0f
                                                                          : step_mul(g_cfg.ambient, dir, 0.25f, 20.0f));
@@ -6928,6 +7042,46 @@ void RenderRTWorldBegin(uint32_t serial)
    g_objects.clear();
    g_worldSerial = serial;
    g_worldValid = false;
+   // the last world's light (its pages are given again under new names)
+   for (LmPage &pg : g_lmPages)
+      if (pg.provided)
+         rt.rgMarkOriginalTextureAsDeleted(pg.name);
+   g_lmPages.clear();
+   ++g_lmGeneration;
+   g_nextLmPage = -1;
+}
+
+int RenderRTLightmapWanted(void)
+{
+   return g_active && game_light_supported() ? 1 : 0;
+}
+
+void RenderRTWorldPolygonLight(int page, int count, const float *lmuv)
+{
+   if (page < 0 || page >= RENDER_RT_LIGHTMAP_PAGES || count < 3 || !lmuv)
+      return;
+   g_nextLmPage = page;
+   g_nextLmUv.resize(size_t(count));
+   for (int i = 0; i < count; ++i)
+      g_nextLmUv[size_t(i)] = RgFloat2D{{lmuv[i * 2], lmuv[i * 2 + 1]}};
+}
+
+void RenderRTLightmapRect(int page, int x, int y, int w, int h, const unsigned char *rgba)
+{
+   const int P = RENDER_RT_LIGHTMAP_PAGE;
+   if (page < 0 || page >= RENDER_RT_LIGHTMAP_PAGES || !rgba || w <= 0 || h <= 0 || x < 0 || y < 0 ||
+       x + w > P || y + h > P)
+      return;
+   if (int(g_lmPages.size()) <= page)
+      g_lmPages.resize(size_t(page) + 1);
+   LmPage &pg = g_lmPages[size_t(page)];
+   if (pg.rgba.empty()) {
+      pg.rgba.assign(size_t(P) * P * 4, 0);
+      snprintf(pg.name, sizeof(pg.name), "thief.gamelight.%u.%d", g_lmGeneration, page);
+   }
+   for (int row = 0; row < h; ++row)
+      memcpy(&pg.rgba[(size_t(y + row) * P + x) * 4], rgba + size_t(row) * w * 4, size_t(w) * 4);
+   pg.dirty = true;
 }
 
 void RenderRTWorldCell(int cell) { g_worldCell = cell; }
@@ -6944,19 +7098,26 @@ void RenderRTWorldPolygon(int textureId, int flags, int count, const float *xyz,
 {
    const bool facingSet = g_nextFacingSet;
    g_nextFacingSet = false;
+   const int lmPage = (g_nextLmPage >= 0 && int(g_nextLmUv.size()) == count) ? g_nextLmPage : -1;
+   g_nextLmPage = -1;
    if (count < 3)
       return;
    // its block of the mission, by its first corner
    const RgFloat3D p0 = to_rt(xyz);
    auto block = [](float v) { return uint64_t(std::clamp(int(std::floor(v / kWorldChunk)) + 4096, 0, 8191)); };
    const uint64_t chunk = block(p0.data[0]) | (block(p0.data[1]) << 13) | (block(p0.data[2]) << 26);
-   const uint64_t key = (uint64_t(uint32_t(textureId) & 0xffffu) << 48) | (uint64_t(flags & 0xff) << 40) | chunk;
+   // (and by the page of the game's light its lightmaps are on)
+   const uint64_t key = (uint64_t(uint32_t(textureId) & 0xffffu) << 48) | (uint64_t(flags & 0x0f) << 44) |
+                        (uint64_t(lmPage + 1) << 39) | chunk;
    auto found = g_worldIndex.find(key);
    if (found == g_worldIndex.end()) {
       found = g_worldIndex.emplace(key, g_world.size()).first;
       g_world.push_back(WorldGroup{textureId, flags, {}, {}});
+      g_world.back().lmPage = lmPage;
    }
    WorldGroup &g = g_world[found->second];
+   if (lmPage >= 0)
+      g.lmuv.insert(g.lmuv.end(), g_nextLmUv.begin(), g_nextLmUv.end());
    if (g_worldCell >= 0 && (g.cells.empty() || g.cells.back() != g_worldCell))
       g.cells.push_back(g_worldCell);
    for (int i = 0; i < count; ++i) {

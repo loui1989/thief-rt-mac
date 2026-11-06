@@ -109,6 +109,18 @@ void RenderRTWorldPolygon(int textureId, int flags, int count,
 // the way the next polygon faces (its plane's normal: toward the room it is
 // seen from), before RenderRTWorldPolygon
 void RenderRTWorldPolygonFacing(float nx, float ny, float nz);
+// The game's own light on the next polygon (its lightmap: the light the light
+// gem goes by), before RenderRTWorldPolygon: where its lightmap lies in page
+// `page` of the atlas, a u,v per corner (0..1 of the page). The ambient glow
+// follows it (rtgl1.cpp). RenderRTLightmapWanted: whether to make the atlas
+// (the path tracer running, and taking it). RenderRTLightmapRect: a lightmap's
+// pixels (RGBA, the game's light 0..255), at x,y of a page -- at the world's
+// making, and again as the game's animated lights change it.
+int RenderRTLightmapWanted(void);
+void RenderRTWorldPolygonLight(int page, int count, const float *lmuv);
+void RenderRTLightmapRect(int page, int x, int y, int w, int h, const unsigned char *rgba);
+#define RENDER_RT_LIGHTMAP_PAGE 1024
+#define RENDER_RT_LIGHTMAP_PAGES 24
 void RenderRTWorldEnd(void);
 // Every frame: the backend texture (RenderBackendCreateTexture handle)
 // currently showing for a world texture id (animated textures change).
