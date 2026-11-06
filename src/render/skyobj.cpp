@@ -19,6 +19,8 @@
 
 #include <math.h>
 #include <stdlib.h>
+#include <stdio.h>
+#include <string.h>
 
 #include <skyobj.h>
 
@@ -359,6 +361,14 @@ static BOOL TestValues()
 
 static BOOL bDidGameInit = FALSE;
 
+// The sky parameters the tessellation was built from. The arrays are sized
+// from the lat/long counts at Init time, but the mission's SKYOBJVAR can be
+// replaced afterwards (loading the next mission of a campaign, or a save,
+// while the renderer stays in game mode), and Render indexes them with the
+// current counts - with more points than were allocated it reads past the
+// arrays and crashes. Render compares against this copy and rebuilds.
+static sMissionSkyObj s_InitParms;
+
 // Tesselate.
 // Call after mission parms are loaded.
 void cSky::Init()
@@ -428,6 +438,7 @@ void cSky::Init()
       ComputeSkyPointColor(pSkyPointColors+1+(i-1)*g_SkyObj.nNumLongPoints+j, fHorizonDipAng, fLongAng); // just use last computed value.
    }
 
+   s_InitParms = g_SkyObj;
    bDidGameInit = TRUE;
 }
 
@@ -460,7 +471,7 @@ void cSky::Term()
 
    if (pSkyLats)
    {
-      delete pSkyLats;
+      delete []pSkyLats;
       pSkyLats = 0;
    }
 
@@ -530,6 +541,25 @@ EXTERN BOOL r3d_do_setup;
 void cSky::Render()
 {
    if (!g_lgd3d || !bDidGameInit)
+      return;
+
+   // The mission's sky changed under us: rebuild it from the new values
+   // (or drop it, if the new mission doesn't use this sky).
+   {
+      const sMissionSkyObj &cur = g_SkyObj;
+      if (memcmp(&cur, &s_InitParms, sizeof(s_InitParms)) != 0)
+      {
+         fprintf(stderr, "Sky: the mission's sky changed (%d x %d points, was %d x %d) - rebuilding it\n",
+                 cur.nNumLatPoints, cur.nNumLongPoints,
+                 s_InitParms.nNumLatPoints, s_InitParms.nNumLongPoints);
+         Term();
+         Init();
+         if (!bDidGameInit)
+            return;
+      }
+   }
+
+   if (!vlist || !pSkyPoints || !pSkyPointVecs || !pSkyPointColors || !pSkyLats || nTotalPoints < 1)
       return;
 
 //      lgd3d_set_dithering(TRUE);
