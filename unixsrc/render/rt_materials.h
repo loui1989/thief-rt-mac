@@ -620,6 +620,54 @@ inline bool lit_pane(const uint8_t *a)
    return a[3] >= 128 && lum > 120 && r >= b + 25 && g >= b;
 }
 
+// The lit panes of a window texture: its lit_pane texels, if they make one.
+// A shutter's or a frame's pale, warm wood (A Night in Rockburg's
+// fam/wind/win13: a wooden shutter in a "win" family) passes texel by texel
+// too -- each of them glowed, speckles of light all over the wood. Lit panes
+// stand out (twice as bright as the rest of the texture, or near it) and lie
+// together (most of them with lit neighbours); the wood's palest grain is
+// barely brighter than the rest, scattered all over. Measured on Thief 2's
+// city windows and the FM's: their panes 2.1-4.1x as bright, 57-100% with 3
+// or more lit neighbours; the shutter's 1.4x and 39%. The texture tiles:
+// neighbours wrap.
+inline std::vector<uint8_t> lit_pane_mask(const uint8_t *rgba, int w, int h)
+{
+   const size_t n = size_t(w) * h;
+   std::vector<uint8_t> raw(n);
+   double litLum = 0, restLum = 0;
+   size_t lit = 0;
+   for (size_t i = 0; i < n; ++i) {
+      const uint8_t *a = &rgba[i * 4];
+      raw[i] = lit_pane(a);
+      const double lum = (54 * a[0] + 183 * a[1] + 19 * a[2]) >> 8;
+      (raw[i] ? litLum : restLum) += lum;
+      lit += raw[i];
+   }
+   if (lit == 0 || lit == n)
+      return raw;
+   litLum /= double(lit);
+   restLum /= double(n - lit);
+   size_t together = 0;
+   for (int y = 0; y < h; ++y)
+      for (int x = 0; x < w; ++x) {
+         if (!raw[size_t(y) * w + x])
+            continue;
+         int k = 0;
+         for (int dy = -1; dy <= 1; ++dy)
+            for (int dx = -1; dx <= 1; ++dx)
+               k += (dx || dy) && raw[size_t((y + dy + h) % h) * w + size_t((x + dx + w) % w)];
+         together += k >= 3;
+      }
+   const bool panes = litLum >= 1.8 * std::max(restLum, 1.0) && double(together) >= 0.45 * double(lit);
+   if (!panes)
+      std::fill(raw.begin(), raw.end(), uint8_t(0));
+   return raw;
+}
+
+// the mark of a window texture's glow made with lit_pane_mask (made before
+// it, its glow is made again)
+constexpr const char *kPaneMark = "_e.w2";
+
 // Crevices: the texture's joints and cracks (darker than its average, as
 // the cavities in the occlusion channel) darkened in its colour as well. The
 // occlusion channel only darkens a surface's ambient glow in RTGL1's shaders,
@@ -664,6 +712,8 @@ inline bool maps_made(const std::string &dir, const std::string &name, const Cla
    const std::string base = dir + "/" + name;
    if (!exists(base + "_orm.png") || (!exists(base + "_e.png") && !exists(base + "_e.none")))
       return false;
+   if (c.window && !c.stained && c.glow > 0 && !exists(base + kPaneMark))
+      return false;
    return c.bump <= 0 || (exists(base + "_n.png") && exists(base + "_h.png"));
 }
 
@@ -688,6 +738,11 @@ inline Result prepare(const std::string &dir, const std::string &name, const Cla
    const std::string pE = base + "_e.png", pORM = base + "_orm.png", pN = base + "_n.png",
                      pH = base + "_h.png", pNoE = base + "_e.none";
    const size_t N = size_t(w) * h;
+   // a window's glow made before its panes had to lie together: made again
+   if (c.window && !c.stained && c.glow > 0 && !exists(base + kPaneMark)) {
+      std::remove(pE.c_str());
+      std::remove(pNoE.c_str());
+   }
    std::vector<float> hgt;
    auto H = [&]() -> const std::vector<float> & {
       if (hgt.empty())
@@ -729,9 +784,10 @@ inline Result prepare(const std::string &dir, const std::string &name, const Cla
          if (lit < int(EN / 20))
             lit = 0;
       } else if (c.window && c.glow > 0) {
+         const std::vector<uint8_t> pane = lit_pane_mask(eRgba, ew, eh);
          for (size_t i = 0; i < EN; ++i) {
             const uint8_t *a = &eRgba[i * 4];
-            if (!lit_pane(a))
+            if (!pane[i])
                continue;
             for (int k3 = 0; k3 < 3; ++k3)
                e[i * 3 + k3] = uint8_t(std::min(255.0f, a[k3] * 1.15f));
@@ -746,6 +802,9 @@ inline Result prepare(const std::string &dir, const std::string &name, const Cla
          res.glows = true;
       else if (FILE *f = fopen(pNoE.c_str(), "wb"))
          fclose(f);
+      if (c.window && !c.stained && c.glow > 0)
+         if (FILE *f = fopen((base + kPaneMark).c_str(), "wb"))
+            fclose(f);
    }
    if (res.glows)
       res.glow = glowMap ? std::max(0.3f, glowStrength * 2.0f) : std::max(0.3f, c.glow * 0.25f);

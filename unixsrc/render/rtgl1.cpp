@@ -7997,9 +7997,12 @@ void pane_stats(RtTexture &t)
    double sum[3] = {0, 0, 0};
    size_t lit = 0;
    const bool stained = t.cls && t.cls->stained;
+   std::vector<uint8_t> pane;
+   if (!stained)
+      pane = rtmat::lit_pane_mask(t.rgba.data(), t.width, t.height);
    for (size_t i = 0; i < n; ++i) {
       const uint8_t *a = &t.rgba[i * 4];
-      if (!(stained ? rtmat::stained_pane(a) : rtmat::lit_pane(a)))
+      if (!(stained ? rtmat::stained_pane(a) : pane[i]))
          continue;
       for (int k = 0; k < 3; ++k)
          sum[k] += a[k];
