@@ -2932,7 +2932,10 @@ void upload_lightmaps()
          .addressModeU = RG_SAMPLER_ADDRESS_MODE_CLAMP,
          .addressModeV = RG_SAMPLER_ADDRESS_MODE_CLAMP,
       };
+      const bool first = !pg.provided && pg.uploaded == 0;
       pg.provided = rt.rgProvideOriginalTexture(&info) == RG_RESULT_SUCCESS;
+      if (first)
+         fprintf(stderr, "RT: the game's light: page %s %s\n", pg.name, pg.provided ? "given" : "NOT given");
       pg.dirty = false;
       pg.uploaded = now;
    }
@@ -2969,6 +2972,7 @@ void upload_world()
    const int greyBits = int(std::lround(cool * 0.7f * 15.0f));
    const RgColor4DPacked32 lmParams =
       pack_color(1.0f - 0.45f * cool, 1.0f - 0.25f * cool, 1.0f, float(followBits * 16 + greyBits) / 255.0f);
+   int lmStat[6] = {};
    const RgFloat3D cam = to_rt(g_camera.pos);
    // the view's cone (a little wider than the screen): far land in view outdoors, which
    // the game's walk through the cells may not reach -- an island across the void
@@ -3147,8 +3151,20 @@ void upload_world()
       upload(0x100000000ull + i, prim);
       g.given = true;
       tris += g.indices.size() / 3;
+      // (for the log: how many world pieces took the game's light, and why not)
+      ++lmStat[prim.pNext == &lmLayers ? 0 : g.lmPage < 0 ? 1 : !gameLight ? 2 : (g.lmPage >= int(g_lmPages.size()) || !g_lmPages[g.lmPage].provided) ? 3 : g.lmuv.size() != g.verts.size() ? 4 : 5];
       if (flags & RG_MESH_PRIMITIVE_ALPHA_TESTED)
          cutTris += g.indices.size() / 3;
+   }
+   {
+      static uint32_t s_lmFrame = 0;
+      if (g_frameNumber - s_lmFrame >= 600 || s_lmFrame == 0) {
+         s_lmFrame = g_frameNumber;
+         fprintf(stderr, "RT: the game's light on %d world pieces (without: %d no lightmap, %d %s, %d page not given, "
+                 "%d no corners, %d glowing/water/self-lit); params 0x%08x, %zu pages\n",
+                 lmStat[0], lmStat[1], lmStat[2], game_light_supported() ? "settings at 0" : "library without it",
+                 lmStat[3], lmStat[4], lmStat[5], unsigned(lmParams), g_lmPages.size());
+      }
    }
    if (s_reported != g_worldSerial) {
       s_reported = g_worldSerial;
