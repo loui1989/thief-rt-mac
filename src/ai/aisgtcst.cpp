@@ -27,6 +27,11 @@
 #include <aiutils.h>
 #include <aiprops.h>
 #include <memall.h>
+#include <stdio.h>
+#include <physcast.h>
+#include <objpos.h>
+#include <osysbase.h>
+#include <objedit.h>
 #include <dbmem.h>   // must be last header! 
 
 static cDynArray<ObjID> _g_InterestingObjects;
@@ -120,14 +125,44 @@ void AIDBResetSightCast()
 
 //////////////////////////////////////////////////////////////////////////////
 
+// (the physics cast below takes only the doors and things that block sight)
+static BOOL AISightCastIsBlocker(ObjID obj, const cPhysModel *, void *)
+{
+   for (int i = 0; i < _g_InterestingObjects.Size(); i++)
+      if (_g_InterestingObjects[i] == obj)
+         return TRUE;
+   return FALSE;
+}
+
 BOOL AISightCast(Location *pStartLoc, Location *pEndLoc)
 {
    Location HitLoc;     // dummy
    if (ObjRaycast(pStartLoc, pEndLoc, &HitLoc, TRUE, _g_InterestingObjects.AsPointer(),
-                  _g_InterestingObjects.Size()) == kObjCastNone)
-      return TRUE;
-   else
+                  _g_InterestingObjects.Size()) != kObjCastNone)
       return FALSE;
+   if (_g_InterestingObjects.Size() == 0)
+      return TRUE;
+
+   // A door is also its solid box (its physics, as it stops the player): the
+   // model test above goes by the door's own triangles, and a line through a
+   // gap or an edge of a model -- a high-detail replacement's, or one that
+   // does not quite fill its frame -- let a guard see through a shut door.
+   Location start = *pStartLoc, end = *pEndLoc, hit;
+   ObjID hitObj = OBJ_NULL;
+   PhysRaycastSetCallback(AISightCastIsBlocker, NULL);
+   const int cast = PhysRaycast(start, end, &hit, &hitObj, 0, kCollideOBB);
+   PhysRaycastClearCallback();
+   if (cast == kCollideNone || hitObj == OBJ_NULL || !AISightCastIsBlocker(hitObj, NULL, NULL))
+      return TRUE;
+
+   static int s_told = 0;
+   if (s_told < 20)
+   {
+      ++s_told;
+      fprintf(stderr, "AI sight: %s blocks a line its model let through, at (%.1f %.1f %.1f)\n",
+              ObjWarnName(hitObj), hit.vec.x, hit.vec.y, hit.vec.z);
+   }
+   return FALSE;
 }
 
 
