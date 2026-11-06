@@ -6190,6 +6190,17 @@ static void ResolveCollision(cPhysClsn * pClsn, mxs_real dt)
    else
       integration_backup = .9f;
 
+   // A ladder met on the way up a mantle (begun at its top, or beside it):
+   // not an obstacle to the climb. It broke the mantle, and the player was
+   // put back off the ladder, falling.
+   if ((pClsn->GetType() & kPC_Object) &&
+       ((pModel->IsMantling() && PhysObjIsLadder(pClsn->GetObjID2())) ||
+        (pClsn->GetModel2()->IsMantling() && PhysObjIsLadder(pClsn->GetObjID()))))
+   {
+      delete pClsn;
+      return;
+   }
+
    IntegrateToCollision(pModel,
       pClsn->GetSubModId(),
       pModel->GetDynamics(),

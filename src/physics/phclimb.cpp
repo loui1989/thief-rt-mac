@@ -620,7 +620,34 @@ static BOOL NewMantle()
    return !config_get_int("new_mantle", &value) || value != 0;
 }
 
+BOOL PhysObjIsLadder(ObjID objID)
+{
+   if (objID == OBJ_NULL)
+      return FALSE;
+   cPhysModel *pModel = g_PhysModels.Get(objID);
+   return pModel && pModel->GetType(0) == kPMT_OBB &&
+          ((cPhysOBBModel *)pModel)->GetClimbableSides() != 0;
+}
+
+// A mantle looks past ladders: from a ladder's top, or jumping beside one,
+// the ladder itself was taken for the ledge (and the wall in front of the
+// head): a climb onto the ladder began, the ladder broke it, and the player
+// was put back -- off the ladder, falling. The ledge is the floor beyond it.
+static BOOL MantleCastSkipsLadders(ObjID obj, const cPhysModel *, void *)
+{
+   return !PhysObjIsLadder(obj);
+}
+
+static BOOL CheckMantleCasts(ObjID objID);
 BOOL CheckMantle(ObjID objID)
+{
+   PhysRaycastSetCallback(MantleCastSkipsLadders, NULL);
+   const BOOL result = CheckMantleCasts(objID);
+   PhysRaycastClearCallback();
+   return result;
+}
+
+static BOOL CheckMantleCasts(ObjID objID)
 {
    cPhysModel *pModel;
 
@@ -979,8 +1006,11 @@ static void MantleRetry(cPhysModel *pModel)
       MakeHintedLocationFromVector(&start, &pModel->GetLocationVec(parts[k]), &pModel->GetLocation(parts[k]));
       MakeHintedLocationFromVector(&end, &start.vec, &start);
       mx_addeq_vec(&end.vec, &ahead);
+      // (a ladder in front is no wall to climb: CheckMantle)
+      PhysRaycastSetCallback(MantleCastSkipsLadders, NULL);
       if (PhysRaycast(start, end, &hit, &hit_obj, 0, kCollideOBB | kCollideTerrain) != kCollideNone)
          wall = TRUE;
+      PhysRaycastClearCallback();
    }
    if (wall)
       CheckMantle(pModel->GetObjID());

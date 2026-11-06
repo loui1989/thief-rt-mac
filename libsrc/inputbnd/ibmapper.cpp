@@ -1,5 +1,6 @@
 #include <algorithm>
 #include <limits>
+#include <cstdio>
 
 #include "ibmapper.h"
 #include <kbcook.h>
@@ -871,11 +872,27 @@ int cIBInputMapper::SendButtonCmd(const char* control, int down, int mod)
 				g_ctrldown_list.Prepend(node);
 			}
 
+			// (thief.log: what a number key did -- the weapon keys)
+			if (!mod && control[0] >= '0' && control[0] <= '9')
+				fprintf(stderr, "Keys: \"%s\" pressed: %s\n", control, cmd);
 			g_IB_variable_manager->Cmd(cmd, *already_down);
 		}
 		else
 		{
 			ret_val = 0;
+			// (thief.log: a key pressed in play that does nothing, as the game
+			// read it with the modifier keys it believes held -- a number key
+			// that drew no weapon: Shift held made it "$")
+			static int s_unbound = 0;
+			if (!mod && s_unbound < 60)
+			{
+				++s_unbound;
+				fprintf(stderr, "Keys: \"%s\" pressed, bound to nothing (held: %s%s%s%s)\n", control,
+				        (m_mod_states & (MASK_SHIFT | MASK_LSHIFT | MASK_RSHIFT)) ? "shift " : "",
+				        (m_mod_states & (MASK_CTRL | MASK_LCTRL | MASK_RCTRL)) ? "ctrl " : "",
+				        (m_mod_states & (MASK_ALT | MASK_LALT | MASK_RALT)) ? "alt " : "",
+				        (m_mod_states & MASK_CAPS_LOCK) ? "caps lock" : "");
+			}
 		}
 
 		if (already_down)

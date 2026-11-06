@@ -30,6 +30,8 @@ EXTERN BOOL CheckClimb(ObjID objID);
 
 EXTERN void BreakMantle(ObjID objID);
 EXTERN BOOL CheckMantle(ObjID objID);
+// a ladder: an object with climbable sides (phmodobb)
+EXTERN BOOL PhysObjIsLadder(ObjID objID);
 
 EXTERN void UpdateMantling(cPhysModel *pModel, mxs_real dt);
 
