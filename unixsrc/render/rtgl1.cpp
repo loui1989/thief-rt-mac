@@ -163,6 +163,7 @@ struct Settings {
    bool torchShadows = true;
    bool wallOffset = true;    // flat things flush on walls moved off them a little (no speckle)
    float heatHaze = 1.0f;     // the air over torches and fires shimmers (0 off)
+   float smoke = 1.0f;        // smoke and steam particles as volumetric smoke, at this density (0: flat sprites)
    float lightSoft = 1.0f;    // a strong lamp's light is a bigger source: no white spot on the wall next to it (0 off)  // a torch's body casts shadows (only its cup lets the flame's light out)
    bool steadyFaces = true;   // models' faces seen or shadow-only by a fixed rule, not by the view
    bool lightFix = true;      // lights moved out of the walls they sit in
@@ -267,6 +268,7 @@ void load_settings()
       else if (k == "underwater_haze") g_cfg.underwaterHaze = std::clamp(value, 0.0f, 4.0f);
       else if (k == "underwater_brighter") g_cfg.underwaterLift = std::clamp(value, 0.0f, 3.0f);
       else if (k == "heat_haze") g_cfg.heatHaze = std::clamp(value, 0.0f, 3.0f);
+      else if (k == "volumetric_smoke") g_cfg.smoke = std::clamp(value, 0.0f, 4.0f);
       else if (k == "light_soft") g_cfg.lightSoft = std::clamp(value, 0.0f, 4.0f);
       else if (k == "light_fix") g_cfg.lightFix = value != 0;
       else if (k == "fixtures_pass") g_cfg.fixturesPass = value != 0;
@@ -328,6 +330,7 @@ void save_settings()
    fprintf(f, "moon_shafts = %d\ngod_ray_strength = %.2f\nmoon = %.2f\nmoon_azimuth = %d\nmoon_height = %d\nmetalfx_denoiser = %d\n",
            int(g_cfg.moonShafts), g_cfg.shafts, g_cfg.moon, g_cfg.moonAzimuth, g_cfg.moonHeight, int(g_cfg.mfxDenoise));
    fprintf(f, "gem_ease_s = %.2f\n", g_cfg.gemEase);
+   fprintf(f, "volumetric_smoke = %.2f\n", g_cfg.smoke);
    fclose(f);
 }
 
@@ -1634,6 +1637,26 @@ bool g_currentWhole = false;
 bool g_currentNoShadow = false;
 std::vector<CapturedPrim> g_currentCapture;
 bool g_emissiveSpriteNow = false;
+
+// Smoke and steam: the particles the game draws as flat sprites, turned into
+// puffs of the path tracer's volumetric smoke (lit by the lamps around them,
+// darkening what is behind). Collected while the scene is drawn, sent with
+// the frame. The volume's depth slices are long (its grid is 64 deep), so a
+// puff must be at least about a slice across to be seen at all: too small or
+// too far for that, a particle stays the game's sprite.
+struct SmokePuff {
+   float pos[3];
+   float radius;
+   float albedo[3];
+   float density;   // as the volume wants it: optical depth per slice, x 1000
+};
+std::vector<SmokePuff> g_smokePuffs;   // this frame's
+constexpr size_t kSmokeBudget = 112;   // (128 in all, the heat haze's at the end)
+constexpr float kSmokeOnlyFar = 16.0f; // the volume's reach when only the smoke uses it
+float g_smokeSlice = kSmokeOnlyFar / 64.0f;   // the volume's slice length, last frame
+float g_smokeReach = kSmokeOnlyFar * 0.85f;   // and how far its smoke goes
+uint32_t g_smokeKeptSprites = 0;      // smoke left as sprites this frame (too small, far, many)
+bool g_currentPuffed = false;         // the object being drawn gave smoke puffs
 
 uint64_t hash_prims(const std::vector<CapturedPrim> &prims)
 {
@@ -3882,7 +3905,7 @@ const char *kUpscaleNames[] = {"Off",
                                "MetalFX Custom"};
 
 enum UiRow {
-   kRowUpscale, kRowScale, kRowOutput, kRowDynres, kRowBounces, kRowReach, kRowLights, kRowLightFade, kRowCandidates, kRowLightCull, kRowResponse, kRowFlicker, kRowVolumetric, kRowShafts, kRowFog, kRowBloom, kRowVsync, kRowFrameCap,
+   kRowUpscale, kRowScale, kRowOutput, kRowDynres, kRowBounces, kRowReach, kRowLights, kRowLightFade, kRowCandidates, kRowLightCull, kRowResponse, kRowFlicker, kRowVolumetric, kRowShafts, kRowFog, kRowSmoke, kRowBloom, kRowVsync, kRowFrameCap,
    kRowFps, kRowDetection, kRowGemScale, kRowGemMatch, kRowGemEase, kRowLight, kRowExposure, kRowDarkAdapt, kRowAmbient, kRowAmbientFollow, kRowShadowCool, kRowSkySeen, kRowSky, kRowMoon, kRowMoonDir, kRowMoonHeight, kRowSun, kRowLightSize, kRowRough, kRowSmooth, kRowSteady, kRowFixtures, kRowFixtureLight, kRowSmallLamps, kRowLightFix, kRowGlow, kRowFlameGlow, kRowMaterials, kRowBump, kRowCrevice, kRowTexDetail, kRowParallax, kRowPolish, kRowWater, kRowUnderwater, kRowTracedSound, kRowHrtf,
    kRowDebug, kRowFreeze, kRowBackFaces, kRowReuse, kRowBlink, kRowPerf, kRowInspect, kRowSkipMission, kRowReset, kRowCount
 };
@@ -3890,7 +3913,7 @@ enum UiRow {
 const char *kRowLabels[kRowCount] = {
    "Upscaler", "Render resolution", "Output resolution", "Dynamic resolution", "Bounce light", "Light reach", "Lights traced",
    "Lights coming into range", "Lights tried per pixel", "Lights behind walls", "Light changes", "Light flicker",
-   "God rays (volumetric)", "  God ray strength", "Mission fog", "Bloom", "VSync", "Frame rate limit", "FPS counter", "Light gem and guards", "  Light gem brightness", "  Light gem falloff", "  Light gem response", "Light brightness", "Darkest exposure", "  Eyes adjust to the dark", "Ambient light", "  Follows the game's light", "  Shadow colour", "Sky brightness (as seen)", "Sky light (on the level)", "Moonlight", "  Moon direction", "  Moon height", "Sunlight (Thief 2 missions)",
+   "God rays (volumetric)", "  God ray strength", "Mission fog", "Smoke and steam", "Bloom", "VSync", "Frame rate limit", "FPS counter", "Light gem and guards", "  Light gem brightness", "  Light gem falloff", "  Light gem response", "Light brightness", "Darkest exposure", "  Eyes adjust to the dark", "Ambient light", "  Follows the game's light", "  Shadow colour", "Sky brightness (as seen)", "Sky light (on the level)", "Moonlight", "  Moon direction", "  Moon height", "Sunlight (Thief 2 missions)",
    "Light size (soft shadows)", "Surface roughness", "Model shading", "Model faces", "Torches and lamps", "Lamp and torch light", "Lamp reach", "Lights in walls", "Lamp glow", "Flame glow", "Materials", "Bumps", "Crevices", "Texture detail", "Parallax depth", "Polished reflections", "Water", "  Under water: brighter", "Traced sound (Steam Audio)", "  Headphone 3D sound (HRTF)",
    "Debug view", "Freeze scene (test)", "Back faces (test)", "Light sampling (test)", "Blink nearest light (test)", "Performance log", "Inspect centre of view", "Skip to next mission (test)", "Reset to defaults",
 };
@@ -3968,6 +3991,10 @@ std::string row_value(int row)
          return buf;
       }
       snprintf(buf, sizeof(buf), "%.2fx (the mission's sun, brightness %.0f)", g_cfg.sun, g_sun.bright);
+      return buf;
+   case kRowSmoke:
+      if (g_cfg.smoke <= 0.0f) return "Flat sprites (as the game)";
+      snprintf(buf, sizeof(buf), "Volumetric, %d%% density", int(g_cfg.smoke * 100.0f + 0.5f));
       return buf;
    case kRowFog:
       return g_cfg.fog == 0 ? "Off" : g_cfg.fog == 1 ? "Light" : g_cfg.fog == 3 ? "Thick" : "As the mission";
@@ -4207,6 +4234,14 @@ void change_row(int row, int dir)
                              : (g_cfg.sun <= 0.25f && dir < 0 ? 0.0f : step_mul(g_cfg.sun, dir, 0.25f, 4.0f));
       break;
    case kRowFog: g_cfg.fog = (g_cfg.fog + dir + 4) % 4; break;
+   case kRowSmoke: {
+      static const float steps[] = {0.0f, 0.5f, 0.75f, 1.0f, 1.5f, 2.0f, 3.0f};
+      int i = 0;
+      while (i < 6 && steps[i] < g_cfg.smoke - 0.01f)
+         ++i;
+      g_cfg.smoke = steps[std::clamp(i + dir, 0, 6)];
+      break;
+   }
    case kRowBloom: g_cfg.bloom = !g_cfg.bloom; break;
    case kRowVsync: g_cfg.vsync = !g_cfg.vsync; break;
    case kRowFps: g_cfg.fps = !g_cfg.fps; break;
@@ -5003,8 +5038,29 @@ void draw_frame(bool sceneDrawn)
    // at the end of their list, each marked by a density of -1e6: its middle,
    // and its radius, the height of its column of hot air and its strength in
    // the albedo's place. The fires: the flames' lights (not a candle's).
-   static RgFloat4D s_heatPos[12], s_heatAlb[12], s_heatShape[12];
+   static RgFloat4D s_heatPos[RG_MAX_SMOKE_PUFFS], s_heatAlb[RG_MAX_SMOKE_PUFFS], s_heatShape[RG_MAX_SMOKE_PUFFS];
    uint32_t heatCount = 0;
+   // the smoke and steam particles' puffs first (smoke_from_sprite), the
+   // heat haze's markers after them
+   uint32_t smokeCount = 0;
+   if (sceneDrawn && !waterHaze)
+      for (const SmokePuff &p : g_smokePuffs) {
+         if (smokeCount >= kSmokeBudget)
+            break;
+         s_heatPos[smokeCount] = RgFloat4D{{p.pos[0], p.pos[1], p.pos[2], p.radius}};
+         s_heatAlb[smokeCount] = RgFloat4D{{p.albedo[0], p.albedo[1], p.albedo[2], p.density}};
+         s_heatShape[smokeCount] = RgFloat4D{{p.radius, 0, 0, 0}};
+         ++smokeCount;
+      }
+   {
+      static uint32_t s_logFrame = 0, s_most = 0;
+      s_most = std::max(s_most, smokeCount);
+      if (++s_logFrame % 600 == 0 && (s_most > 0 || g_smokeKeptSprites > 0)) {
+         fprintf(stderr, "Smoke: %u puffs this frame (the most lately %u), %u smoke particles left as sprites (too small for the volume, too far, or too many)\n",
+                 smokeCount, s_most, g_smokeKeptSprites);
+         s_most = 0;
+      }
+   }
    if (sceneDrawn && g_cfg.heatHaze > 0.0f) {
       const RgFloat3D cam = to_rt(g_camera.pos);
       std::vector<std::pair<float, const PendingLight *>> fires;
@@ -5024,42 +5080,62 @@ void draw_frame(bool sceneDrawn)
       for (const auto &f : fires) {
          if (heatCount >= 12)
             break;
+         const uint32_t at = smokeCount + heatCount;
          const PendingLight &L = *f.second;
          const RgFloat3D p = to_rt(L.pos);
          // (a little below the light: from the flame's middle)
-         s_heatPos[heatCount] = RgFloat4D{{p.data[0], p.data[1], p.data[2] - 0.05f, 0.0f}};
-         s_heatAlb[heatCount] = RgFloat4D{{0.16f, 0.9f, std::clamp(L.peak / 90.0f, 0.5f, 1.3f), -1e6f}};
-         s_heatShape[heatCount] = RgFloat4D{{0, 0, 0, 0}};
+         s_heatPos[at] = RgFloat4D{{p.data[0], p.data[1], p.data[2] - 0.05f, 0.0f}};
+         s_heatAlb[at] = RgFloat4D{{0.16f, 0.9f, std::clamp(L.peak / 90.0f, 0.5f, 1.3f), -1e6f}};
+         s_heatShape[at] = RgFloat4D{{0, 0, 0, 0}};
          ++heatCount;
       }
    }
    auto smoke = RgDrawFrameSmokeParams{
       .sType = RG_STRUCTURE_TYPE_DRAW_FRAME_SMOKE_PARAMS,
       .pNext = &refl,
-      .puffCount = heatCount,
+      .puffCount = smokeCount + heatCount,
       .pPuffs = s_heatPos,
       .pAlbedoDensity = s_heatAlb,
       .pShape = s_heatShape,
-      .lightNearFade = 0.0f,
-      .illumBlend = 0.05f,
-      .allLights = false,
-      .lightFarFade = 0.0f,
-      .samplesPerCell = 1,
-      .maxLight = 0.0f,
+      // the smoke: lit by every lamp near it (each cell with smoke runs the
+      // whole light estimate, the rest of the volume does not), a torch's
+      // flame not flooding the smoke right over it, and the room's ambient
+      // light in it, as on the walls round it
+      .lightNearFade = smokeCount ? 0.4f : 0.0f,
+      .illumBlend = smokeCount ? 0.12f : 0.05f,
+      .allLights = smokeCount > 0,
+      .lightFarFade = smokeCount ? 20.0f : 0.0f,
+      .samplesPerCell = smokeCount ? 2u : 1u,
+      .maxLight = smokeCount ? 4.0f : 0.0f,
       .debugMode = 0,
       .stylize = 0.0f,
       .stylizeSteps = 4,
       .stylizeGrid = 0.0f,
-      .selfAmbient = 0.0f,
+      .selfAmbient = smokeCount ? 0.8f * ambient_emissive() : 0.0f,
       .tintBias = 0.0f,
       .absorb = 0.0f,
    };
+   // Smoke with no haze or fog: the volume on for the smoke alone, clear
+   // everywhere else, and shorter (its slices thinner, so smaller puffs
+   // are seen) -- smoke beyond it stays the game's sprites.
+   const bool otherVolume = g_cfg.volumetric || moonHaze || fogOn || waterHaze;
+   const bool smokeOnly = smokeCount > 0 && !otherVolume;
+   if (smokeOnly) {
+      volFar = kSmokeOnlyFar;
+      volNear = volFarDens = 0.0f;
+      volAmbient = {{0, 0, 0}};
+   }
+   {
+      const float reach = otherVolume ? volFar : kSmokeOnlyFar;
+      g_smokeSlice = reach / 64.0f;
+      g_smokeReach = 0.85f * reach;
+   }
    auto volumetric = RgDrawFrameVolumetricParams{
       .sType = RG_STRUCTURE_TYPE_DRAW_FRAME_VOLUMETRIC_PARAMS,
       .pNext = &smoke,
       // RTGL1's default is on, with a bright ambient haze: costly, and it
       // greyed Thief's darkness. Optional, lit by the lamps when on.
-      .enable = g_cfg.volumetric || moonHaze || fogOn || waterHaze,
+      .enable = otherVolume || smokeOnly,
       .maxHistoryLength = 8.0f,
       .useSimpleDepthBased = waterHaze,
       .volumetricFar = volFar,
@@ -5074,7 +5150,7 @@ void draw_frame(bool sceneDrawn)
       // directional one) and one shadow ray a cell -- the cheap way. Every
       // light (or the mission's fog, lit by its lamps) runs each cell's
       // whole light estimate.
-      .illuminateFromAllLights = !(moonHaze && !g_cfg.volumetric && !fogOn),
+      .illuminateFromAllLights = !smokeOnly && !(moonHaze && !g_cfg.volumetric && !fogOn),
       .mediaColor = {{1.0f, 1.0f, 1.0f}},
       .mediaColorFar = {{1.0f, 1.0f, 1.0f}},
       .farScattering = volFarDens,
@@ -6150,6 +6226,142 @@ float gem_value(const float pos[3], std::vector<GemPart> *parts)
    return total;
 }
 
+// A smoke or steam particle's sprite, taken as a puff of volumetric smoke
+// instead (true: it is, and the sprite is not drawn). Grey, soft, alpha
+// blended particles only: a glow (added light), a flame, water (drops,
+// bubbles, splashes), sparks, leaves and the like stay sprites.
+struct SmokeTexture {
+   bool smoke = false;
+   float rgb[3] = {1, 1, 1};   // its colour on average where it is seen, 0..1
+   float centreAlpha = 1.0f;   // how opaque its middle is
+};
+
+bool smoke_from_sprite(RtTexture *tex, const char *name, const sRenderBackendVertex *v,
+                       const CapturedPrim &prim, int count)
+{
+   if (g_cfg.smoke <= 0.0f || !tex || !name || count < 3 || g_underwater ||
+       g_blend == kRenderBackendBlendAdd || tex->width < 4 || tex->height < 4)
+      return false;
+   texture_mean(*tex);
+   static std::unordered_map<uint32_t, SmokeTexture> s_known;
+   auto it = s_known.find(tex->pixelHash);
+   if (it == s_known.end()) {
+      SmokeTexture st;
+      std::string id = std::string(tex->name) + " " + tex->source;
+      for (char &ch : id)
+         ch = char(tolower((unsigned char)ch));
+      static const char *const kNot[] = {
+         "bubbl", "rain", "drop", "drip", "leaf", "leav", "spark", "blood", "splash", "snow",
+         "star", "fly", "bug", "water", "glow", "flare", "halo", "fire", "flame", "ember",
+         "coin", "gem", "magic", "beam", "bolt", "zap", "elec", "light", "lamp", "candl",
+      };
+      const char *why = nullptr;
+      for (const char *w : kNot)
+         if (id.find(w) != std::string::npos) {
+            why = w;
+            break;
+         }
+      // its colour where it is seen, and how opaque its middle is (a soft
+      // round puff: opaque in the middle, clear at the edges)
+      double sum[3] = {0, 0, 0}, wsum = 0, mid = 0, midN = 0, edge = 0, edgeN = 0;
+      const int W = tex->width, H = tex->height;
+      for (int y = 0; y < H; ++y)
+         for (int x = 0; x < W; ++x) {
+            const uint8_t *px = &tex->rgba[size_t(y * W + x) * 4];
+            const double a = px[3] / 255.0;
+            for (int k = 0; k < 3; ++k)
+               sum[k] += px[k] / 255.0 * a;
+            wsum += a;
+            const double dx = (x + 0.5) / W - 0.5, dy = (y + 0.5) / H - 0.5;
+            const double r2 = dx * dx + dy * dy;
+            if (r2 < 0.15 * 0.15) {
+               mid += a;
+               ++midN;
+            } else if (r2 > 0.45 * 0.45) {
+               edge += a;
+               ++edgeN;
+            }
+         }
+      for (int k = 0; k < 3; ++k)
+         st.rgb[k] = wsum > 0 ? float(sum[k] / wsum) : 1.0f;
+      st.centreAlpha = midN > 0 ? float(mid / midN) : 1.0f;
+      const float edgeAlpha = edgeN > 0 ? float(edge / edgeN) : 0.0f;
+      const float hi = std::max({st.rgb[0], st.rgb[1], st.rgb[2]});
+      const float lo = std::min({st.rgb[0], st.rgb[1], st.rgb[2]});
+      if (!why && edgeAlpha > 0.35f)
+         why = "not soft: a picture, not a puff";
+      else if (!why && st.centreAlpha < 0.05f)
+         why = "clear in the middle (a ring)";
+      else if (!why && hi > 0.05f && hi - lo > 0.4f * hi)
+         why = "coloured";
+      st.smoke = !why;
+      fprintf(stderr, "Smoke: %s (%s): %s%s (colour %.2f %.2f %.2f, middle %.0f%% opaque, edge %.0f%%)\n",
+              tex->name, tex->source.c_str(), st.smoke ? "volumetric smoke" : "stays a sprite: ",
+              why ? why : "", st.rgb[0], st.rgb[1], st.rgb[2], st.centreAlpha * 100.0f, edgeAlpha * 100.0f);
+      it = s_known.emplace(tex->pixelHash, st).first;
+   }
+   const SmokeTexture &st = it->second;
+   if (!st.smoke)
+      return false;
+   // its tint (the particle's colour) over the picture's: grey, or not smoke
+   float c[4] = {0, 0, 0, 0};
+   for (int i = 0; i < count; ++i) {
+      c[0] += v[i].r / count;
+      c[1] += v[i].g / count;
+      c[2] += v[i].b / count;
+      c[3] += v[i].a / count;
+   }
+   float alb[3];
+   for (int k = 0; k < 3; ++k)
+      alb[k] = std::clamp(c[k] * st.rgb[k], 0.02f, 0.95f);
+   {
+      const float hi = std::max({alb[0], alb[1], alb[2]}), lo = std::min({alb[0], alb[1], alb[2]});
+      if (hi > 0.05f && hi - lo > 0.45f * hi)
+         return false;
+   }
+   // where it is and how big: the quad's middle, and its half width (the
+   // picture's soft puff fills most of it)
+   float m[3] = {0, 0, 0};
+   for (const RgPrimitiveVertex &d : prim.verts)
+      for (int k = 0; k < 3; ++k)
+         m[k] += d.position[k] / float(prim.verts.size());
+   float far2 = 0;
+   for (const RgPrimitiveVertex &d : prim.verts) {
+      const float dx = d.position[0] - m[0], dy = d.position[1] - m[1], dz = d.position[2] - m[2];
+      far2 = std::max(far2, dx * dx + dy * dy + dz * dz);
+   }
+   const float r = 0.8f * std::sqrt(far2) * 0.7071f;
+   const RgFloat3D cam = to_rt(g_camera.pos);
+   const float dx = m[0] - cam.data[0], dy = m[1] - cam.data[1], dz = m[2] - cam.data[2];
+   const float dist = std::sqrt(dx * dx + dy * dy + dz * dz);
+   // the volume samples each slice once at its middle: a puff thinner than a
+   // slice would flicker in and out, so it is widened to most of one (and
+   // thinned to match); one that would have to grow too much stays a sprite,
+   // as does one beyond the volume, or past the budget
+   const float rVol = std::max(r, 0.6f * g_smokeSlice);
+   if (r < 0.03f || rVol > 2.5f * r || dist + r > g_smokeReach || dist < 0.2f ||
+       g_smokePuffs.size() >= kSmokeBudget) {
+      ++g_smokeKeptSprites;
+      return false;
+   }
+   // as opaque through its middle as the sprite was (its middle's alpha,
+   // times the particle's own, fading as it dies), at the density setting
+   const float a = std::clamp(c[3] * st.centreAlpha, 0.0f, 0.95f);
+   const float tau = -std::log(1.0f - a) * g_cfg.smoke;
+   if (tau < 0.003f)
+      return true;   // faded to nothing: nothing to draw either way
+   // the volume adds 0.001 x density of optical depth per slice it samples,
+   // and a ray through the middle of (1-t^2)^2 meets 16/15 of its diameter's
+   // half in slices
+   SmokePuff p;
+   memcpy(p.pos, m, sizeof(p.pos));
+   p.radius = rVol;
+   memcpy(p.albedo, alb, sizeof(alb));
+   p.density = tau * g_smokeSlice / (0.001f * (16.0f / 15.0f) * rVol);
+   g_smokePuffs.push_back(p);
+   return true;
+}
+
 } // namespace
 extern "C" {
 
@@ -6250,6 +6462,8 @@ void RenderRTSceneBegin(const float pos[3], const float fwd[3], const float left
    if (!g_frameStarted)
       return;
    memcpy(g_camera.pos, pos, sizeof(g_camera.pos));
+   g_smokePuffs.clear();
+   g_smokeKeptSprites = 0;
    memcpy(g_camera.fwd, fwd, sizeof(g_camera.fwd));
    memcpy(g_camera.left, left, sizeof(g_camera.left));
    memcpy(g_camera.up, up, sizeof(g_camera.up));
@@ -6531,6 +6745,13 @@ void RenderRTDrawWorld(int primitive, const sRenderBackendVertex *v, const float
       prim.flags |= RG_MESH_PRIMITIVE_ALPHA_TESTED;
    }
 
+   // a smoke or steam particle: a puff of the volume's smoke instead
+   if (sprite && !g_RenderRTShadowOnly && prim.emissive == 0.0f &&
+       smoke_from_sprite(tex, name, v, prim, count)) {
+      g_currentPuffed = g_currentObject != 0;
+      return;
+   }
+
    // a polished object (a marble statue, a metal one): mirror reflections
    if (tex && tex->polished && g_cfg.polish && g_cfg.materials && !sprite && !g_RenderRTShadowOnly &&
        !(prim.flags & (RG_MESH_PRIMITIVE_TRANSLUCENT | RG_MESH_PRIMITIVE_ALPHA_TESTED)))
@@ -6636,6 +6857,7 @@ void RenderRTObjectBegin(uint32_t obj, int flags)
    g_currentWhole = (flags & kRenderRTObjectWhole) != 0;
    g_currentNoShadow = (flags & kRenderRTObjectNoShadow) != 0;
    g_currentCapture.clear();
+   g_currentPuffed = false;
    g_RenderRTCaptureCalls = g_RenderRTCaptureDropped = 0;
 }
 
@@ -6840,6 +7062,12 @@ void RenderRTObjectEnd(void)
    // out): that says nothing about the model, so what is known of it stays.
    // Replacing it with nothing made models vanish from the traced scene
    // while the game still drew them.
+   // all of it smoke, drawn as the volume's puffs: nothing of it to keep
+   // (what was known of it -- its sprites, before -- would stay on screen)
+   if (g_currentCapture.empty() && g_currentPuffed) {
+      g_objects.erase(obj);
+      return;
+   }
    if (g_currentCapture.empty()) {
       ++g_emptyCaptures;
       // logged once a model: first those never captured at all, then (the
