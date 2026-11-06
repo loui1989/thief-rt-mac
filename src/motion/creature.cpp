@@ -77,6 +77,7 @@
 #include <binrstyp.h>
 
 #include <playrobj.h>
+#include <camera.h>   // (the weapon arm's check: SunkCheck)
 
 #include <mvrutils.h> // for flag setup function
 #include <motprop.h>  // for global timewarp
@@ -3785,7 +3786,7 @@ static sMotHistory *MotHistoryFor(ObjID obj)
 void cCreature::SunkCheck()
 {
    static int s_lines = 0;
-   if (s_lines >= 12 || IsBallistic() || m_nJoints <= 0)
+   if ((s_lines >= 12 && m_ObjID != PlayerArm()) || IsBallistic() || m_nJoints <= 0)
       return;
    // once a second for each creature
    sMotHistory *hist = MotHistoryFor(m_ObjID);
@@ -3794,6 +3795,43 @@ void cCreature::SunkCheck()
       return;
    hist->second = second;
    const mxs_vector &butt = m_sMultiped.global_pos;
+   // The player's weapon arm: it is drawn where its motion puts it, in front
+   // of the camera. Found more than a few feet from the camera (a weapon
+   // drawn that never shows), where it is and what it plays, once an arm.
+   if (m_ObjID == PlayerArm())
+   {
+      Camera *cam = PlayerCamera();
+      if (cam == NULL || hist->told)
+         return;
+      mxs_vector d;
+      mx_sub_vec(&d, &butt, &cam->pos);
+      const float away = mx_mag_vec(&d);
+      if (away < 6.0f)
+         return;
+      hist->told = TRUE;
+      mprintf("player arm %d (weapon drawn) %.1f ft from the camera: arm at (%.2f %.2f %.2f), camera at "
+              "(%.2f %.2f %.2f), joint 0 at (%.2f %.2f %.2f), object at (%.2f %.2f %.2f), mode %d next %d\n",
+              m_ObjID, away, butt.x, butt.y, butt.z, cam->pos.x, cam->pos.y, cam->pos.z,
+              m_nJoints > 0 ? m_pJoints[0].x : 0.0f, m_nJoints > 0 ? m_pJoints[0].y : 0.0f,
+              m_nJoints > 0 ? m_pJoints[0].z : 0.0f,
+              ObjPosGet(m_ObjID) ? ObjPosGet(m_ObjID)->loc.vec.x : 0.0f,
+              ObjPosGet(m_ObjID) ? ObjPosGet(m_ObjID)->loc.vec.y : 0.0f,
+              ObjPosGet(m_ObjID) ? ObjPosGet(m_ObjID)->loc.vec.z : 0.0f,
+              PlayerGetMode(), PlayerGetNextMode());
+      for (mps_stack_node *n = m_sMultiped.main_motion.head; n; n = n->next)
+         if (n->type == MN_MOTION)
+         {
+            mps_motion_node *mn = (mps_motion_node *) n;
+            const int num = MP_MOTNUM_FROM_NODE_HANDLE(mn->handle);
+            mprintf("   playing \"%s\" (type %d) frame %g, base (%.2f %.2f %.2f), offset (%.2f %.2f %.2f)\n",
+                    num < mp_num_motions && mp_motion_list[num].info.type != MT_VIRTUAL
+                       ? mp_motion_list[num].info.name : "(camera-following)",
+                    num < mp_num_motions ? (int)mp_motion_list[num].info.type : -1, mn->frame,
+                    mn->base_pos.x, mn->base_pos.y, mn->base_pos.z,
+                    mn->offset.x, mn->offset.y, mn->offset.z);
+         }
+      return;
+   }
    Location start, end, hit;
    ObjID hitObj;
    MakeLocationFromVector(&start, &butt);

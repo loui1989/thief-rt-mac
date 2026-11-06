@@ -441,8 +441,9 @@ void cPlayerCerebellum::SetupMode(int mode)
       m_pCurAbility->Begin();
       SetupManeuver(m_pCurAbility->GetStartSkillID());
    }
-   if (getenv("DARK_PLAYER_TRACE"))
-      fprintf(stderr, "Player mode ready mode=%d arm=%d ability=%s skill=%d\n",
+   // (thief.log: each change of what the player holds -- a weapon drawn
+   // that never shows starts here or doesn't)
+   fprintf(stderr, "Player mode ready mode=%d arm=%d ability=%s skill=%d\n",
               g_CurrentPlayerMode, m_RightArmObj,
               m_pCurAbility ? "yes" : "no", m_CurSkill);
 }
