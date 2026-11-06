@@ -7165,6 +7165,13 @@ void RenderRTWorldPolygon(int textureId, int flags, int count, const float *xyz,
       v.texCoord[0] = uv[i * 2];
       v.texCoord[1] = uv[i * 2 + 1];
       v.color = pack_color(1, 1, 1, 1);
+      // where its lightmap lies on the page, in the vertex's spare word too: the
+      // shaders in rt/bin are built without texture layers, so they read it
+      // there (16 bits of u, 16 of v), and the page from layer 3's texture
+      if (lmPage >= 0) {
+         auto q16 = [](float t) { return uint32_t(std::lround(std::clamp(t, 0.0f, 1.0f) * 65535.0f)); };
+         v._pad0 = q16(g_nextLmUv[size_t(i)].data[0]) | (q16(g_nextLmUv[size_t(i)].data[1]) << 16);
+      }
       g.verts.push_back(v);
    }
    // A zig-zag strip across the (convex) polygon rather than a fan from one
