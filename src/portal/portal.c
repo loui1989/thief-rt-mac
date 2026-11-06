@@ -1830,11 +1830,13 @@ static uchar *portal_rt_lm_used, *portal_rt_lm_changed;   // the anim lights' br
 static int portal_rt_lm_used_n;
 static int portal_rt_lm_page, portal_rt_lm_x, portal_rt_lm_y, portal_rt_lm_shelf, portal_rt_lm_frame;
 static int portal_rt_lm_count, portal_rt_lm_texels;
+static int portal_rt_lm_hist[16];   // the lightmaps' brightness (luma 0..255, by 16), for the log
 
 static void portal_rt_lm_reset(void)
 {
    portal_rt_lm_page = portal_rt_lm_x = portal_rt_lm_y = portal_rt_lm_shelf = 0;
    portal_rt_lm_anim_n = portal_rt_lm_count = portal_rt_lm_texels = 0;
+   memset(portal_rt_lm_hist, 0, sizeof(portal_rt_lm_hist));
    if (portal_anim_light_intensity && num_anim_lights > 0) {
       portal_rt_lm_used = (uchar *)realloc(portal_rt_lm_used, num_anim_lights);
       portal_rt_lm_changed = (uchar *)realloc(portal_rt_lm_changed, num_anim_lights);
@@ -1951,6 +1953,15 @@ static int portal_rt_lm_polygon(int c, int p, PortalCell *r, PortalPolygonRender
       return 0;
    portal_rt_lm_pixels(r, lt, pixels);
    RenderRTLightmapRect(pg, x, y, lt->w + 2, lt->h + 2, pixels);
+   {
+      int tx, ty;
+      for (ty = 1; ty <= lt->h; ++ty)
+         for (tx = 1; tx <= lt->w; ++tx) {
+            const uchar *o = pixels + (ty * (lt->w + 2) + tx) * 4;
+            const int l = (o[0] * 54 + o[1] * 183 + o[2] * 19) >> 8;
+            ++portal_rt_lm_hist[l >> 4];
+         }
+   }
    ++portal_rt_lm_count;
    portal_rt_lm_texels += (lt->w + 2) * (lt->h + 2);
    if (lt->anim_light_bitmask) {
@@ -2189,11 +2200,25 @@ static void portal_rt_submit_world(void)
          }
       }
       RenderRTWorldEnd();
-      if (game_light)
+      if (game_light) {
+         int total = 0, i, run = 0, pc = 0;
+         static const int want[5] = {10, 25, 50, 75, 90};
+         int at[5] = {0, 0, 0, 0, 0};
          mprintf("RT: the game's light: %d lightmaps on %d pages (%d%% of the last), %d lit by animated lights\n",
                  portal_rt_lm_count, portal_rt_lm_count ? portal_rt_lm_page + 1 : 0,
                  portal_rt_lm_count ? (portal_rt_lm_y + portal_rt_lm_shelf) * 100 / RENDER_RT_LIGHTMAP_PAGE : 0,
                  portal_rt_lm_anim_n);
+         for (i = 0; i < 16; ++i)
+            total += portal_rt_lm_hist[i];
+         for (i = 0; i < 16 && total > 0; ++i) {
+            run += portal_rt_lm_hist[i];
+            while (pc < 5 && run * 100 >= want[pc] * total)
+               at[pc++] = i * 16 + 15;
+         }
+         // (luma 0..255: the shader takes under ~10 as dark, over ~77 as lit)
+         mprintf("RT: the game's light, how bright: 10%% of texels under %d, 25%% under %d, half under %d, 75%% under %d, 90%% under %d (0..255)\n",
+                 at[0], at[1], at[2], at[3], at[4]);
+      }
    }
    portal_rt_lm_update();
 
