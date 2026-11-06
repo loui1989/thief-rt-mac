@@ -2890,9 +2890,11 @@ int g_nextLmPage = -1;
 std::vector<RgFloat2D> g_nextLmUv;
 bool game_light_supported()
 {
+   // (in the library's own handle: it is opened RTLD_LOCAL, so not found in
+   // the process's global symbols)
    static int s = -1;
-   if (s < 0)
-      s = dlsym(RTLD_DEFAULT, "rgThiefGameLight") ? 1 : 0;
+   if (s < 0 && g_lib)
+      s = dlsym(g_lib, "rgThiefGameLight") ? 1 : 0;
    return s == 1;
 }
 const char *game_light_status()
@@ -4741,7 +4743,10 @@ void update_dark_adapt(bool sceneDrawn)
       return;
    const float most = float(g_cfg.darkAdapt);
    using SeenFn = uint32_t (*)(float *, float *);
-   static SeenFn s_seen = reinterpret_cast<SeenFn>(dlsym(RTLD_DEFAULT, "rgThiefSeenLight"));
+   // (the library's own handle: it is opened RTLD_LOCAL -- looked for among the
+   // process's global symbols it was never found, and the eyes went by the light
+   // gem: a small shadow in a lit room was enough)
+   static SeenFn s_seen = g_lib ? reinterpret_cast<SeenFn>(dlsym(g_lib, "rgThiefSeenLight")) : nullptr;
    if (s_seen) {
       static uint32_t s_n = 0;
       static float s_below = 0.0f;
