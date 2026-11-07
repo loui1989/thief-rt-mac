@@ -20,6 +20,7 @@
 #include <timer.h>
 #include <stdio.h>
 #include <cfgdbg.h>
+#include <render_rt.h>
 #include <memall.h>
 #include <dbmem.h>   // must be last header! 
 
@@ -217,7 +218,9 @@ void VisMeterUpdate(ulong time, const Rect* r)
 
    invRendSetRect(gState.rend, r); 
 
+   RenderRTOverlayKeepOrder(1);   // (the path tracer: its faces as the game drew them)
    invRendDrawUpdate(gState.rend); 
+   RenderRTOverlayKeepOrder(0);
 }
 
 

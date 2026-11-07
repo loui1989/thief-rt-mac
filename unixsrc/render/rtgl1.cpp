@@ -1271,8 +1271,10 @@ struct Overlay {
    int blend;
    int canvasW, canvasH;
    darkrt::Rect viewport;
+   bool keepOrder = false;   // drawn as the game drew it (RenderRTOverlayKeepOrder)
 };
 std::vector<Overlay> g_overlays;
+bool g_overlayKeepOrder = false;
 
 // The mission's enhanced sky (clouds, stars, moon), as the game draws it: one
 // face of a cube round the viewer a frame (rendloop.c rt_capture_sky_face),
@@ -3567,7 +3569,7 @@ int Draw(int primitive, const sRenderBackendVertex *v, int count, int canvasW, i
       if (last.texture == g_bound[0] && last.blend == g_blend && last.canvasW == canvasW &&
           last.canvasH == canvasH && last.viewport.x == viewport.x && last.viewport.y == viewport.y &&
           last.viewport.w == viewport.w && last.viewport.h == viewport.h && count % 3 == 0 &&
-          last.verts.size() % 3 == 0) {
+          last.verts.size() % 3 == 0 && last.keepOrder == g_overlayKeepOrder) {
          const size_t at = last.verts.size();
          last.verts.resize(at + size_t(count));
          for (int i = 0; i < count; ++i) {
@@ -3587,6 +3589,7 @@ int Draw(int primitive, const sRenderBackendVertex *v, int count, int canvasW, i
    Overlay o;
    o.texture = g_bound[0];
    o.blend = g_blend;
+   o.keepOrder = g_overlayKeepOrder;
    o.canvasW = canvasW;
    o.canvasH = canvasH;
    o.viewport = viewport;
@@ -3668,7 +3671,7 @@ void sort_overlay_models(std::vector<Overlay> &overlays)
 {
    auto rhw_of = [](const RgPrimitiveVertex &v) { float r; memcpy(&r, &v._pad0, sizeof(r)); return r; };
    auto is3d = [&](const Overlay &o) {
-      if (o.verts.size() < 3 || o.verts.size() % 3)
+      if (o.keepOrder || o.verts.size() < 3 || o.verts.size() % 3)
          return false;
       const float r0 = rhw_of(o.verts[0]);
       if (!(r0 > 0.0f) || std::fabs(r0 - 1.0f) > 1e-4f)
@@ -4868,24 +4871,48 @@ void update_dark_adapt(bool sceneDrawn)
    // gem: a small shadow in a lit room was enough)
    static SeenFn s_seen = g_lib ? reinterpret_cast<SeenFn>(dlsym(g_lib, "rgThiefSeenLight")) : nullptr;
    if (s_seen) {
+      // What the library hands back: the share of the frame that is black
+      // (under 0.001: its histogram's bin 0 -- not, as was thought, what is
+      // below the darkest exposure: with the ambient light on hardly anything
+      // is that black, and the eyes never got used to the dark), and the
+      // frame's average luminance (log average of the rest), from which the
+      // eye adaptation picks its exposure (EV100 = log2(avg x 8)). When it
+      // wants one more than 2 stops under the darkest allowed -- the view
+      // much darker than the eyes are made for (Thief's dim rooms are under
+      // it anyway: the limit is what keeps them dark) -- for two seconds,
+      // the limit comes down, the further it is wanted the quicker (up to
+      // 0.36 stops a second), until it is wanted no more than 2 stops under;
+      // when the view is within half a stop of the limit, or above it, back
+      // up, quickly. A small shadow in a lit room hardly moves the average.
+      // A view mostly black (a dark window on the night) counts as dark too.
       static uint32_t s_n = 0;
-      static float s_below = 0.0f;
-      float below = 0.0f, avg = 0.0f;
-      const uint32_t n = s_seen(&below, &avg);
+      static float s_black = 0.0f, s_avg = 1.0f;
+      float black = 0.0f, avg = 0.0f;
+      const uint32_t n = s_seen(&black, &avg);
       if (n == 0)
          return;
       if (n != s_n) {
          s_n = n;
-         s_below = below;
+         s_black = black;
+         s_avg = avg;
       }
+      const float limit = float(g_cfg.evMin) - g_darkAdapted;
+      const float wanted = std::log2(std::max(s_avg, 1e-6f) * 8.0f);
+      const float deficit = std::max(limit - wanted, s_black > 0.7f ? 2.2f + 8.0f * (s_black - 0.7f) : -1e9f);
       static float s_darkFor = 0.0f;   // s the view has been that dark
-      s_darkFor = s_below > 0.7f ? s_darkFor + dt : 0.0f;
+      s_darkFor = deficit > 2.0f ? s_darkFor + dt : 0.0f;
       float rate = 0.0f;   // stops a second
-      if (s_below > 0.7f && s_darkFor > 2.0f)
-         rate = 1.2f * (s_below - 0.7f);
-      else if (s_below < 0.5f)
-         rate = -3.0f * (0.5f - s_below) - 0.2f;
+      if (deficit > 2.0f && s_darkFor > 2.0f)
+         rate = std::min(0.12f * (deficit - 1.8f), 0.36f);
+      else if (deficit < 0.5f && s_black < 0.5f)
+         rate = -0.6f * std::min(0.5f - deficit, 4.0f) - 0.2f;
       g_darkAdapted = std::clamp(g_darkAdapted + rate * dt, 0.0f, most);
+      static uint32_t s_logged = 0;
+      if (g_frameNumber - s_logged >= 600) {
+         s_logged = g_frameNumber;
+         fprintf(stderr, "Eyes: the view's average %.4f (wants EV %.1f, the darkest allowed now %.1f), %.0f%% of it black; used to the dark by %.1f stops (up to %.0f)\n",
+                 s_avg, wanted, limit, s_black * 100.0f, g_darkAdapted, most);
+      }
       return;
    }
    static float s_lit = 1.0f;
@@ -6093,6 +6120,8 @@ extern "C" {
 
 int RenderRTActive(void) { return g_active ? 1 : 0; }
 
+void RenderRTOverlayKeepOrder(int on) { g_overlayKeepOrder = on != 0; }
+
 // (with frame generation the limit is of the frames shown: half of them drawn)
 int RenderRTTakeSkipMission(void)
 {
@@ -6739,8 +6768,13 @@ void RenderRTDrawWorld(int primitive, const sRenderBackendVertex *v, const float
    } else if (g_blend == kRenderBackendBlendAdd) {
       prim.flags |= RG_MESH_PRIMITIVE_TRANSLUCENT;
       prim.emissive = 1.0f;
-   } else if (g_blend == kRenderBackendBlendAlpha && minAlpha < 0.99f) {
+   } else if (g_blend == kRenderBackendBlendAlpha && minAlpha < 0.99f &&
+              !(tex && tex->cutout && g_alphaTest && minAlpha >= 0.5f)) {
       prim.flags |= RG_MESH_PRIMITIVE_TRANSLUCENT;
+      // (a cut-out texture drawn alpha-tested and a little see-through --
+      // a tree's leaves at 0.68: The Black Parade's T2Tree2 -- is cut out,
+      // not glass: as glass, its crossed layers of leaves flickered, sorted
+      // anew each frame and noisy, among the ones drawn whole)
    } else if (tex && tex->cutout && (g_alphaTest || g_blend == kRenderBackendBlendAlpha)) {
       prim.flags |= RG_MESH_PRIMITIVE_ALPHA_TESTED;
    }
