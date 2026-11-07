@@ -3165,13 +3165,15 @@ void upload_world()
          if (!tex && g_cfg.water != 1) {
             // a water surface with no texture of its own (texture 0, as
             // Black Parade's canals, where the mission has no other water to
-            // borrow one from): murky green-blue water. (The path tracer's
-            // own water showed as a flat grey sheet.)
-            flags |= RG_MESH_PRIMITIVE_TRANSLUCENT;
-            tint[0] = 0.10f;
-            tint[1] = 0.17f;
-            tint[2] = 0.15f;
-            alpha = 0.8f;
+            // borrow one from): dark, murky water, still enough to mirror
+            // the lamps and walls round it -- a traced surface, lit as the
+            // walls are. (The path tracer's own water showed as a flat grey
+            // sheet; as a see-through colour it was drawn unlit, the same
+            // grey glow in the darkest canal, brightened with the eyes.)
+            flags |= RG_MESH_PRIMITIVE_POLISHED;
+            tint[0] = 0.035f;
+            tint[1] = 0.055f;
+            tint[2] = 0.05f;
          } else if (g_cfg.water == 1) {
             flags |= RG_MESH_PRIMITIVE_WATER;    // RTGL1's reflective/refractive water
          } else if (g_cfg.water == 0) {
