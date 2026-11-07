@@ -3162,14 +3162,15 @@ void upload_world()
       float tint[3] = {1.0f, 1.0f, 1.0f};
       if (g.flags & kRenderRTWorldWater) {
          flags &= ~RgMeshPrimitiveFlags(RG_MESH_PRIMITIVE_ALPHA_TESTED);
-         if (!tex && g_cfg.water != 1) {
+         if (!tex) {
             // a water surface with no texture of its own (texture 0, as
             // Black Parade's canals, where the mission has no other water to
             // borrow one from): dark, murky water, still enough to mirror
             // the lamps and walls round it -- a traced surface, lit as the
             // walls are. (The path tracer's own water showed as a flat grey
-            // sheet; as a see-through colour it was drawn unlit, the same
-            // grey glow in the darkest canal, brightened with the eyes.)
+            // sheet -- whatever the water setting; as a see-through colour
+            // it was drawn unlit, the same grey glow in the darkest canal,
+            // brightened with the eyes.)
             flags |= RG_MESH_PRIMITIVE_POLISHED;
             tint[0] = 0.035f;
             tint[1] = 0.055f;

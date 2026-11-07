@@ -209,6 +209,8 @@ inline const char *kDefaultTable = R"(# Thief RT material table: what each textu
 #   (patterns match in any case)
 #
 # polish: the surface mirrors the room (sharp, traced reflections over its texture).
+# A rule for such a class with no / in it looks at the texture's own file name, not
+# its family's (a family named marbletex is not all marble).
 # A class named window...: its bright, warm texels glow (lit windows), this strongly.
 # A class named stained...: stained glass -- its coloured panes glow with the light
 # through them, this strongly, and throw their colour into the room; the lead stays dark.
@@ -478,9 +480,18 @@ inline void load_table(const std::string &rtDir)
 inline const Class *class_of(const std::string &source)
 {
    const Table &t = g_table;
-   for (const Rule &r : t.rules)
-      if (glob(r.pattern.c_str(), source.c_str()))
-         return &t.classes[size_t(r.cls)];
+   // A rule for a polished class (a mirror: marble, tile, glass) that names
+   // no folder looks at the texture's own name, not its family's: The Black
+   // Parade's fam/marbletex is its odds and ends -- rough black stone blocks
+   // (bigbla), brick, trim -- and all of it mirrored the room as marble.
+   const size_t slash = source.rfind('/');
+   const char *own = source.c_str() + (slash == std::string::npos ? 0 : slash + 1);
+   for (const Rule &r : t.rules) {
+      const Class &c = t.classes[size_t(r.cls)];
+      const bool byOwnName = c.polish > 0.0f && r.pattern.find('/') == std::string::npos;
+      if (glob(r.pattern.c_str(), byOwnName ? own : source.c_str()))
+         return &c;
+   }
    return t.fallback >= 0 ? &t.classes[size_t(t.fallback)] : nullptr;
 }
 
