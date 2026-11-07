@@ -3181,6 +3181,39 @@ extern "C" void RenderRTGameDescribeNearby(const float at[3], float radius,
                CreatureExists(obj) ? ", a creature" : "",
                ObjHasRefs(obj) ? "" : ", no place in the world");
       line(text, ctx);
+      // a creature (a rope): where its joints reach, and the cells it is
+      // listed in -- the view draws an object only from a cell it sees
+      if (CreatureExists(obj))
+      {
+         mxs_vector mn, mx;
+         if (ObjGetWorldBBox(obj, &mn, &mx))
+         {
+            char cells[200] = "";
+            int n = 0, at = 0;
+            const ObjRefID first = OBJ_FIRST_REF(obj, mCellRefSys);
+            ObjRefID id = first;
+            while (id != 0 && n < 64)
+            {
+               ObjRef *ref = OBJREFID_TO_PTR(id);
+               if (!ref)
+                  break;
+               int cell;
+               memcpy(&cell, ref->bin, sizeof(cell));
+               if (at < (int)sizeof(cells) - 12)
+                  at += snprintf(cells + at, sizeof(cells) - at, " %d", cell);
+               ++n;
+               id = ref->next_of_obj;
+               if (id == first)
+                  break;
+            }
+            char text3[400];
+            snprintf(text3, sizeof(text3),
+                     "      its joints reach (%.2f %.2f %.2f) to (%.2f %.2f %.2f) m; listed in %d cell%s:%s\n",
+                     mn.x * 0.3048f, mn.y * 0.3048f, mn.z * 0.3048f, mx.x * 0.3048f, mx.y * 0.3048f,
+                     mx.z * 0.3048f, n, n == 1 ? "" : "s", cells);
+            line(text3, ctx);
+         }
+      }
       char ai[400];
       if (AIDescribeForDebug(obj, ai, sizeof(ai)))
       {

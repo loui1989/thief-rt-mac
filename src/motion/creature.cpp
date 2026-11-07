@@ -1920,6 +1920,20 @@ void cCreature::ComputeBoundingData()
          bmax->z=j->z;
    }
 
+   // (diagnosis: a joint gone to nowhere -- a rope that vanished)
+   if (!(bmin->x == bmin->x && bmin->y == bmin->y && bmin->z == bmin->z &&
+         bmax->x == bmax->x && bmax->y == bmax->y && bmax->z == bmax->z) ||
+       mx_dist_vec(bmin, bmax) > 2000.0f)
+   {
+      static int s_told = 0;
+      if (s_told < 10)
+      {
+         ++s_told;
+         mprintf("%s: its joints are nowhere: from (%g %g %g) to (%g %g %g)\n", ObjWarnName(m_ObjID),
+                 bmin->x, bmin->y, bmin->z, bmax->x, bmax->y, bmax->z);
+      }
+   }
+
    // calc radius
    mx_sub_vec(&max_off,bmax,&m_pJoints[m_iRootJoint]);
    mx_sub_vec(&min_off,bmin,&m_pJoints[m_iRootJoint]);

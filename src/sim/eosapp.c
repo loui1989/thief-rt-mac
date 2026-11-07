@@ -100,7 +100,29 @@ int CellBinComputeFunc (ObjID obj, BoundingPrism *bound, void *bins)
    int x, count = 0;
    ObjPos* pos = ObjPosGet(obj); 
 
+   Location *from = &pos->loc;
+   Location inside;
    x = CellFromPos(pos);
+   // An object whose own point is in the solid -- a rope tied a few inches
+   // into the ledge it hangs from (The Black Parade): it had no cell, so
+   // none of the cells its body is in, and the view never drew it (though
+   // it could be climbed). Its cells are looked for from a point of its
+   // body that is in one: its middle, or a little way along it.
+   if (x == CELL_INVALID) {
+      static const float kAt[5][3] = {
+         {0.5f, 0.5f, 0.5f}, {0.5f, 0.5f, 0.25f}, {0.5f, 0.5f, 0.75f}, {0.5f, 0.5f, 0.05f}, {0.5f, 0.5f, 0.95f}};
+      int i;
+      for (i = 0; i < 5 && x == CELL_INVALID; ++i) {
+         mxs_vector p;
+         p.x = bound->xmin + (bound->xmax - bound->xmin) * kAt[i][0];
+         p.y = bound->ymin + (bound->ymax - bound->ymin) * kAt[i][1];
+         p.z = bound->zmin + (bound->zmax - bound->zmin) * kAt[i][2];
+         MakeLocationFromVector(&inside, &p);
+         x = CellFromLoc(&inside);
+      }
+      if (x != CELL_INVALID)
+         from = &inside;
+   }
    if (x != CELL_INVALID) {
       mxs_vector bmin, bmax;
       bmin.x = bound->xmin;
@@ -110,7 +132,7 @@ int CellBinComputeFunc (ObjID obj, BoundingPrism *bound, void *bins)
       bmax.y = bound->ymax;
       bmax.z = bound->zmax;
 
-      count = PortalCellsInArea(gbins, OUR_MAX_REFS, &bmin, &bmax, &pos->loc);
+      count = PortalCellsInArea(gbins, OUR_MAX_REFS, &bmin, &bmax, from);
 
 #ifndef SHIP
       if (always_split_all_models)
