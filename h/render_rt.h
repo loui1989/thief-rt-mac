@@ -34,11 +34,6 @@ enum eRenderRTWorldFlags {
 
 int RenderRTActive(void);
 
-// While nonzero, what is drawn on the screen keeps the game's own order: not
-// sorted by depth as other models drawn there are (the light gem: its model,
-// sorted, lost its lit middle behind its own faces).
-void RenderRTOverlayKeepOrder(int on);
-
 // Main view. Dark world space: z is up. fwd/left/up are the camera axes,
 // zoom is r3d's (1.0 = 90 degrees horizontal), width/height the 3D canvas.
 void RenderRTSceneBegin(const float pos[3], const float fwd[3],

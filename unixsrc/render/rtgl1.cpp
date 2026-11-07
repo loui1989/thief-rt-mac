@@ -1271,10 +1271,8 @@ struct Overlay {
    int blend;
    int canvasW, canvasH;
    darkrt::Rect viewport;
-   bool keepOrder = false;   // drawn as the game drew it (RenderRTOverlayKeepOrder)
 };
 std::vector<Overlay> g_overlays;
-bool g_overlayKeepOrder = false;
 
 // The mission's enhanced sky (clouds, stars, moon), as the game draws it: one
 // face of a cube round the viewer a frame (rendloop.c rt_capture_sky_face),
@@ -3569,7 +3567,7 @@ int Draw(int primitive, const sRenderBackendVertex *v, int count, int canvasW, i
       if (last.texture == g_bound[0] && last.blend == g_blend && last.canvasW == canvasW &&
           last.canvasH == canvasH && last.viewport.x == viewport.x && last.viewport.y == viewport.y &&
           last.viewport.w == viewport.w && last.viewport.h == viewport.h && count % 3 == 0 &&
-          last.verts.size() % 3 == 0 && last.keepOrder == g_overlayKeepOrder) {
+          last.verts.size() % 3 == 0) {
          const size_t at = last.verts.size();
          last.verts.resize(at + size_t(count));
          for (int i = 0; i < count; ++i) {
@@ -3589,7 +3587,6 @@ int Draw(int primitive, const sRenderBackendVertex *v, int count, int canvasW, i
    Overlay o;
    o.texture = g_bound[0];
    o.blend = g_blend;
-   o.keepOrder = g_overlayKeepOrder;
    o.canvasW = canvasW;
    o.canvasH = canvasH;
    o.viewport = viewport;
@@ -3667,11 +3664,12 @@ namespace {
 // front: faces missing. Runs of such draws -- their triangles at depths, not
 // flat 2D at one -- are put in order, the farthest first, by each triangle's
 // depth (1/rhw, kept in the vertices' spare word by Draw).
+std::string logs_dir();
 void sort_overlay_models(std::vector<Overlay> &overlays)
 {
    auto rhw_of = [](const RgPrimitiveVertex &v) { float r; memcpy(&r, &v._pad0, sizeof(r)); return r; };
    auto is3d = [&](const Overlay &o) {
-      if (o.keepOrder || o.verts.size() < 3 || o.verts.size() % 3)
+      if (o.verts.size() < 3 || o.verts.size() % 3)
          return false;
       const float r0 = rhw_of(o.verts[0]);
       if (!(r0 > 0.0f) || std::fabs(r0 - 1.0f) > 1e-4f)
@@ -3696,7 +3694,7 @@ void sort_overlay_models(std::vector<Overlay> &overlays)
              overlays[j].viewport.y == first.viewport.y && overlays[j].viewport.w == first.viewport.w &&
              overlays[j].viewport.h == first.viewport.h)
          ++j;
-      struct Tri { size_t o, t; float depth; };
+      struct Tri { size_t o, t; float depth; float area; };
       std::vector<Tri> tris;
       for (size_t k = i; k < j; ++k)
          for (size_t t = 0; t + 2 < overlays[k].verts.size(); t += 3) {
@@ -3705,8 +3703,68 @@ void sort_overlay_models(std::vector<Overlay> &overlays)
                const float r = rhw_of(overlays[k].verts[t + size_t(q)]);
                d += r > 1e-12f ? 1.0f / r : 1e12f;
             }
-            tris.push_back({k, t, d});
+            const float *a = overlays[k].verts[t].position, *b = overlays[k].verts[t + 1].position,
+                        *c = overlays[k].verts[t + 2].position;
+            const float area = 0.5f * ((b[0] - a[0]) * (c[1] - a[1]) - (c[0] - a[0]) * (b[1] - a[1]));
+            tris.push_back({k, t, d / 3.0f, area});
          }
+      // (diagnosis: the first few models drawn so, face by face, for logs/hud-models.txt)
+      {
+         static std::vector<size_t> s_dumped;
+         if (s_dumped.size() < 8 && std::find(s_dumped.begin(), s_dumped.end(), tris.size()) == s_dumped.end()) {
+            s_dumped.push_back(tris.size());
+            if (FILE *f = fopen((logs_dir() + "/hud-models.txt").c_str(), s_dumped.size() == 1 ? "w" : "a")) {
+               fprintf(f, "model drawn on the screen: %zu faces in %zu draws (frame %u)\n", tris.size(), j - i, g_frameNumber);
+               for (const Tri &tr : tris) {
+                  const Overlay &o = overlays[tr.o];
+                  fprintf(f, "  draw %zu tex %s blend %d depth %.4f area %.1f:", tr.o - i,
+                          o.texture ? o.texture->name : "-", o.blend, tr.depth, tr.area);
+                  for (int q = 0; q < 3; ++q) {
+                     const RgPrimitiveVertex &v = o.verts[tr.t + size_t(q)];
+                     fprintf(f, " (%.1f %.1f %08x)", v.position[0], v.position[1], unsigned(v.color));
+                  }
+                  fprintf(f, "\n");
+               }
+               fclose(f);
+            }
+         }
+      }
+      // The faces turned away (the light gem's back, behind its lit front):
+      // by depth alone a big one behind can come after small ones before it.
+      // The model's faces wind one way on the screen when they face the
+      // viewer, the other way turned away; which way is which, the depths
+      // tell: the faces winding one way are, on the whole, nearer. Those of
+      // the other way are dropped -- when they are clearly further (two-sided
+      // faces, a pair at one depth, are kept).
+      {
+         double area[2] = {0, 0}, depth[2] = {0, 0};
+         float lo = 1e30f, hi = -1e30f;
+         for (const Tri &tr : tris) {
+            const int s = tr.area > 0.0f ? 0 : 1;
+            const double w = std::fabs(tr.area);
+            area[s] += w;
+            depth[s] += w * tr.depth;
+            lo = std::min(lo, tr.depth);
+            hi = std::max(hi, tr.depth);
+         }
+         const double total = area[0] + area[1];
+         if (total > 0 && area[0] > 0.05 * total && area[1] > 0.05 * total && hi > lo) {
+            const double d0 = depth[0] / area[0], d1 = depth[1] / area[1];
+            const int back = d0 > d1 ? 0 : 1;
+            if (std::fabs(d0 - d1) > 0.1 * double(hi - lo)) {
+               const size_t before = tris.size();
+               tris.erase(std::remove_if(tris.begin(), tris.end(),
+                                         [&](const Tri &tr) { return (tr.area > 0.0f ? 0 : 1) == back; }),
+                          tris.end());
+               static int s_told = 0;
+               if (s_told < 20 && before >= 8) {
+                  ++s_told;
+                  fprintf(stderr, "HUD model: %zu of its %zu faces turned away (further by %.0f%% of its depth), not drawn\n",
+                          before - tris.size(), before, 100.0 * std::fabs(d0 - d1) / double(hi - lo));
+               }
+            }
+         }
+      }
       std::stable_sort(tris.begin(), tris.end(), [](const Tri &a, const Tri &b) { return a.depth > b.depth; });
       const size_t runStart = out.size();   // (a run's draws are not merged into what came before)
       for (const Tri &tr : tris) {
@@ -4879,9 +4937,9 @@ void update_dark_adapt(bool sceneDrawn)
       // eye adaptation picks its exposure (EV100 = log2(avg x 8)). When it
       // wants one more than 2 stops under the darkest allowed -- the view
       // much darker than the eyes are made for (Thief's dim rooms are under
-      // it anyway: the limit is what keeps them dark) -- for two seconds,
+      // it anyway: the limit is what keeps them dark) -- for 1.5 seconds,
       // the limit comes down, the further it is wanted the quicker (up to
-      // 0.36 stops a second), until it is wanted no more than 2 stops under;
+      // 0.7 stops a second), until it is wanted no more than 2 stops under;
       // when the view is within half a stop of the limit, or above it, back
       // up, quickly. A small shadow in a lit room hardly moves the average.
       // A view mostly black (a dark window on the night) counts as dark too.
@@ -4902,8 +4960,8 @@ void update_dark_adapt(bool sceneDrawn)
       static float s_darkFor = 0.0f;   // s the view has been that dark
       s_darkFor = deficit > 2.0f ? s_darkFor + dt : 0.0f;
       float rate = 0.0f;   // stops a second
-      if (deficit > 2.0f && s_darkFor > 2.0f)
-         rate = std::min(0.12f * (deficit - 1.8f), 0.36f);
+      if (deficit > 2.0f && s_darkFor > 1.5f)
+         rate = std::min(0.25f * (deficit - 1.8f), 0.7f);
       else if (deficit < 0.5f && s_black < 0.5f)
          rate = -0.6f * std::min(0.5f - deficit, 4.0f) - 0.2f;
       g_darkAdapted = std::clamp(g_darkAdapted + rate * dt, 0.0f, most);
@@ -6119,8 +6177,6 @@ bool segment_blocked(const float a[3], const float b[3])
 extern "C" {
 
 int RenderRTActive(void) { return g_active ? 1 : 0; }
-
-void RenderRTOverlayKeepOrder(int on) { g_overlayKeepOrder = on != 0; }
 
 // (with frame generation the limit is of the frames shown: half of them drawn)
 int RenderRTTakeSkipMission(void)
