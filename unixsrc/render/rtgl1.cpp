@@ -1658,6 +1658,68 @@ float g_smokeReach = kSmokeOnlyFar * 0.85f;   // and how far its smoke goes
 uint32_t g_smokeKeptSprites = 0;      // smoke left as sprites this frame (too small, far, many)
 bool g_currentPuffed = false;         // the object being drawn gave smoke puffs
 
+// More puffs than the volume takes (a steam vent's 250 particles; it takes
+// 112): neighbours merged, on a grid in the world, coarser until they fit.
+// (Those past the budget were left sprites: which ones, the order they were
+// drawn in decided, and it changed as the view turned -- the steam flicked
+// between the volume and the flat sprites.) A merged puff keeps their
+// smoke: its mass (density x radius^3), at their centre of mass, as big as
+// their volumes together or as their spread, its colour theirs.
+void merge_smoke_puffs(std::vector<SmokePuff> &puffs, size_t budget)
+{
+   float cell = 0.2f;
+   while (puffs.size() > budget && cell < 100.0f) {
+      struct Acc {
+         double mass = 0, pos[3] = {0, 0, 0}, alb[3] = {0, 0, 0}, vol = 0;
+         float lo[3] = {1e30f, 1e30f, 1e30f}, hi[3] = {-1e30f, -1e30f, -1e30f};
+      };
+      std::unordered_map<int64_t, size_t> at;
+      std::vector<Acc> acc;
+      for (const SmokePuff &p : puffs) {
+         const int64_t kx = int64_t(std::floor(p.pos[0] / cell)) & 0xfffff;
+         const int64_t ky = int64_t(std::floor(p.pos[1] / cell)) & 0xfffff;
+         const int64_t kz = int64_t(std::floor(p.pos[2] / cell)) & 0xfffff;
+         const int64_t key = (kx << 40) | (ky << 20) | kz;
+         auto it = at.find(key);
+         if (it == at.end()) {
+            it = at.emplace(key, acc.size()).first;
+            acc.emplace_back();
+         }
+         Acc &a = acc[it->second];
+         const double r3 = double(p.radius) * p.radius * p.radius;
+         const double m = double(p.density) * r3;
+         a.mass += m;
+         a.vol += r3;
+         for (int k = 0; k < 3; ++k) {
+            a.pos[k] += m * p.pos[k];
+            a.alb[k] += m * p.albedo[k];
+            a.lo[k] = std::min(a.lo[k], p.pos[k] - p.radius);
+            a.hi[k] = std::max(a.hi[k], p.pos[k] + p.radius);
+         }
+      }
+      std::vector<SmokePuff> out;
+      out.reserve(acc.size());
+      for (const Acc &a : acc) {
+         if (a.mass <= 0)
+            continue;
+         SmokePuff p;
+         float spread = 0;
+         for (int k = 0; k < 3; ++k) {
+            p.pos[k] = float(a.pos[k] / a.mass);
+            p.albedo[k] = float(a.alb[k] / a.mass);
+            spread = std::max(spread, 0.5f * (a.hi[k] - a.lo[k]));
+         }
+         p.radius = std::max(float(std::cbrt(a.vol)), 0.7f * spread);
+         p.density = float(a.mass / (double(p.radius) * p.radius * p.radius));
+         out.push_back(p);
+      }
+      puffs.swap(out);
+      cell *= 1.4f;
+   }
+   if (puffs.size() > budget)
+      puffs.resize(budget);
+}
+
 uint64_t hash_prims(const std::vector<CapturedPrim> &prims)
 {
    uint64_t h = 1469598103934665603ull;
@@ -3663,7 +3725,8 @@ namespace {
 // face behind (a chalice's far side, its inside) painted over the one in
 // front: faces missing. Runs of such draws -- their triangles at depths, not
 // flat 2D at one -- are put in order, the farthest first, by each triangle's
-// depth (1/rhw, kept in the vertices' spare word by Draw).
+// depth (1/rhw, kept in the vertices' spare word by Draw), each draw's within
+// itself.
 std::string logs_dir();
 void sort_overlay_models(std::vector<Overlay> &overlays)
 {
@@ -3765,7 +3828,15 @@ void sort_overlay_models(std::vector<Overlay> &overlays)
             }
          }
       }
-      std::stable_sort(tris.begin(), tris.end(), [](const Tri &a, const Tri &b) { return a.depth > b.depth; });
+      // Each draw's triangles (one texture's: a chalice, its inside) in order
+      // among themselves; the draws stay in the game's order. Sorted all
+      // together, the light gem's crystal and the frame round it -- two
+      // draws at one depth, the crystal laid over the frame -- came apart:
+      // the frame's triangles a hair nearer were painted over the crystal
+      // (a black wedge across the gem, its light half gone).
+      std::stable_sort(tris.begin(), tris.end(), [](const Tri &a, const Tri &b) {
+         return a.o != b.o ? a.o < b.o : a.depth > b.depth;
+      });
       const size_t runStart = out.size();   // (a run's draws are not merged into what came before)
       for (const Tri &tr : tris) {
          const Overlay &src = overlays[tr.o];
@@ -5129,6 +5200,8 @@ void draw_frame(bool sceneDrawn)
    // heat haze's markers after them
    uint32_t smokeCount = 0;
    if (sceneDrawn && !waterHaze)
+      merge_smoke_puffs(g_smokePuffs, kSmokeBudget);
+   if (sceneDrawn && !waterHaze)
       for (const SmokePuff &p : g_smokePuffs) {
          if (smokeCount >= kSmokeBudget)
             break;
@@ -5141,7 +5214,7 @@ void draw_frame(bool sceneDrawn)
       static uint32_t s_logFrame = 0, s_most = 0;
       s_most = std::max(s_most, smokeCount);
       if (++s_logFrame % 600 == 0 && (s_most > 0 || g_smokeKeptSprites > 0)) {
-         fprintf(stderr, "Smoke: %u puffs this frame (the most lately %u), %u smoke particles left as sprites (too small for the volume, too far, or too many)\n",
+         fprintf(stderr, "Smoke: %u puffs this frame (the most lately %u), %u smoke particles left as sprites (too small for the volume, or too far)\n",
                  smokeCount, s_most, g_smokeKeptSprites);
          s_most = 0;
       }
@@ -6425,7 +6498,7 @@ bool smoke_from_sprite(RtTexture *tex, const char *name, const sRenderBackendVer
    // as does one beyond the volume, or past the budget
    const float rVol = std::max(r, 0.6f * g_smokeSlice);
    if (r < 0.03f || rVol > 2.5f * r || dist + r > g_smokeReach || dist < 0.2f ||
-       g_smokePuffs.size() >= kSmokeBudget) {
+       g_smokePuffs.size() >= 4096) {
       ++g_smokeKeptSprites;
       return false;
    }
