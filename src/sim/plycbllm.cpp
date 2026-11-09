@@ -638,10 +638,23 @@ static BOOL g_BodyPoseHeld = FALSE;
 static BOOL g_BodyAskMissed = FALSE;   // the last thing asked had no schema (a fallback played)
 
 // What a crouch (and a jump's tuck) is borrowed from: motions a humanoid
-// has, tried in turn, the first that comes to a frame with the legs folded
-// and the body upright (BodyPoseFrame) kept -- per pose, each one found
-// wanting skipped after
-static const char *const kBodyPoseFrom[] =
+// has, each tried in turn (as he crouches, jumps) for a frame with the legs
+// folded and the body upright -- the first with one kept; none: the one
+// that folded them most, stopped there. Each tried at most 2.5 s (a loop,
+// a stagger, never ends).
+static const char *const kBodyCrouchFrom[] =
+{
+   "Crumple 0, Knockout 0",            // (his knees going, before he falls)
+   "MeleeCombat 0, Block 0, Direction 6",
+   "MeleeCombat 0, Attack 0, Direction 6",
+   "Discover 0, PointOut 0, Direction 6",
+   "WorldFrob 0, OnFloor 0",
+   "Search 0, Peek 0, Direction 3",
+   "ReceiveWound 0, SevereWound 0",
+   "Discover 0, Recoil 0",
+   NULL
+};
+static const char *const kBodyTuckFrom[] =
 {
    "WorldFrob 0, OnFloor 0",
    "Search 0, Peek 0, Direction 3",
@@ -649,9 +662,13 @@ static const char *const kBodyPoseFrom[] =
    "ReceiveWound 0, SevereWound 0",
    "Discover 0, Recoil 0",
    "Crumple 0, Knockout 0",
+   NULL
 };
-static const int kBodyPoseFroms = sizeof(kBodyPoseFrom) / sizeof(kBodyPoseFrom[0]);
-static BOOL g_BodyPoseBad[3][16];
+static const char *const *const kBodyPoseFrom[3] = { NULL, kBodyCrouchFrom, kBodyTuckFrom };
+static BOOL g_BodyPoseBad[3][16];        // tried (or not there)
+static float g_BodyPoseLeast[3][16];     // the least it folded the legs to (of standing), the body upright
+static int g_BodyPoseChosen[3] = { -1, -1, -1 };   // (-2: none)
+static float g_BodyPoseFold[3] = { 0, 0.62f, 0.85f };   // folded enough: of his standing
 static float g_BodyStandLeg = 0.0f, g_BodyStandTorso = 0.0f;   // standing: butt over ankles, head over butt
 
 // the creature's legs (butt over its lower ankle) and torso (head over butt)
@@ -1208,17 +1225,40 @@ static void PlayerBodyUpdate(ulong dt)
    }
    if (pose)
    {
-      if (s_from < 0 || g_BodyPoseBad[pose][s_from])
+      const char *const *from = kBodyPoseFrom[pose];
+      if (g_BodyPoseChosen[pose] != -1)
+         s_from = g_BodyPoseChosen[pose];
+      else if (s_from < 0 || g_BodyPoseBad[pose][s_from])
       {
          s_from = -1;
-         for (int i = 0; i < kBodyPoseFroms && s_from < 0; ++i)
+         for (int i = 0; from[i] && s_from < 0; ++i)
             if (!g_BodyPoseBad[pose][i])
                s_from = i;
          s_poseFor = 0;
+         if (s_from < 0)
+         {
+            // all tried, none folded enough: the one that folded most
+            // (crouching; in the air, none -- standing, carried up)
+            int best = -1;
+            for (int i = 0; from[i]; ++i)
+               if (pose == 1 && g_BodyPoseLeast[pose][i] > 0 && g_BodyPoseLeast[pose][i] < 0.92f &&
+                   (best < 0 || g_BodyPoseLeast[pose][i] < g_BodyPoseLeast[pose][best]))
+                  best = i;
+            g_BodyPoseChosen[pose] = best >= 0 ? best : -2;
+            if (best >= 0)
+            {
+               g_BodyPoseFold[pose] = g_BodyPoseLeast[pose][best] + 0.03f;
+               mprintf("PlyrBody: %s from \"%s\" (its legs folded at most to %.0f%%)\n",
+                       pose == 1 ? "crouching" : "in the air", from[best], g_BodyPoseLeast[pose][best] * 100.0f);
+            }
+            else
+               mprintf("PlyrBody: no %s found\n", pose == 1 ? "crouch" : "tuck");
+            s_from = best;
+         }
       }
       if (s_from >= 0 && g_BodyStandLeg > 0.5f)
       {
-         strcpy(act, kBodyPoseFrom[s_from]);
+         strcpy(act, from[s_from]);
          oneShot = TRUE;
          stepping = FALSE;
       }
@@ -1373,39 +1413,54 @@ static void PlayerBodyUpdate(ulong dt)
       g_BodyState = state;
    }
    // the pose stopped: at the first frame of what it is borrowed from with
-   // the legs folded (to 60% of his standing, crouching; 85%, tucked in the
-   // air) and the body upright (70% of his standing) -- a few updates in
-   // (not the motion before it, still blending out). One without such a
-   // frame (or without a schema) is not tried again for that pose.
-   if (pose && !g_BodyPoseHeld && g_BodyOneShot && strncmp(g_BodyTags, act, strlen(act)) == 0)
+   // the legs folded enough (g_BodyPoseFold of his standing) and the body
+   // upright (60% of his standing) -- a few updates in (not the motion
+   // before it, still blending out)
+   static ulong s_poseMs = 0;
+   if (s_poseFor == 0)
+      s_poseMs = 0;
+   if (pose && s_from >= 0 && !g_BodyPoseHeld && g_BodyOneShot && strncmp(g_BodyTags, act, strlen(act)) == 0)
    {
+      const char *const *from = kBodyPoseFrom[pose];
+      const BOOL trying = g_BodyPoseChosen[pose] == -1;
+      s_poseMs += dt;
       if (g_BodyAskMissed)
       {
          g_BodyPoseBad[pose][s_from] = TRUE;
-         mprintf("PlyrBody: no \"%s\" to borrow a pose from\n", kBodyPoseFrom[s_from]);
+         mprintf("PlyrBody: no \"%s\" to borrow a pose from\n", from[s_from]);
          g_BodyTags[0] = 0;
       }
       else if (++s_poseFor >= 3)
       {
-         float leg, torso, frac = 0;
+         float leg = 0, torso = 0, frac = 0;
          const char *name = "?";
          const BOOL known = BodyMotionAt(CreatureGetMotorInterface(g_BodyObj), &frac, &name);
-         if (BodyLegTorso(&leg, &torso) && leg <= (pose == 1 ? 0.62f : 0.85f) * g_BodyStandLeg &&
-             torso >= 0.7f * g_BodyStandTorso)
+         const BOOL measured = BodyLegTorso(&leg, &torso);
+         const float l = leg / g_BodyStandLeg;
+         const BOOL upright = measured && torso >= 0.6f * g_BodyStandTorso;
+         if (upright && (g_BodyPoseLeast[pose][s_from] == 0 || l < g_BodyPoseLeast[pose][s_from]))
+            g_BodyPoseLeast[pose][s_from] = l;
+         if (upright && l <= g_BodyPoseFold[pose])
          {
             CreatureFreeze(g_BodyObj);
             g_BodyPoseHeld = TRUE;
+            if (trying)
+               g_BodyPoseChosen[pose] = s_from;
             if (g_BodyShotLog++ < 100)
                mprintf("PlyrBody: %s held: \"%s\" (%s at %.0f%%), legs %.0f%%, body %.0f%% of standing\n",
-                       pose == 1 ? "crouching" : "in the air", kBodyPoseFrom[s_from], name, frac * 100.0f,
-                       leg / g_BodyStandLeg * 100.0f, torso / g_BodyStandTorso * 100.0f);
+                       pose == 1 ? "crouching" : "in the air", from[s_from], name, frac * 100.0f,
+                       l * 100.0f, torso / g_BodyStandTorso * 100.0f);
          }
-         else if (g_pBodyMCoord->GetStatus() == kMCoord_Idle || (known && frac >= 0.97f))
+         else if (g_pBodyMCoord->GetStatus() == kMCoord_Idle || (known && frac >= 0.97f) || s_poseMs > 2500)
          {
-            g_BodyPoseBad[pose][s_from] = TRUE;
-            mprintf("PlyrBody: \"%s\" has no %s in it\n", kBodyPoseFrom[s_from],
-                    pose == 1 ? "crouch" : "tuck");
-            g_BodyTags[0] = 0;
+            if (trying)
+            {
+               g_BodyPoseBad[pose][s_from] = TRUE;
+               mprintf("PlyrBody: \"%s\" folds the legs only to %.0f%% (body upright)\n", from[s_from],
+                       g_BodyPoseLeast[pose][s_from] * 100.0f);
+            }
+            g_BodyTags[0] = 0;   // (the next; the chosen, again)
+            s_poseFor = 0;
          }
       }
    }
