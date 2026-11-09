@@ -665,6 +665,23 @@ void CreaturePosPropUnlock()
 static BOOL MotHistoryTracing(ObjID obj);   // (the height trace, below)
 
 // @YO OVER HERE
+// A creature whose pose is reshaped after each update, once its motion has
+// set its joints (CreatureSetPoseHook): Garrett's body double, crouching
+static ObjID g_CrPoseHookObj = OBJ_NULL;
+static tCreaturePoseHook g_CrPoseHook = NULL;
+// (its motion's own relative orientations, put back before its next update:
+// the motion library blends a transition from them -- reshaped, the next
+// reshaping went on top of the last)
+static quat g_CrPoseRelWas[65];
+static BOOL g_CrPoseRelSaved = FALSE;
+
+void CreatureSetPoseHook(ObjID obj, tCreaturePoseHook hook)
+{
+   g_CrPoseHookObj = obj;
+   g_CrPoseHook = hook;
+   g_CrPoseRelSaved = FALSE;
+}
+
 // A creature whose height whoever moves it sets, its motion's or not
 // (CreatureFreeHeight): Garrett's body double in the air, jumping
 static ObjID g_CrHeightFreeObj = OBJ_NULL;
@@ -4305,8 +4322,23 @@ void cCreature::Update(const ulong timeDelta)
    gUseHeadTracking = TRUE;
 
    // Only run a single frame for now...
+   const BOOL poseHooked = m_ObjID == g_CrPoseHookObj && g_CrPoseHook && m_nJoints < 64;
+   if (poseHooked && g_CrPoseRelSaved)
+   {
+      memcpy(m_sMultiped.rel_orients, g_CrPoseRelWas, sizeof(quat) * (m_nJoints + 1));
+      g_CrPoseRelSaved = FALSE;
+   }
+
    moved = SubFrameUpdate(timeDelta);
    SunkCheck();
+
+   if (moved && poseHooked)
+   {
+      memcpy(g_CrPoseRelWas, m_sMultiped.rel_orients, sizeof(quat) * (m_nJoints + 1));
+      g_CrPoseRelSaved = TRUE;
+      g_CrPoseHook(m_ObjID, m_nJoints, m_pJoints, m_pOrients, m_sMultiped.rel_orients,
+                   g_pCreatureDescPtr[m_CreatureType]->pJointParents);
+   }
 
    if(moved)
    {

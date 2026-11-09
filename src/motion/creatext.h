@@ -45,6 +45,13 @@ EXTERN void CreatureUnFreeze(ObjID objID);
 // even mid-motion (a small move up or down otherwise keeps its motion's);
 // OBJ_NULL for none
 EXTERN void CreatureFreeHeight(ObjID objID);
+// a creature's pose reshaped after each update that moved it: its joints'
+// world positions and orientations, and their orientations relative to
+// their parents' (quat *, the mesh's stretchy parts drawn by these) -- the
+// hook keeps all three agreeing. One creature at a time; OBJ_NULL for none.
+typedef void (*tCreaturePoseHook)(ObjID obj, int nJoints, mxs_vector *joints, mxs_matrix *orients,
+                                  void *relOrients, const int *parents);
+EXTERN void CreatureSetPoseHook(ObjID obj, tCreaturePoseHook hook);
 
 EXTERN BOOL CreatureGetRenderHandle(const ObjID objID, long *pHandle);
 

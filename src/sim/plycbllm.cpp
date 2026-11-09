@@ -637,23 +637,10 @@ static BOOL g_BodyAiming = FALSE, g_BodyHeld = FALSE;
 static BOOL g_BodyPoseHeld = FALSE;
 static BOOL g_BodyAskMissed = FALSE;   // the last thing asked had no schema (a fallback played)
 
-// What a crouch (and a jump's tuck) is borrowed from: motions a humanoid
-// has, each tried in turn (as he crouches, jumps) for a frame with the legs
-// folded and the body upright -- the first with one kept; none: the one
-// that folded them most, stopped there. Each tried at most 2.5 s (a loop,
-// a stagger, never ends).
-static const char *const kBodyCrouchFrom[] =
-{
-   "Crumple 0, Knockout 0",            // (his knees going, before he falls)
-   "MeleeCombat 0, Block 0, Direction 6",
-   "MeleeCombat 0, Attack 0, Direction 6",
-   "Discover 0, PointOut 0, Direction 6",
-   "WorldFrob 0, OnFloor 0",
-   "Search 0, Peek 0, Direction 3",
-   "ReceiveWound 0, SevereWound 0",
-   "Discover 0, Recoil 0",
-   NULL
-};
+// What a jump's tuck is borrowed from: motions a humanoid has, each tried
+// in turn (as he jumps) for a frame with the legs folded and the body
+// upright -- the first with one kept. Each tried at most 2.5 s (a loop, a
+// stagger, never ends). (Crouching is posed: BodyPoseHook.)
 static const char *const kBodyTuckFrom[] =
 {
    "WorldFrob 0, OnFloor 0",
@@ -664,7 +651,7 @@ static const char *const kBodyTuckFrom[] =
    "Crumple 0, Knockout 0",
    NULL
 };
-static const char *const *const kBodyPoseFrom[3] = { NULL, kBodyCrouchFrom, kBodyTuckFrom };
+static const char *const *const kBodyPoseFrom[3] = { NULL, NULL, kBodyTuckFrom };
 static BOOL g_BodyPoseBad[3][16];        // tried (or not there)
 static float g_BodyPoseLeast[3][16];     // the least it folded the legs to (of standing), the body upright
 static int g_BodyPoseChosen[3] = { -1, -1, -1 };   // (-2: none)
@@ -682,6 +669,172 @@ static BOOL BodyLegTorso(float *leg, float *torso)
    *leg = butt - (la < ra ? la : ra);
    *torso = GetCreatureJointPos(g_BodyObj, kCJ_Head).z - butt;
    return TRUE;
+}
+
+// Crouching, posed on whatever it plays (standing, walking, a weapon's
+// moves): no humanoid schema crouches. How far: 0 standing, 1 crouched,
+// eased in and out (PlayerBodyUpdate).
+static float g_BodyCrouch = 0.0f;
+
+// the rotation by an angle (its sine, cosine) about a unit axis
+static void BodyAxisAngle(mxs_matrix *r, const mxs_vector *k, float s, float c)
+{
+   const float t = 1.0f - c, x = k->x, y = k->y, z = k->z;
+   r->el[0] = c + x * x * t;     r->el[3] = x * y * t - z * s; r->el[6] = x * z * t + y * s;
+   r->el[1] = y * x * t + z * s; r->el[4] = c + y * y * t;     r->el[7] = y * z * t - x * s;
+   r->el[2] = z * x * t - y * s; r->el[5] = z * y * t + x * s; r->el[8] = c + z * z * t;
+}
+
+// the least rotation turning one direction to another
+static void BodyRotBetween(mxs_matrix *r, const mxs_vector *from, const mxs_vector *to)
+{
+   mxs_vector a, b, k;
+   if (mx_norm_vec(&a, from) < 1e-6f || mx_norm_vec(&b, to) < 1e-6f)
+   {
+      mx_identity_mat(r);
+      return;
+   }
+   mx_cross_vec(&k, &a, &b);
+   const float s = mx_mag_vec(&k);
+   if (s < 1e-6f)
+   {
+      mx_identity_mat(r);
+      return;
+   }
+   mx_scaleeq_vec(&k, 1.0f / s);
+   BodyAxisAngle(r, &k, s, mx_dot_vec(&a, &b));
+}
+
+// The crouch: the hips dropped (by 36% of the legs' length, crouched), the
+// body above them leaned forward from the waist (0.3 radians), each foot
+// left where its motion put it -- its knee found again, bent forward, its
+// thigh and shin turned to it (a two-bone reach) -- and each changed joint's
+// orientation relative to its parent's made to agree (the mesh's stretchy
+// parts are drawn by those: parent * relative)
+static void BodyPoseHook(ObjID obj, int n, mxs_vector *J, mxs_matrix *O, void *relv, const int *parents)
+{
+   if (obj != g_BodyObj || g_BodyCrouch < 0.01f)
+      return;
+   quat *rel = (quat *)relv;
+   const int butt = GetCreatureJointID(obj, kCJ_Butt), abd = GetCreatureJointID(obj, kCJ_Abdomen);
+   const int hip[2] = { GetCreatureJointID(obj, kCJ_LHip), GetCreatureJointID(obj, kCJ_RHip) };
+   const int knee[2] = { GetCreatureJointID(obj, kCJ_LKnee), GetCreatureJointID(obj, kCJ_RKnee) };
+   const int ankle[2] = { GetCreatureJointID(obj, kCJ_LAnkle), GetCreatureJointID(obj, kCJ_RAnkle) };
+   const int toe[2] = { GetCreatureJointID(obj, kCJ_LToe), GetCreatureJointID(obj, kCJ_RToe) };
+   const int need[] = { butt, abd, hip[0], hip[1], knee[0], knee[1], ankle[0], ankle[1], toe[0], toe[1] };
+   for (int i = 0; i < (int)(sizeof(need) / sizeof(need[0])); ++i)
+      if (need[i] < 0 || need[i] >= n || n > 64)
+         return;
+   const Position *pos = ObjPosGet(obj);
+   if (!pos)
+      return;
+   const float face = pos->fac.tz * (2.0f * 3.14159265f / 65536.0f);
+   mxs_vector fwd, left;
+   mx_mk_vec(&fwd, cosf(face), sinf(face), 0);
+   mx_mk_vec(&left, -sinf(face), cosf(face), 0);
+
+   mxs_vector d0, d1;
+   mx_sub_vec(&d0, &J[knee[0]], &J[hip[0]]);
+   mx_sub_vec(&d1, &J[ankle[0]], &J[knee[0]]);
+   const float legs = mx_mag_vec(&d0) + mx_mag_vec(&d1);
+   const float drop = g_BodyCrouch * 0.36f * legs;
+
+   // which joints hang from the abdomen (the body above the waist), which
+   // are the legs' below the hips
+   BOOL upper[64], below[64];
+   for (int j = 0; j < n; ++j)
+   {
+      upper[j] = FALSE;
+      for (int k = j, steps = 0; k >= 0 && k < n && steps <= n; k = parents[k], ++steps)
+      {
+         if (k == abd)
+         {
+            upper[j] = TRUE;
+            break;
+         }
+         if (parents[k] == k)
+            break;
+      }
+      below[j] = j == knee[0] || j == knee[1] || j == ankle[0] || j == ankle[1] || j == toe[0] || j == toe[1];
+   }
+
+   // leaned forward, about the abdomen
+   const float lean = g_BodyCrouch * 0.30f;
+   mxs_matrix rl, t;
+   BodyAxisAngle(&rl, &left, sinf(lean), cosf(lean));
+   const mxs_vector pivot = J[abd];
+   for (int j = 0; j < n; ++j)
+      if (upper[j])
+      {
+         if (j != abd)
+         {
+            mxs_vector v, w;
+            mx_sub_vec(&v, &J[j], &pivot);
+            mx_mat_mul_vec(&w, &rl, &v);
+            mx_add_vec(&J[j], &pivot, &w);
+         }
+         mx_mul_mat(&t, &rl, &O[j]);
+         O[j] = t;
+      }
+
+   // dropped: all but the legs below the hips
+   mxs_vector hipWas[2];
+   for (int s = 0; s < 2; ++s)
+      hipWas[s] = J[hip[s]];
+   for (int j = 0; j < n; ++j)
+      if (!below[j])
+         J[j].z -= drop;
+
+   // each leg reaching its foot again
+   for (int s = 0; s < 2; ++s)
+   {
+      const mxs_vector H = J[hip[s]], A = J[ankle[s]], K = J[knee[s]];
+      mxs_vector thighWas, shinWas, ha;
+      mx_sub_vec(&thighWas, &K, &hipWas[s]);
+      mx_sub_vec(&shinWas, &A, &K);
+      const float l1 = mx_mag_vec(&thighWas), l2 = mx_mag_vec(&shinWas);
+      mx_sub_vec(&ha, &A, &H);
+      float d = mx_mag_vec(&ha);
+      if (d < 1e-4f || l1 < 1e-4f || l2 < 1e-4f)
+         continue;
+      mxs_vector nrm;
+      mx_scale_vec(&nrm, &ha, 1.0f / d);
+      if (d > l1 + l2 - 1e-3f)
+         d = l1 + l2 - 1e-3f;
+      // (the knee forward: the facing, square to hip-ankle)
+      mxs_vector pole;
+      mx_scale_vec(&pole, &nrm, -mx_dot_vec(&fwd, &nrm));
+      mx_addeq_vec(&pole, &fwd);
+      if (mx_norm_vec(&pole, &pole) < 1e-4f)
+         continue;
+      const float along = (l1 * l1 - l2 * l2 + d * d) / (2.0f * d);
+      const float out = sqrtf(l1 * l1 - along * along > 0 ? l1 * l1 - along * along : 0);
+      mxs_vector K2 = H;
+      mx_scale_addeq_vec(&K2, &nrm, along);
+      mx_scale_addeq_vec(&K2, &pole, out);
+      mxs_vector thigh, shin;
+      mx_sub_vec(&thigh, &K2, &H);
+      mx_sub_vec(&shin, &A, &K2);
+      mxs_matrix r1, r2;
+      BodyRotBetween(&r1, &thighWas, &thigh);
+      BodyRotBetween(&r2, &shinWas, &shin);
+      mx_mul_mat(&t, &r1, &O[hip[s]]);
+      O[hip[s]] = t;
+      mx_mul_mat(&t, &r2, &O[knee[s]]);
+      O[knee[s]] = t;
+      J[knee[s]] = K2;
+   }
+
+   // orientations relative to their parents', for those changed
+   const int changed[] = { abd, hip[0], hip[1], knee[0], knee[1], ankle[0], ankle[1] };
+   for (int i = 0; i < (int)(sizeof(changed) / sizeof(changed[0])); ++i)
+   {
+      const int j = changed[i], p = parents[j];
+      if (p < 0 || p >= n || p == j)
+         continue;
+      mx_tmul_mat(&t, &O[p], &O[j]);
+      quat_from_matrix(&rel[j], &t);
+   }
 }
 static BOOL g_BodyShotFlagged = FALSE;   // this shot's loosing flag reached
 static int g_BodyShotLog = 0;
@@ -751,6 +904,7 @@ static void PlayerBodyDestroy()
    if (g_BodyObj != OBJ_NULL && ObjectExists(g_BodyObj))
    {
       RemoveMotionFlagListener(g_BodyObj, MF_FIRE_RELEASE);
+      CreatureSetPoseHook(OBJ_NULL, NULL);
       DestroyObject(g_BodyObj);
    }
    g_BodyObj = OBJ_NULL;
@@ -836,6 +990,7 @@ static BOOL PlayerBodyMake(const char *model)
    g_pBodyMCoord->SetMotor(pMotor);
    g_BodyState = -1;
    AddMotionFlagListener(obj, MF_FIRE_RELEASE, BodyFireRelease);
+   CreatureSetPoseHook(obj, BodyPoseHook);
    strncpy(g_BodyModel, model, sizeof(g_BodyModel) - 1);
    g_BodyModel[sizeof(g_BodyModel) - 1] = 0;
    mprintf("Garrett's shadow: his body double is a \"%s\" (object %d)\n", model, obj);
@@ -1122,7 +1277,7 @@ static void PlayerBodyUpdate(ulong dt)
    const int arm = armed ? PlayerBodyArmAction(g_BodyWeapon, &swing) : kBodyArm_None;
    // (the bow held drawn: let go -- loosed, relaxed, put away -- the shot
    // goes on from where it stopped)
-   g_BodyAiming = arm == kBodyArm_Aim && !crouched && !inAir;
+   g_BodyAiming = arm == kBodyArm_Aim && !inAir;
    if (g_BodyHeld && !g_BodyAiming)
    {
       CreatureUnFreeze(g_BodyObj);
@@ -1139,19 +1294,24 @@ static void PlayerBodyUpdate(ulong dt)
       if (BodyMotionAt(CreatureGetMotorInterface(g_BodyObj), &frac, &name) && frac >= 0.5f)
          BodyHold("halfway", frac, name);
    }
+   // (crouched: as standing, walking, posed lower -- BodyPoseHook)
+   {
+      const float to = crouched && !inAir ? 1.0f : 0.0f, most = dt * 0.005f;   // (0.2 s)
+      g_BodyCrouch += (to - g_BodyCrouch) > most ? most : (to - g_BodyCrouch) < -most ? -most : (to - g_BodyCrouch);
+   }
    int state;
    const BOOL backing = ahead > 0x6000 || ahead < -0x6000;
    if (inAir)
       state = 0;   // (no jump of the schemas': standing, carried up)
    else if (speed < 1.0f)
-      state = crouched ? 4 : 0;
+      state = 0;
    else if (backing)
-      state = crouched ? 5 : 3;
+      state = 3;
    else
-      state = crouched ? 5 : speed > 11.0f ? 2 : 1;
+      state = speed > 11.0f && !crouched ? 2 : 1;
    char act[96] = "";
    BOOL oneShot = FALSE, stepping = FALSE;
-   if (!crouched && state != 2)
+   if (state != 2)
    {
       const char *item = g_BodyWeapon == 2 ? "ItemBow" : "ItemSword";
       switch (arm)
@@ -1208,7 +1368,7 @@ static void PlayerBodyUpdate(ulong dt)
    // Crouching, in the air: no schema has either for a humanoid -- a pose
    // held: a guard's reach down to the floor stopped at its lowest, a
    // stride of the run stopped in mid-air
-   int pose = inAir ? 2 : crouched ? 1 : 0;
+   int pose = inAir ? 2 : 0;
    static int s_pose = 0, s_poseFor = 0, s_from = -1;
    BOOL poseEnded = FALSE;
    if (pose != s_pose)
