@@ -248,7 +248,7 @@ const char kSceneFragmentShader[] =
    " vec4 color=(linearColor/weight)*texel;\n"
    " if(useTexture1>0.5){vec4 light=texture(texture1,uv1);"
       "light.rgb+=minLight*(vec3(1.0)-light.rgb);color*=light;}\n"
-   " if(alphaTest>0.5&&color.a<0.5)discard;\n"
+   " if(alphaTest>0.5&&texel.a<0.5)discard;\n"
    " if(fogEnabled>0.5)color.rgb=mix(fogColor,color.rgb,"
       "clamp(linearFog/weight,0.0,1.0));\n"
    " fragmentColor=color;\n"

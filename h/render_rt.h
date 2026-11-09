@@ -77,6 +77,9 @@ int RenderRTGameObjectPose(uint32_t obj, float pose[6]);
 // Implemented by the game, called before RenderRTSceneEnd: draws the objects
 // near the camera the view did not (RenderRTObjectWanted decides which).
 void RenderRTGameDrawExtraObjects(void);
+// Garrett's own model, drawn each frame for the ray tracer (the setting):
+// unseen by the camera, but casting his shadow and seen in reflections.
+int RenderRTPlayerBodyWanted(uint32_t obj);
 // Implemented by the game: the object's name, for the inspector.
 void RenderRTGameObjectName(uint32_t obj, char *buf, int size);
 // Implemented by the game: a particle group's on/off (a flame doused): 1 on,

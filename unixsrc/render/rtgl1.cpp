@@ -164,6 +164,7 @@ struct Settings {
    bool wallOffset = true;    // flat things flush on walls moved off them a little (no speckle)
    float heatHaze = 1.0f;     // the air over torches and fires shimmers (0 off)
    float smoke = 1.0f;        // smoke and steam particles as volumetric smoke, at this density (0: flat sprites)
+   int playerBody = 1;        // Garrett's own model: his shadow, and him in mirrors and water (unseen by the camera)
    float lightSoft = 1.0f;    // a strong lamp's light is a bigger source: no white spot on the wall next to it (0 off)  // a torch's body casts shadows (only its cup lets the flame's light out)
    bool steadyFaces = true;   // models' faces seen or shadow-only by a fixed rule, not by the view
    bool lightFix = true;      // lights moved out of the walls they sit in
@@ -269,6 +270,7 @@ void load_settings()
       else if (k == "underwater_brighter") g_cfg.underwaterLift = std::clamp(value, 0.0f, 3.0f);
       else if (k == "heat_haze") g_cfg.heatHaze = std::clamp(value, 0.0f, 3.0f);
       else if (k == "volumetric_smoke") g_cfg.smoke = std::clamp(value, 0.0f, 4.0f);
+      else if (k == "player_body") g_cfg.playerBody = std::clamp(int(value), 0, 1);
       else if (k == "light_soft") g_cfg.lightSoft = std::clamp(value, 0.0f, 4.0f);
       else if (k == "light_fix") g_cfg.lightFix = value != 0;
       else if (k == "fixtures_pass") g_cfg.fixturesPass = value != 0;
@@ -331,6 +333,7 @@ void save_settings()
            int(g_cfg.moonShafts), g_cfg.shafts, g_cfg.moon, g_cfg.moonAzimuth, g_cfg.moonHeight, int(g_cfg.mfxDenoise));
    fprintf(f, "gem_ease_s = %.2f\n", g_cfg.gemEase);
    fprintf(f, "volumetric_smoke = %.2f\n", g_cfg.smoke);
+   fprintf(f, "player_body = %d\n", g_cfg.playerBody);
    fclose(f);
 }
 
@@ -1480,12 +1483,20 @@ RgTransform identity_transform()
 
 double g_uploadLibrarySecs = 0;   // time inside rgUploadMeshPrimitive (the "capture parts" line)
 
+// Garrett's own model (RenderRTPlayerBodyWanted): the object, and whether
+// what is being given now is it -- unseen by the camera (it is inside it),
+// but casting his shadow and seen in mirrors, glass and water
+uint32_t g_viewerObj = 0;
+bool g_uploadViewer = false;
+
 bool upload(uint64_t id, const RgMeshPrimitiveInfo &prim, bool firstPerson = false)
 {
    auto mesh = RgMeshInfo{
       .sType = RG_STRUCTURE_TYPE_MESH_INFO,
       .pNext = nullptr,
-      .flags = firstPerson ? RgMeshInfoFlags(RG_MESH_FIRST_PERSON) : 0u,
+      .flags = firstPerson      ? RgMeshInfoFlags(RG_MESH_FIRST_PERSON)
+               : g_uploadViewer ? RgMeshInfoFlags(RG_MESH_FIRST_PERSON_VIEWER)
+                                : 0u,
       .uniqueObjectID = id,
       .pMeshName = nullptr,
       .transform = identity_transform(),
@@ -2184,7 +2195,12 @@ void upload_captured(uint64_t id, const CapturedPrim &p, bool passLight = false,
    // looks lit, but gives the bounce light only a little of it -- the light
    // it stands for is traced already, and a small bright emitter that only
    // random bounce rays find is a splotch on every wall around it.
-   const bool opaque = !(p.flags & (RG_MESH_PRIMITIVE_TRANSLUCENT | RG_MESH_PRIMITIVE_SHADOW_ONLY)) && !p.sprite;
+   // (Garrett's own body: the camera is inside it, every face of it turned
+   // away and taken as shadow-only -- it is all there is of him, for the
+   // mirrors too)
+   const RgMeshPrimitiveFlags own =
+      g_uploadViewer ? p.flags & ~RgMeshPrimitiveFlags(RG_MESH_PRIMITIVE_SHADOW_ONLY) : p.flags;
+   const bool opaque = !(own & (RG_MESH_PRIMITIVE_TRANSLUCENT | RG_MESH_PRIMITIVE_SHADOW_ONLY)) && !p.sprite;
    const float ambient = opaque ? ambient_emissive() : 0.0f;
    // the object the player can pick up or use, lit up as the game lights it
    // (Dark adds its highlight to the model's lighting, which the path tracer
@@ -2196,7 +2212,7 @@ void upload_captured(uint64_t id, const CapturedPrim &p, bool passLight = false,
    auto prim = RgMeshPrimitiveInfo{
       .sType = RG_STRUCTURE_TYPE_MESH_PRIMITIVE_INFO,
       .pNext = nullptr,
-      .flags = p.flags | shading | glowFlags |
+      .flags = own | shading | glowFlags |
                (passLight ? RgMeshPrimitiveFlags(RG_MESH_PRIMITIVE_NO_SHADOW) : 0u) |
                (unchanged ? kRtPrimUnchanged : 0u),
       .primitiveIndexInMesh = 0,
@@ -2879,6 +2895,7 @@ void upload_objects()
                c.split.push_back(std::move(p));
             c.splitValid = true;
          }
+         g_uploadViewer = obj == g_viewerObj && g_viewerObj != 0;
          const std::vector<uint64_t> ids = object_prim_ids(obj, c.split);
          c.glowGiven = glowScale;
          c.highlightGiven = g_uploadHighlight;
@@ -2895,6 +2912,7 @@ void upload_objects()
          c.glowGiven = glowScale;
          c.highlightGiven = g_uploadHighlight;
          const bool same = !wasFresh && !c.splitGiven && c.passGiven == c.passLight;
+         g_uploadViewer = obj == g_viewerObj && g_viewerObj != 0;
          for (size_t i = 0; i < c.prims.size(); ++i)
             upload_captured(ids[i], c.prims[i], c.passLight, same, glowScale,
                             i < lampGlow.size() ? lampGlow[i] : 0.0f);
@@ -2902,6 +2920,7 @@ void upload_objects()
          c.splitGiven = false;
       }
       g_uploadHighlight = 0.0f;
+      g_uploadViewer = false;
       ++it;
    }
 }
@@ -4040,7 +4059,7 @@ const char *kUpscaleNames[] = {"Off",
                                "MetalFX Custom"};
 
 enum UiRow {
-   kRowUpscale, kRowScale, kRowOutput, kRowDynres, kRowBounces, kRowReach, kRowLights, kRowLightFade, kRowCandidates, kRowLightCull, kRowResponse, kRowFlicker, kRowVolumetric, kRowShafts, kRowFog, kRowSmoke, kRowBloom, kRowVsync, kRowFrameCap,
+   kRowUpscale, kRowScale, kRowOutput, kRowDynres, kRowBounces, kRowReach, kRowLights, kRowLightFade, kRowCandidates, kRowLightCull, kRowResponse, kRowFlicker, kRowVolumetric, kRowShafts, kRowFog, kRowSmoke, kRowPlayerBody, kRowBloom, kRowVsync, kRowFrameCap,
    kRowFps, kRowDetection, kRowGemScale, kRowGemMatch, kRowGemEase, kRowLight, kRowExposure, kRowDarkAdapt, kRowAmbient, kRowAmbientFollow, kRowShadowCool, kRowSkySeen, kRowSky, kRowMoon, kRowMoonDir, kRowMoonHeight, kRowSun, kRowLightSize, kRowRough, kRowSmooth, kRowSteady, kRowFixtures, kRowFixtureLight, kRowSmallLamps, kRowLightFix, kRowGlow, kRowFlameGlow, kRowMaterials, kRowBump, kRowCrevice, kRowTexDetail, kRowParallax, kRowPolish, kRowWater, kRowUnderwater, kRowTracedSound, kRowHrtf,
    kRowDebug, kRowFreeze, kRowBackFaces, kRowReuse, kRowBlink, kRowPerf, kRowInspect, kRowSkipMission, kRowReset, kRowCount
 };
@@ -4048,7 +4067,7 @@ enum UiRow {
 const char *kRowLabels[kRowCount] = {
    "Upscaler", "Render resolution", "Output resolution", "Dynamic resolution", "Bounce light", "Light reach", "Lights traced",
    "Lights coming into range", "Lights tried per pixel", "Lights behind walls", "Light changes", "Light flicker",
-   "God rays (volumetric)", "  God ray strength", "Mission fog", "Smoke and steam", "Bloom", "VSync", "Frame rate limit", "FPS counter", "Light gem and guards", "  Light gem brightness", "  Light gem falloff", "  Light gem response", "Light brightness", "Darkest exposure", "  Eyes adjust to the dark", "Ambient light", "  Follows the game's light", "  Shadow colour", "Sky brightness (as seen)", "Sky light (on the level)", "Moonlight", "  Moon direction", "  Moon height", "Sunlight (Thief 2 missions)",
+   "God rays (volumetric)", "  God ray strength", "Mission fog", "Smoke and steam", "Garrett's shadow and reflection", "Bloom", "VSync", "Frame rate limit", "FPS counter", "Light gem and guards", "  Light gem brightness", "  Light gem falloff", "  Light gem response", "Light brightness", "Darkest exposure", "  Eyes adjust to the dark", "Ambient light", "  Follows the game's light", "  Shadow colour", "Sky brightness (as seen)", "Sky light (on the level)", "Moonlight", "  Moon direction", "  Moon height", "Sunlight (Thief 2 missions)",
    "Light size (soft shadows)", "Surface roughness", "Model shading", "Model faces", "Torches and lamps", "Lamp and torch light", "Lamp reach", "Lights in walls", "Lamp glow", "Flame glow", "Materials", "Bumps", "Crevices", "Texture detail", "Parallax depth", "Polished reflections", "Water", "  Under water: brighter", "Traced sound (Steam Audio)", "  Headphone 3D sound (HRTF)",
    "Debug view", "Freeze scene (test)", "Back faces (test)", "Light sampling (test)", "Blink nearest light (test)", "Performance log", "Inspect centre of view", "Skip to next mission (test)", "Reset to defaults",
 };
@@ -4127,6 +4146,8 @@ std::string row_value(int row)
       }
       snprintf(buf, sizeof(buf), "%.2fx (the mission's sun, brightness %.0f)", g_cfg.sun, g_sun.bright);
       return buf;
+   case kRowPlayerBody:
+      return g_cfg.playerBody ? "On" : "Off (as the game)";
    case kRowSmoke:
       if (g_cfg.smoke <= 0.0f) return "Flat sprites (as the game)";
       snprintf(buf, sizeof(buf), "Volumetric, %d%% density", int(g_cfg.smoke * 100.0f + 0.5f));
@@ -4369,6 +4390,7 @@ void change_row(int row, int dir)
                              : (g_cfg.sun <= 0.25f && dir < 0 ? 0.0f : step_mul(g_cfg.sun, dir, 0.25f, 4.0f));
       break;
    case kRowFog: g_cfg.fog = (g_cfg.fog + dir + 4) % 4; break;
+   case kRowPlayerBody: g_cfg.playerBody = !g_cfg.playerBody; break;
    case kRowSmoke: {
       static const float steps[] = {0.0f, 0.5f, 0.75f, 1.0f, 1.5f, 2.0f, 3.0f};
       int i = 0;
@@ -6242,7 +6264,8 @@ bool segment_blocked(const float a[3], const float b[3])
    }
    for (const auto &e : g_objects) {
       const CachedObject &c = e.second;
-      if (c.givenFrame + 1 < g_frameNumber || c.passLight)
+      // (not Garrett's own body: it would shade his own light gem)
+      if (c.givenFrame + 1 < g_frameNumber || c.passLight || (e.first == g_viewerObj && g_viewerObj))
          continue;
       bool overlap = true;
       for (int k = 0; k < 3 && overlap; ++k)
@@ -7076,6 +7099,21 @@ void RenderRTObjectBegin(uint32_t obj, int flags)
    g_currentCapture.clear();
    g_currentPuffed = false;
    g_RenderRTCaptureCalls = g_RenderRTCaptureDropped = 0;
+}
+
+int RenderRTPlayerBodyWanted(uint32_t obj)
+{
+   if (!g_inScene)
+      return 0;
+   if (!g_cfg.playerBody) {
+      // turned off: what was kept of it goes
+      if (g_viewerObj)
+         g_objects.erase(g_viewerObj);
+      g_viewerObj = 0;
+      return 0;
+   }
+   g_viewerObj = obj;
+   return 1;
 }
 
 int RenderRTObjectWanted(uint32_t obj)
