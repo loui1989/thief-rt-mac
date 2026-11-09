@@ -43,6 +43,7 @@
 #include <drkwbow.h>   // IsBowEquipped
 #include <drkwswd.h>   // WeaponIsSword
 #include <weapon.h>    // GetWeaponObjID
+#include <crjoint.h>   // GetCreatureJointPos
 #include <string.h>
 #include <mprintf.h>
 #include <math.h>
@@ -634,6 +635,8 @@ static const char *const g_BodyModels[] =
    "garrett", "thiefsw", "thief", "thiefbow", "thiefsw2",
 };
 
+static void PlayerBodyItemDestroy();   // (below)
+
 static void PlayerBodyDestroy()
 {
    if (g_pBodyMCoord)
@@ -645,6 +648,7 @@ static void PlayerBodyDestroy()
    if (g_BodyObj != OBJ_NULL && ObjectExists(g_BodyObj))
       DestroyObject(g_BodyObj);
    g_BodyObj = OBJ_NULL;
+   PlayerBodyItemDestroy();
    g_BodyState = -1;
    g_BodyTags[0] = 0;
    g_BodyPosed = 0;
@@ -658,13 +662,15 @@ static BOOL BodyModelLoads(const char *name)
    return idx != MIDX_INVALID && objmodelGetModelType(idx) == OM_TYPE_MESH;
 }
 
-// What he holds: 0 nothing (or the blackjack), 1 his sword, 2 his bow
+// What he holds: 0 nothing, 1 his sword, 2 his bow, 3 his blackjack
 static int PlayerBodyWeapon(ObjID player)
 {
    if (IsBowEquipped())
       return 2;
    const ObjID w = GetWeaponObjID(player);
-   return (w != OBJ_NULL && WeaponIsSword(player, w)) ? 1 : 0;
+   if (w == OBJ_NULL)
+      return 0;
+   return WeaponIsSword(player, w) ? 1 : WeaponIsBlackjack(player, w) ? 3 : 0;
 }
 
 // The model for him holding that: the first of g_BodyModels the mission
@@ -731,6 +737,77 @@ static BOOL PlayerBodyMake(const char *model)
 BOOL PlayerBodyShowsWeapon()
 {
    return g_BodyShowsWeapon;
+}
+
+// What he holds that no thief model has -- his blackjack: the game's own
+// model of it (the one his blackjack has, else Thief's "blacjack"), made
+// as the double is (transient, in no cell) and put in its right hand as it
+// is drawn (PlayerBodyHeldItem)
+static ObjID g_BodyItem = OBJ_NULL;
+
+static void PlayerBodyItemDestroy()
+{
+   if (g_BodyItem != OBJ_NULL && ObjectExists(g_BodyItem))
+      DestroyObject(g_BodyItem);
+   g_BodyItem = OBJ_NULL;
+}
+
+static void PlayerBodyItemMake(ObjID player)
+{
+   PlayerBodyItemDestroy();
+   char model[64] = "blacjack";
+   {
+      char name[64];
+      const ObjID w = GetWeaponObjID(player);
+      if (w != OBJ_NULL && ObjGetModelName(w, name) && objmodelLoadModel(name) != MIDX_INVALID)
+         strcpy(model, name);
+   }
+   if (objmodelLoadModel(model) == MIDX_INVALID)
+   {
+      mprintf("Garrett's shadow: no model for his blackjack (\"%s\")\n", model);
+      return;
+   }
+   IObjectSystem *objsys = AppGetObj(IObjectSystem);
+   ObjID obj = objsys->BeginCreate(ROOT_ARCHETYPE, kObjectConcrete);
+   mxs_vector pos;
+   mxs_angvec facing;
+   mx_zero_vec(&pos);
+   facing.tx = facing.ty = facing.tz = 0;
+   ObjPosUpdate(obj, &pos, &facing);
+   objsys->NameObject(obj, "PlyrBodyItem");
+   objsys->SetObjTransience(obj, TRUE);
+   objsys->EndCreate(obj);
+   SafeRelease(objsys);
+   ObjSetModelName(obj, model);
+   ObjSetHasRefs(obj, FALSE);    // in no cell: the view never draws it
+   g_BodyItem = obj;
+   mprintf("Garrett's shadow: his blackjack is a \"%s\" (object %d)\n", model, obj);
+}
+
+ObjID PlayerBodyHeldItem()
+{
+   if (g_BodyItem == OBJ_NULL || !ObjectExists(g_BodyItem) || g_BodyObj == OBJ_NULL ||
+       !CreatureExists(g_BodyObj))
+      return OBJ_NULL;
+   // In the right wrist's frame a thief model's sword runs out along -y,
+   // its hilt in the fist 0.45 ft out; the blackjack model lies along z,
+   // its handle at -z (its end at -0.98), its head at +z. So: the model's
+   // z along the hand's -y, its grip (0.75 ft from its middle) in the fist.
+   const mxs_vector &wrist = GetCreatureJointPos(g_BodyObj, kCJ_RWrist);
+   const mxs_matrix &orient = GetCreatureJointOrient(g_BodyObj, kCJ_RWrist);
+   mxs_matrix r, m;
+   mx_mk_vec(&r.vec[0], 1, 0, 0);
+   mx_mk_vec(&r.vec[1], 0, 0, 1);
+   mx_mk_vec(&r.vec[2], 0, -1, 0);
+   mx_mul_mat(&m, &orient, &r);
+   mxs_vector rel, at;
+   mx_mk_vec(&rel, 0.04f, -1.20f, -0.04f);
+   mx_mat_mul_vec(&at, &orient, &rel);
+   mx_addeq_vec(&at, &wrist);
+   mxs_angvec fac;
+   mx_mat2ang(&fac, &m);
+   ObjPosUpdate(g_BodyItem, &at, &fac);
+   return g_BodyItem;
 }
 
 // What his hands do, from the first-person arm's skill (this cerebellum's):
@@ -859,6 +936,10 @@ static void PlayerBodyUpdate(ulong dt)
          g_BodyWeapon = weapon;
          const BOOL bow = strcmp(g_BodyModel, "thiefbow") == 0;
          g_BodyShowsWeapon = (weapon == 2 && bow) || (weapon == 1 && !bow);
+         if (weapon == 3)
+            PlayerBodyItemMake(player);
+         else
+            PlayerBodyItemDestroy();
       }
    }
 
@@ -891,23 +972,21 @@ static void PlayerBodyUpdate(ulong dt)
    // forward, back and to the side facing ahead (the schemas' sword
    // fighting moves), swinging, blocking; with his bow, an archer's
    // shot as he draws it; drawing either, a guard's readying of it. Else
-   // (and running, crouching): walking. Facing where he looks; walking
-   // sideways turned part of the way, a third of a right angle at most
-   // (a humanoid has no side step to walk with) -- turned all the way it
-   // looked like walking off to the side. Backing away: walking backwards.
+   // (and running, crouching): walking. Facing where he looks, whichever
+   // way he goes: sideways, walking on (a humanoid has no side step but
+   // the sword fighter's) -- turned toward the way he went, it swung round
+   // as he stopped or changed sides. Backing away: walking backwards.
    int swing = 0;
-   const int arm = g_BodyShowsWeapon ? PlayerBodyArmAction(g_BodyWeapon, &swing) : kBodyArm_None;
+   const BOOL armed = g_BodyShowsWeapon || (g_BodyWeapon == 3 && g_BodyItem != OBJ_NULL);
+   const int arm = armed ? PlayerBodyArmAction(g_BodyWeapon, &swing) : kBodyArm_None;
    int state;
-   short turn = 0;
+   const BOOL backing = ahead > 0x6000 || ahead < -0x6000;
    if (speed < 1.0f)
       state = crouched ? 4 : 0;
-   else if (ahead > 0x6000 || ahead < -0x6000)
+   else if (backing)
       state = crouched ? 5 : 3;
    else
-   {
       state = crouched ? 5 : speed > 11.0f ? 2 : 1;
-      turn = ahead > 0x1555 ? 0x1555 : ahead < -0x1555 ? -0x1555 : ahead;
-   }
    char act[96] = "";
    BOOL oneShot = FALSE, stepping = FALSE;
    if (!crouched && state != 2)
@@ -916,12 +995,15 @@ static void PlayerBodyUpdate(ulong dt)
       switch (arm)
       {
          case kBodyArm_Swing:
-            // (short: at the middle; medium: high; long: low)
-            sprintf(act, "MeleeCombat 0, Attack 0, Direction %d", swing == 1 ? 5 : swing == 2 ? 6 : 0);
+            // (short: at the middle; medium: high; long: low; the
+            // blackjack: high, over his head)
+            sprintf(act, "MeleeCombat 0, Attack 0, Direction %d",
+                    g_BodyWeapon == 3 || swing == 1 ? 5 : swing == 2 ? 6 : 0);
             oneShot = TRUE;
             break;
          case kBodyArm_Block:
-            strcpy(act, "MeleeCombat 0, Block 0");
+            if (g_BodyWeapon == 1)
+               strcpy(act, "MeleeCombat 0, Block 0");
             break;
          case kBodyArm_Readying:
             sprintf(act, "ReadyItem 0, %s 0", item);
@@ -932,6 +1014,9 @@ static void PlayerBodyUpdate(ulong dt)
             oneShot = TRUE;
             break;
          case kBodyArm_Ready:
+            // (the blackjack held as he walks: no fighting stance)
+            if (g_BodyWeapon == 3)
+               break;
             if (speed < 1.0f)
                strcpy(act, "MeleeCombat 0, Stand 0");
             else
@@ -956,13 +1041,11 @@ static void PlayerBodyUpdate(ulong dt)
          strcpy(s_done, act);
       if (oneShot && strcmp(act, s_done) == 0)
          act[0] = 0, oneShot = FALSE;
-      if (act[0])
-         turn = 0;
    }
    // turning as a body turns, not at once: up to a turn and a half a second
    static mxs_ang s_facing = 0;
    static BOOL s_facingSet = FALSE;
-   const mxs_ang want = (mxs_ang)(look + turn);
+   const mxs_ang want = look;
    if (!s_facingSet)
       s_facing = want, s_facingSet = TRUE;
    {
@@ -1001,7 +1084,7 @@ static void PlayerBodyUpdate(ulong dt)
 
    // what it is doing: as the AIs' bodies are told (cAIMoveEnactor), with
    // the weapon he holds as an armed AI's persistent tag
-   const char *with = !g_BodyShowsWeapon ? "" : g_BodyWeapon == 1 ? ", WithSword 0" : g_BodyWeapon == 2 ? ", WithBow 0" : "";
+   const char *with = !armed ? "" : g_BodyWeapon == 2 ? ", WithBow 0" : ", WithSword 0";
    char tags[128];
    snprintf(tags, sizeof(tags), "%s%s", act[0] ? act : BodyStateTags(state), with);
    const eMCoordStatus status = g_pBodyMCoord->GetStatus();
@@ -1014,7 +1097,9 @@ static void PlayerBodyUpdate(ulong dt)
       params.mask = kMotParmFlag_Direction | kMotParmFlag_Duration | kMotParmFlag_Facing;
       params.direction.tx = params.direction.ty = 0;
       const BOOL moving = stepping || (!act[0] && (state == 1 || state == 2 || state == 3 || state == 5));
-      params.direction.tz = moving ? going : facingTo;   // (the way he goes)
+      // (the way he goes, stepping or backing away; else ahead -- walking
+      // sideways he walks on facing ahead)
+      params.direction.tz = (stepping || (moving && backing && !act[0])) ? going : facingTo;
       params.facing = fac;
       params.duration = dt;
       if (moving)

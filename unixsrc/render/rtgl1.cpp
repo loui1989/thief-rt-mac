@@ -1491,6 +1491,8 @@ double g_uploadLibrarySecs = 0;   // time inside rgUploadMeshPrimitive (the "cap
 // what is being given now is it -- unseen by the camera (it is inside it),
 // but casting his shadow and seen in mirrors, glass and water
 uint32_t g_viewerObj = 0, g_viewerFrame = 0;
+// and what he holds that the double's model has not (his blackjack)
+uint32_t g_viewerItem = 0, g_viewerItemFrame = 0;
 bool g_uploadViewer = false;
 
 bool upload(uint64_t id, const RgMeshPrimitiveInfo &prim, bool firstPerson = false)
@@ -2901,7 +2903,7 @@ void upload_objects()
                c.split.push_back(std::move(p));
             c.splitValid = true;
          }
-         g_uploadViewer = obj == g_viewerObj && g_viewerObj != 0 && g_cfg.playerBody == 1;
+         g_uploadViewer = obj != 0 && (obj == g_viewerObj || obj == g_viewerItem) && g_cfg.playerBody == 1;
          const std::vector<uint64_t> ids = object_prim_ids(obj, c.split);
          c.glowGiven = glowScale;
          c.highlightGiven = g_uploadHighlight;
@@ -2918,7 +2920,7 @@ void upload_objects()
          c.glowGiven = glowScale;
          c.highlightGiven = g_uploadHighlight;
          const bool same = !wasFresh && !c.splitGiven && c.passGiven == c.passLight;
-         g_uploadViewer = obj == g_viewerObj && g_viewerObj != 0 && g_cfg.playerBody == 1;
+         g_uploadViewer = obj != 0 && (obj == g_viewerObj || obj == g_viewerItem) && g_cfg.playerBody == 1;
          for (size_t i = 0; i < c.prims.size(); ++i)
             upload_captured(ids[i], c.prims[i], c.passLight, same, glowScale,
                             i < lampGlow.size() ? lampGlow[i] : 0.0f);
@@ -6278,7 +6280,7 @@ bool segment_blocked(const float a[3], const float b[3])
    for (const auto &e : g_objects) {
       const CachedObject &c = e.second;
       // (not Garrett's own body: it would shade his own light gem)
-      if (c.givenFrame + 1 < g_frameNumber || c.passLight || (e.first == g_viewerObj && g_viewerObj))
+      if (c.givenFrame + 1 < g_frameNumber || c.passLight || (e.first && (e.first == g_viewerObj || e.first == g_viewerItem)))
          continue;
       bool overlap = true;
       for (int k = 0; k < 3 && overlap; ++k)
@@ -6626,6 +6628,10 @@ void upload_player_body()
    if (g_viewerObj && g_viewerFrame != g_frameNumber) {
       g_objects.erase(g_viewerObj);
       g_viewerObj = 0;
+   }
+   if (g_viewerItem && g_viewerItemFrame != g_frameNumber) {
+      g_objects.erase(g_viewerItem);
+      g_viewerItem = 0;
    }
    if (g_viewerObj || !g_cfg.playerBody || g_underwater)
       return;
@@ -7274,6 +7280,17 @@ int RenderRTPlayerBodyWanted(uint32_t obj)
       g_objects.erase(g_viewerObj);
    g_viewerObj = obj;
    g_viewerFrame = g_frameNumber;
+   return 1;
+}
+
+int RenderRTPlayerBodyItemWanted(uint32_t obj)
+{
+   if (!g_inScene || !g_cfg.playerBody)
+      return 0;
+   if (g_viewerItem && g_viewerItem != obj)
+      g_objects.erase(g_viewerItem);
+   g_viewerItem = obj;
+   g_viewerItemFrame = g_frameNumber;
    return 1;
 }
 

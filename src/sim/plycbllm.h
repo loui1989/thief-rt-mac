@@ -37,6 +37,9 @@ EXTERN ObjID PlayerArm();
 EXTERN ObjID PlayerBodyDouble();
 // whether the double's model holds what he holds (its weapon drawn)
 EXTERN BOOL PlayerBodyShowsWeapon();
+// what the double holds that its model has not (his blackjack), put in its
+// hand: OBJ_NULL when nothing
+EXTERN ObjID PlayerBodyHeldItem();
 
 // schema utility funcs
 //

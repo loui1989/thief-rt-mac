@@ -87,6 +87,8 @@ void RenderRTGameDrawExtraObjects(void);
 // drawn: nonzero to draw it.
 int RenderRTPlayerBodyActive(void);
 int RenderRTPlayerBodyWanted(uint32_t obj);
+// what the double holds that its model has not (his blackjack), drawn as it is
+int RenderRTPlayerBodyItemWanted(uint32_t obj);
 // Implemented by the game: the object's name, for the inspector.
 void RenderRTGameObjectName(uint32_t obj, char *buf, int size);
 // Implemented by the game: a particle group's on/off (a flame doused): 1 on,

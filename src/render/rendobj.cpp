@@ -3224,6 +3224,15 @@ extern "C" void RenderRTGameDrawExtraObjects(void)
          if (filter)
             mm_set_block_render_cback(g_BodyPrevBlock);
       }
+      // and his blackjack, in its hand
+      const ObjID item = PlayerBodyHeldItem();
+      if (item != OBJ_NULL && RenderRTPlayerBodyItemWanted((uint32_t)item))
+      {
+         int iidx;
+         model_funcs *pimf = rendobj_get_model_funcs(item, &iidx);
+         if (pimf && pimf->render)
+            rendobj_core_render_object(item, OBJ_NO_SPLIT, iidx, NULL, pimf->render, pimf);
+      }
    }
 }
 
