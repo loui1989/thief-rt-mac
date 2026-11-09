@@ -674,6 +674,42 @@ static tCreaturePoseHook g_CrPoseHook = NULL;
 // reshaping went on top of the last)
 static quat g_CrPoseRelWas[65];
 static BOOL g_CrPoseRelSaved = FALSE;
+// (its joints as the hook left them: one reshaped already is not again)
+static mxs_vector g_CrPoseOut[64];
+static quat g_CrPoseRelOut[65];
+static int g_CrPoseOutN = 0;
+
+static void CrPoseApply(ObjID obj, multiped *mp, const int *parents)
+{
+   memcpy(g_CrPoseRelWas, mp->rel_orients, sizeof(quat) * (mp->num_joints + 1));
+   g_CrPoseRelSaved = TRUE;
+   g_CrPoseHook(obj, mp->num_joints, mp->joints, mp->orients, mp->rel_orients, parents);
+   memcpy(g_CrPoseOut, mp->joints, sizeof(mxs_vector) * mp->num_joints);
+   memcpy(g_CrPoseRelOut, mp->rel_orients, sizeof(quat) * (mp->num_joints + 1));
+   g_CrPoseOutN = mp->num_joints;
+}
+
+void CreaturePoseReapply(ObjID obj)
+{
+   if (obj != g_CrPoseHookObj || !g_CrPoseHook)
+      return;
+   cCreature *pCreature = CreatureFromObj(obj);
+   multiped *mp = pCreature ? (multiped *)pCreature->GetMultiped() : NULL;
+   if (!mp || !mp->joints || !mp->orients || !mp->rel_orients || mp->num_joints >= 64)
+      return;
+   if (g_CrPoseOutN == mp->num_joints && memcmp(g_CrPoseOut, mp->joints, sizeof(mxs_vector) * mp->num_joints) == 0)
+   {
+      // (its joints as reshaped: its relative orientations, put back for
+      // the new maneuver, as reshaped too -- the mesh's stretchy parts)
+      if (!g_CrPoseRelSaved)
+      {
+         memcpy(mp->rel_orients, g_CrPoseRelOut, sizeof(quat) * (mp->num_joints + 1));
+         g_CrPoseRelSaved = TRUE;
+      }
+      return;
+   }
+   CrPoseApply(obj, mp, pCreature->GetCreatureDesc()->pJointParents);
+}
 
 void CreaturePoseUndo(ObjID obj)
 {
@@ -691,6 +727,7 @@ void CreatureSetPoseHook(ObjID obj, tCreaturePoseHook hook)
    g_CrPoseHookObj = obj;
    g_CrPoseHook = hook;
    g_CrPoseRelSaved = FALSE;
+   g_CrPoseOutN = 0;
 }
 
 // A creature whose height whoever moves it sets, its motion's or not
@@ -4344,12 +4381,7 @@ void cCreature::Update(const ulong timeDelta)
    SunkCheck();
 
    if (moved && poseHooked)
-   {
-      memcpy(g_CrPoseRelWas, m_sMultiped.rel_orients, sizeof(quat) * (m_nJoints + 1));
-      g_CrPoseRelSaved = TRUE;
-      g_CrPoseHook(m_ObjID, m_nJoints, m_pJoints, m_pOrients, m_sMultiped.rel_orients,
-                   g_pCreatureDescPtr[m_CreatureType]->pJointParents);
-   }
+      CrPoseApply(m_ObjID, &m_sMultiped, g_pCreatureDescPtr[m_CreatureType]->pJointParents);
 
    if(moved)
    {

@@ -1597,6 +1597,7 @@ static void PlayerBodyUpdate(ulong dt)
          g_pBodyMCoord->SetCurrentManeuver(pPlan->PopFirstManeuver());
          delete pPlan;
       }
+      CreaturePoseReapply(g_BodyObj);
       static int s_logged = 0;
       if (strcmp(tags, g_BodyTags) != 0 && s_logged < 2000)
       {

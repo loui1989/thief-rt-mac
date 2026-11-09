@@ -55,6 +55,10 @@ EXTERN void CreatureSetPoseHook(ObjID obj, tCreaturePoseHook hook);
 // its motion's own relative orientations back (before a new maneuver: the
 // motion library blends from them -- reshaped, it reshaped them twice)
 EXTERN void CreaturePoseUndo(ObjID obj);
+// reshaped again, if its joints were set since without the hook (a new
+// maneuver starting poses it at once, outside its update: drawn so, it
+// stood up for a frame each time its motion looped)
+EXTERN void CreaturePoseReapply(ObjID obj);
 
 EXTERN BOOL CreatureGetRenderHandle(const ObjID objID, long *pHandle);
 

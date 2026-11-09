@@ -3239,8 +3239,10 @@ void upload_world()
          flags |= RG_MESH_PRIMITIVE_POLISHED;
       if (g_cfg.testMirror && g_mirrorTextures.count(g.textureId) &&
           !(flags & (RG_MESH_PRIMITIVE_WATER | RG_MESH_PRIMITIVE_TRANSLUCENT | RG_MESH_PRIMITIVE_ALPHA_TESTED))) {
-         flags &= ~RgMeshPrimitiveFlags(RG_MESH_PRIMITIVE_POLISHED);
-         flags |= RG_MESH_PRIMITIVE_MIRROR;
+         // (both: rt/bin/shaders' reflection pass takes that pair as a
+         // mirror reflecting 95% -- MIRROR alone is glossy, POLISHED alone
+         // as smooth as its texture's material)
+         flags |= RG_MESH_PRIMITIVE_MIRROR | RG_MESH_PRIMITIVE_POLISHED;
       }
       auto prim = RgMeshPrimitiveInfo{
          .sType = RG_STRUCTURE_TYPE_MESH_PRIMITIVE_INFO,
