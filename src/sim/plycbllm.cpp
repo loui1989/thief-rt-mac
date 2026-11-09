@@ -675,6 +675,10 @@ static BOOL BodyLegTorso(float *leg, float *torso)
 // moves): no humanoid schema crouches. How far: 0 standing, 1 crouched,
 // eased in and out (PlayerBodyUpdate).
 static float g_BodyCrouch = 0.0f;
+// (this update's, for the log of a pop as it is drawn)
+static float g_BodyFootZ = 0.0f;
+static BOOL g_BodyInAir = FALSE, g_BodyOnGround = TRUE;
+static int g_BodyMode = 0;
 
 // the rotation by an angle (its sine, cosine) about a unit axis
 static void BodyAxisAngle(mxs_matrix *r, const mxs_vector *k, float s, float c)
@@ -1267,6 +1271,9 @@ static void PlayerBodyUpdate(ulong dt)
    static float s_footOver = 0.5f;
    static int s_sinceAir = 1000;
    const BOOL inAir = !PhysObjOnGround(player) || GetPlayerMode() == kPM_Jump;
+   g_BodyInAir = inAir;
+   g_BodyOnGround = PhysObjOnGround(player);
+   g_BodyMode = GetPlayerMode();
    if (inAir)
    {
       foot.z -= s_footOver;
@@ -1532,6 +1539,7 @@ static void PlayerBodyUpdate(ulong dt)
       s_heldButt = bp->loc.vec.z - foot.z;
       s_heldButtSet = TRUE;
    }
+   g_BodyFootZ = foot.z;
    mxs_vector at = foot;
    at.z += held ? s_heldButt : g_BodyButt;
    mxs_angvec fac;
@@ -1696,26 +1704,42 @@ static void PlayerBodyReset()
    g_BodyGaveUp = FALSE;
 }
 
-// (the double about to be drawn: crouched, but standing tall -- logged, with
-// what it is doing, to find what stands it up)
+// (the double about to be drawn: a sudden change in its legs, or in its
+// height over his feet, from one drawing to the next, logged with what it
+// is doing -- to find what stands it up as it creeps; and while crouched,
+// twice a second, how it is)
 void PlayerBodyAboutToDraw()
 {
-   static int s_told = 0, s_appliedWas = 0;
+   static int s_told = 0, s_appliedWas = 0, s_every = 0;
+   static float s_legWas = -1.0f, s_overWas = 0.0f;
    static ulong s_frame = 0;
    ++s_frame;
    const int applied = CreaturePoseApplied();
    float leg, torso;
-   if (s_told < 60 && g_BodyCrouch > 0.95f && !g_BodyHeld && !g_BodyPoseHeld && g_BodyStandLeg > 0.5f &&
-       BodyLegTorso(&leg, &torso) && leg > 0.85f * g_BodyStandLeg)
+   const Position *bp = ObjPosGet(g_BodyObj);
+   if (g_BodyStandLeg > 0.5f && bp && BodyLegTorso(&leg, &torso))
    {
-      ++s_told;
-      float frac = 0;
-      const char *name = "?";
-      BodyMotionAt(CreatureGetMotorInterface(g_BodyObj), &frac, &name);
-      mprintf("PlyrBody: drawn standing while crouched (draw %lu): legs %.0f%% of standing; doing \"%s\" "
-              "(%s at %.0f%%, status %d); reshaped %d times since the last draw\n",
-              s_frame, leg / g_BodyStandLeg * 100.0f, g_BodyTags, name, frac * 100.0f,
-              (int)g_pBodyMCoord->GetStatus(), applied - s_appliedWas);
+      const float over = GetCreatureJointPos(g_BodyObj, kCJ_Butt).z - g_BodyFootZ;
+      const BOOL pop = s_legWas >= 0 && (fabsf(leg - s_legWas) > 0.15f * g_BodyStandLeg || fabsf(over - s_overWas) > 0.3f);
+      const BOOL now = g_BodyCrouch > 0.0f && ++s_every >= 30;
+      if ((pop || now) && s_told < 300)
+      {
+         ++s_told;
+         if (now)
+            s_every = 0;
+         float frac = 0;
+         const char *name = "?";
+         BodyMotionAt(CreatureGetMotorInterface(g_BodyObj), &frac, &name);
+         mprintf("PlyrBody: %s (draw %lu): legs %.0f%% of standing (were %.0f%%), butt %.2f ft over his feet "
+                 "(was %.2f); crouched %.2f; doing \"%s\" (%s at %.0f%%, status %d); reshaped %d times since; "
+                 "mode %d, on the ground %d, in the air %d, held %d/%d\n",
+                 pop ? "POP" : "crouching", s_frame, leg / g_BodyStandLeg * 100.0f, s_legWas / g_BodyStandLeg * 100.0f,
+                 over, s_overWas, g_BodyCrouch, g_BodyTags, name, frac * 100.0f, (int)g_pBodyMCoord->GetStatus(),
+                 applied - s_appliedWas, g_BodyMode, (int)g_BodyOnGround, (int)g_BodyInAir, (int)g_BodyHeld,
+                 (int)g_BodyPoseHeld);
+      }
+      s_legWas = leg;
+      s_overWas = over;
    }
    s_appliedWas = applied;
 }
