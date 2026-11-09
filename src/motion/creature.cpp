@@ -665,6 +665,15 @@ void CreaturePosPropUnlock()
 static BOOL MotHistoryTracing(ObjID obj);   // (the height trace, below)
 
 // @YO OVER HERE
+// A creature whose height whoever moves it sets, its motion's or not
+// (CreatureFreeHeight): Garrett's body double in the air, jumping
+static ObjID g_CrHeightFreeObj = OBJ_NULL;
+
+void CreatureFreeHeight(ObjID obj)
+{
+   g_CrHeightFreeObj = obj;
+}
+
 void LGAPI CrPosPropListener(sPropertyListenMsg* msg, PropListenerData data)
    // Listener for the position property.
    // Updates the creature position, if something other than this class moved it.
@@ -698,7 +707,8 @@ void LGAPI CrPosPropListener(sPropertyListenMsg* msg, PropListenerData data)
    const mxs_vector &own = pCreature->GetMultiped()->global_pos;
    const float dz = to.z - own.z;
    const float dx = to.x - own.x, dy = to.y - own.y;
-   const BOOL heightKept = !pCreature->IsBallistic() && pCreature->IsPlayingMotion() &&
+   const BOOL heightKept = msg->obj != g_CrHeightFreeObj &&
+                           !pCreature->IsBallistic() && pCreature->IsPlayingMotion() &&
                            fabs(dz) > 0.02f && fabs(dz) < 1.5f && dx * dx + dy * dy < 1.0f;
    if (MotHistoryTracing(msg->obj))
       mprintf("height %s moved from outside: %.2f %.2f %.2f -> %.2f %.2f %.2f%s\n", ObjWarnName(msg->obj),

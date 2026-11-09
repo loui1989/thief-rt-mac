@@ -41,6 +41,10 @@ EXTERN BOOL CreatureSelfPropelled(const ObjID objID);
 EXTERN void CreatureFreeze(ObjID objID);
 
 EXTERN void CreatureUnFreeze(ObjID objID);
+// the creature moved (its position set) next takes the height it is given,
+// even mid-motion (a small move up or down otherwise keeps its motion's);
+// OBJ_NULL for none
+EXTERN void CreatureFreeHeight(ObjID objID);
 
 EXTERN BOOL CreatureGetRenderHandle(const ObjID objID, long *pHandle);
 

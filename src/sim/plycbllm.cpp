@@ -45,6 +45,8 @@
 #include <weapon.h>    // GetWeaponObjID
 #include <crjoint.h>   // GetCreatureJointPos
 #include <mvrflags.h>  // MF_FIRE_RELEASE
+#include <objscale.h>  // ObjSetScale
+#include <multiped.h>  // the archer's shot: its frame
 #include <string.h>
 #include <mprintf.h>
 #include <math.h>
@@ -631,14 +633,52 @@ static BOOL g_BodyOneShot = FALSE;  // that, once through (a swing, a shot, read
 // His bow drawn and held: the archer's shot stopped at its loosing (its
 // motion's fire-release flag), the creature frozen there until he lets go
 static BOOL g_BodyAiming = FALSE, g_BodyHeld = FALSE;
+static BOOL g_BodyShotFlagged = FALSE;   // this shot's loosing flag reached
+static int g_BodyShotLog = 0;
 
-static void BodyFireRelease(ObjID obj, IMotor *, cMotionCoordinator *, const int)
+// where the creature is in what it plays: its motion's name, how far
+// through (0 to 1)
+static BOOL BodyMotionAt(IMotor *pMotor, float *frac, const char **name)
 {
-   if (obj == g_BodyObj && g_BodyAiming && !g_BodyHeld)
-   {
-      CreatureFreeze(obj);
-      g_BodyHeld = TRUE;
-   }
+   if (!pMotor)
+      return FALSE;
+   mps_motion_node *n = mp_get_main_motion((multiped *)pMotor->GetMultiped());
+   if (!n)
+      return FALSE;
+   const int num = MP_MOTNUM_FROM_NODE_HANDLE(n->handle);
+   if (num < 0 || num >= mp_num_motions)
+      return FALSE;
+   const float frames = mp_motion_num_frames(num);
+   *frac = frames > 0 ? n->frame / frames : 0.0f;
+   *name = mp_motion_list[num].info.name;
+   return TRUE;
+}
+
+static void BodyHold(const char *why, float frac, const char *name)
+{
+   CreatureFreeze(g_BodyObj);
+   g_BodyHeld = TRUE;
+   if (g_BodyShotLog++ < 100)
+      mprintf("PlyrBody: the bow held drawn (%s, %s at %.0f%%)\n", why, name, frac * 100.0f);
+}
+
+// The archer's shot reaching its loosing: held there while he holds his
+// bow drawn -- unless the flag comes at its very start (some schemas'
+// shots mark it so), where it is held halfway through instead
+static void BodyFireRelease(ObjID obj, IMotor *pMotor, cMotionCoordinator *, const int)
+{
+   if (obj != g_BodyObj)
+      return;
+   float frac = 0;
+   const char *name = "?";
+   BodyMotionAt(pMotor, &frac, &name);
+   if (g_BodyShotLog++ < 100)
+      mprintf("PlyrBody: the archer's shot (%s) looses at %.0f%% of it\n", name, frac * 100.0f);
+   if (frac < 0.25f)
+      return;
+   g_BodyShotFlagged = TRUE;
+   if (g_BodyAiming && !g_BodyHeld)
+      BodyHold("at its loosing", frac, name);
 }
 
 static const char *const g_BodyModels[] =
@@ -762,6 +802,7 @@ BOOL PlayerBodyShowsWeapon()
 // as the double is (transient, in no cell) and put in its right hand as it
 // is drawn (PlayerBodyHeldItem)
 static ObjID g_BodyItem = OBJ_NULL;
+static const float kBodyItemScale = 0.55f;
 
 static void PlayerBodyItemDestroy()
 {
@@ -797,6 +838,13 @@ static void PlayerBodyItemMake(ObjID player)
    objsys->EndCreate(obj);
    SafeRelease(objsys);
    ObjSetModelName(obj, model);
+   {
+      // (Thief's blackjack model is two feet long: in a thief's hand,
+      // half that)
+      mxs_vector scale;
+      mx_mk_vec(&scale, kBodyItemScale, kBodyItemScale, kBodyItemScale);
+      ObjSetScale(obj, &scale);
+   }
    ObjSetHasRefs(obj, FALSE);    // in no cell: the view never draws it
    g_BodyItem = obj;
    mprintf("Garrett's shadow: his blackjack is a \"%s\" (object %d)\n", model, obj);
@@ -812,8 +860,9 @@ ObjID PlayerBodyHeldItem()
    // out; a sword runs on along -y (tipped a little toward +x, the thumb).
    // The blackjack model lies along z, its handle at -z (its end at -0.98),
    // its head at +z. Held upright, as he holds it: across the fist, its
-   // head out at the thumb (+x), its grip (0.7 ft from its middle) in the
-   // fist -- along the forearm it hung from the hand.
+   // head out at the thumb (+x), its grip (0.7 ft from its middle, as
+   // made; scaled, kBodyItemScale of that) in the fist -- along the
+   // forearm it hung from the hand.
    const mxs_vector &wrist = GetCreatureJointPos(g_BodyObj, kCJ_RWrist);
    const mxs_matrix &orient = GetCreatureJointOrient(g_BodyObj, kCJ_RWrist);
    mxs_matrix r, m;
@@ -822,7 +871,7 @@ ObjID PlayerBodyHeldItem()
    mx_mk_vec(&r.vec[2], 1, 0, 0);
    mx_mul_mat(&m, &orient, &r);
    mxs_vector rel, at;
-   mx_mk_vec(&rel, 0.75f, -0.45f, -0.04f);
+   mx_mk_vec(&rel, 0.05f + 0.70f * kBodyItemScale, -0.45f, -0.04f);
    mx_mat_mul_vec(&at, &orient, &rel);
    mx_addeq_vec(&at, &wrist);
    mxs_angvec fac;
@@ -864,7 +913,8 @@ static int PlayerBodyArmAction(int weapon, int *swing)
       // drkwbow_.c: 0 idle, 1 lift, 2 draw, 3 loose, 4 relax, 5 begin, 6 end
       switch (skill)
       {
-         case 1: case 2: return kBodyArm_Aim;
+         // (the bow lifted is not yet drawn: the shot as he pulls)
+         case 2: return kBodyArm_Aim;
          case 3: return kBodyArm_Loose;
          case 5: return kBodyArm_Readying;
          default: return kBodyArm_None;
@@ -972,6 +1022,19 @@ static void PlayerBodyUpdate(ulong dt)
    CameraGetLocation(PlayerCamera(), &camPos, &camAng);
    mxs_vector foot;
    PhysGetSubModLocation(player, PLAYER_FOOT, &foot);
+   // In the air (jumping, falling): his feet where his are, as high over
+   // the ground as his (their point's height over the floor taken as he
+   // last stood); and a while after landing, set down where he lands --
+   // the creature's own height (its motion's) is not kept meanwhile
+   static float s_footOver = 0.5f;
+   static int s_sinceAir = 1000;
+   const BOOL inAir = !PhysObjOnGround(player) || GetPlayerMode() == kPM_Jump;
+   if (inAir)
+   {
+      foot.z -= s_footOver;
+      s_sinceAir = 0;
+   }
+   else
    {
       // the floor under his feet
       Location a, b, hit;
@@ -980,9 +1043,14 @@ static void PlayerBodyUpdate(ulong dt)
       MakeLocationFromVector(&a, &foot);
       MakeLocationFromVector(&b, &below);
       if (!PortalRaycast(&a, &b, &hit, 0))
+      {
+         s_footOver = foot.z - hit.vec.z;
          foot.z = hit.vec.z;
+      }
       else
          foot.z -= 0.5f;
+      if (s_sinceAir < 1000)
+         ++s_sinceAir;
    }
    mxs_vector vel;
    PhysGetVelocity(player, &vel);
@@ -1009,10 +1077,23 @@ static void PlayerBodyUpdate(ulong dt)
    {
       CreatureUnFreeze(g_BodyObj);
       g_BodyHeld = FALSE;
+      if (g_BodyShotLog++ < 100)
+         mprintf("PlyrBody: the bow let go\n");
+   }
+   if (g_BodyAiming && !g_BodyHeld && !g_BodyShotFlagged && g_BodyOneShot &&
+       strncmp(g_BodyTags, "RangedCombat", 12) == 0)
+   {
+      // (no loosing flag where it can be held: halfway through the shot)
+      float frac = 0;
+      const char *name = "?";
+      if (BodyMotionAt(CreatureGetMotorInterface(g_BodyObj), &frac, &name) && frac >= 0.5f)
+         BodyHold("halfway", frac, name);
    }
    int state;
    const BOOL backing = ahead > 0x6000 || ahead < -0x6000;
-   if (speed < 1.0f)
+   if (inAir)
+      state = 0;   // (no jump of the schemas': standing, carried up)
+   else if (speed < 1.0f)
       state = crouched ? 4 : 0;
    else if (backing)
       state = crouched ? 5 : 3;
@@ -1112,7 +1193,9 @@ static void PlayerBodyUpdate(ulong dt)
       at.x += cosf(a) * 7.0f;
       at.y += sinf(a) * 7.0f;
    }
+   CreatureFreeHeight(s_sinceAir < 30 ? g_BodyObj : OBJ_NULL);
    ObjPosUpdate(g_BodyObj, &at, &fac);
+   CreatureFreeHeight(OBJ_NULL);
 
    // what it is doing: as the AIs' bodies are told (cAIMoveEnactor), with
    // the weapon he holds as an armed AI's persistent tag
@@ -1123,7 +1206,10 @@ static void PlayerBodyUpdate(ulong dt)
    // (a swing, a shot, a readying not cut short: his own swing is over
    // well before a guard's, and his hands back at the ready cut it to a
    // flick -- only another of them, or putting the weapon away, does)
+   static ulong s_oneShotFor = 0;
+   s_oneShotFor += dt;
    const BOOL busy = g_BodyOneShot && status != kMCoord_Idle && g_BodyTags[0] && armed &&
+                     (g_BodyHeld || s_oneShotFor < 5000) &&   // (none stuck playing)
                      !(oneShot && strncmp(g_BodyTags, act, strlen(act)) != 0);
    if (!busy && (strcmp(tags, g_BodyTags) != 0 || status == kMCoord_Idle || status == kMCoord_ActiveInterrupt))
    {
@@ -1167,7 +1253,7 @@ static void PlayerBodyUpdate(ulong dt)
          delete pPlan;
       }
       static int s_logged = 0;
-      if (strcmp(tags, g_BodyTags) != 0 && s_logged < 200)
+      if (strcmp(tags, g_BodyTags) != 0 && s_logged < 2000)
       {
          ++s_logged;
          if (got == 0)
@@ -1176,6 +1262,16 @@ static void PlayerBodyUpdate(ulong dt)
             mprintf("PlyrBody: %s -- no schema, so %s\n", tags, tries[got]);
          else
             mprintf("PlyrBody: %s -- no schema (nor for its fallbacks)\n", tags);
+      }
+      if (oneShot && strcmp(tags, g_BodyTags) != 0)
+      {
+         s_oneShotFor = 0;
+         g_BodyShotFlagged = FALSE;
+      }
+      if (g_BodyHeld)
+      {
+         CreatureUnFreeze(g_BodyObj);
+         g_BodyHeld = FALSE;
       }
       strcpy(g_BodyTags, tags);
       g_BodyOneShot = oneShot;
