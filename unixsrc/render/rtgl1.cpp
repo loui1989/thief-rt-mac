@@ -4979,6 +4979,7 @@ void draw_ui(bool scene)
 // gem has it.)
 struct GemPart;
 float gem_value(const float pos[3], std::vector<GemPart> *parts);
+std::vector<float> sample_view_light();
 void update_dark_adapt(bool sceneDrawn)
 {
    static auto s_t = std::chrono::steady_clock::now();
@@ -4997,72 +4998,43 @@ void update_dark_adapt(bool sceneDrawn)
    if (!sceneDrawn)
       return;
    const float most = float(g_cfg.darkAdapt);
-   using SeenFn = uint32_t (*)(float *, float *);
-   // (the library's own handle: it is opened RTLD_LOCAL -- looked for among the
-   // process's global symbols it was never found, and the eyes went by the light
-   // gem: a small shadow in a lit room was enough)
-   static SeenFn s_seen = g_lib ? reinterpret_cast<SeenFn>(dlsym(g_lib, "rgThiefSeenLight")) : nullptr;
-   if (s_seen) {
-      // What the library hands back: the share of the frame that is black
-      // (under 0.001: its histogram's bin 0 -- not, as was thought, what is
-      // below the darkest exposure: with the ambient light on hardly anything
-      // is that black, and the eyes never got used to the dark), and the
-      // frame's average luminance (log average of the rest), from which the
-      // eye adaptation picks its exposure (EV100 = log2(avg x 8)). When it
-      // wants one more than 2 stops under the darkest allowed -- the view
-      // much darker than the eyes are made for (Thief's dim rooms are under
-      // it anyway: the limit is what keeps them dark) -- for 1.5 seconds,
-      // the limit comes down, the further it is wanted the quicker (up to
-      // 0.7 stops a second), until it is wanted no more than 2 stops under;
-      // when the view is within half a stop of the limit, or above it, back
-      // up, quickly. A small shadow in a lit room hardly moves the average.
-      // A view mostly black (a dark window on the night) counts as dark too.
-      static uint32_t s_n = 0;
-      static float s_black = 0.0f, s_avg = 1.0f;
-      float black = 0.0f, avg = 0.0f;
-      const uint32_t n = s_seen(&black, &avg);
-      if (n == 0)
-         return;
-      if (n != s_n) {
-         s_n = n;
-         s_black = black;
-         s_avg = avg;
-      }
-      const float limit = float(g_cfg.evMin) - g_darkAdapted;
-      // the average with the black pixels in it (the library's leaves them
-      // out: a view mostly black but for a dim patch counted as that patch's
-      // brightness, and the eyes never moved) -- black as 0.0005
-      const float logAll = (1.0f - s_black) * std::log2(std::max(s_avg, 1e-6f)) + s_black * std::log2(0.0005f);
-      const float wanted = logAll + 3.0f;
-      const float deficit = std::max(limit - wanted, s_black > 0.7f ? 2.2f + 8.0f * (s_black - 0.7f) : -1e9f);
-      static float s_darkFor = 0.0f;   // s the view has been that dark
-      s_darkFor = deficit > 2.0f ? s_darkFor + dt : 0.0f;
+   // How lit is what the player looks at -- in the game's own light, not the
+   // picture's: fifteen lines from the eye over the view to the walls, and
+   // the light gem's reckoning of the light at each place they meet (the
+   // lamps, their reach and the walls' shadows). The library's measure of
+   // the picture could not tell: its histogram starts at the darkest
+   // exposure allowed, so a view darker than that read as just that dark,
+   // however black (the "Eyes:" log: the view's average pinned at 4.0, the
+   // floor, standing in the pitch black). Seven tenths of the view under
+   // 0.08 (the light gem's scale: a hidden thief is under about 0.10) for
+   // 1.5 seconds: the eyes get used to the dark, at up to 0.6 stops a
+   // second, the darker the quicker; seven tenths over 0.16 (a lit corner
+   // in sight, a lamp's pool), back, at a stop a second. A small shadow in a
+   // lit room: the room around it is in view, lit.
+   static float s_view = 1.0f;   // the 70th of the view's lights, lowest first
+   static uint32_t s_viewAt = 0;
+   if (g_frameNumber - s_viewAt >= 8 || s_viewAt > g_frameNumber) {
+      s_viewAt = g_frameNumber;
+      std::vector<float> seen = sample_view_light();
+      std::sort(seen.begin(), seen.end());
+      s_view = seen[size_t(0.7f * float(seen.size() - 1) + 0.5f)];
+   }
+   {
+      static float s_darkFor = 0.0f;
+      s_darkFor = s_view < 0.08f ? s_darkFor + dt : 0.0f;
       float rate = 0.0f;   // stops a second
-      if (deficit > 2.0f && s_darkFor > 1.5f)
-         rate = std::min(0.25f * (deficit - 1.8f), 0.7f);
-      else if (deficit < 0.5f && s_black < 0.5f)
-         rate = -0.6f * std::min(0.5f - deficit, 4.0f) - 0.2f;
+      if (s_darkFor > 1.5f)
+         rate = 0.6f * std::clamp(0.4f + (0.08f - s_view) / 0.08f, 0.0f, 1.0f);
+      else if (s_view > 0.16f)
+         rate = -1.0f;
       g_darkAdapted = std::clamp(g_darkAdapted + rate * dt, 0.0f, most);
       static uint32_t s_logged = 0;
-      if (g_frameNumber - s_logged >= 600) {
+      if (g_frameNumber - s_logged >= 600 || s_logged > g_frameNumber) {
          s_logged = g_frameNumber;
-         fprintf(stderr, "Eyes: the view's average %.4f (wants EV %.1f, the darkest allowed now %.1f), %.0f%% of it black; used to the dark by %.1f stops (up to %.0f)\n",
-                 s_avg, wanted, limit, s_black * 100.0f, g_darkAdapted, most);
+         fprintf(stderr, "Eyes: the view lit %.2f (seven tenths of it under that; dark under 0.08, lit over 0.16); used to the dark by %.1f stops (up to %.0f)\n",
+                 s_view, g_darkAdapted, most);
       }
-      return;
    }
-   static float s_lit = 1.0f;
-   static uint32_t s_sampled = 0;
-   if (g_noteTraced >= 0 && g_frameNumber - g_noteFrame < 10)
-      s_lit = g_noteTraced;
-   else if (g_frameNumber - s_sampled >= 6) {
-      s_sampled = g_frameNumber;
-      s_lit = gem_value(g_camera.pos, nullptr) * g_cfg.gemScale;
-   }
-   const float dark = std::clamp((0.35f - s_lit) / 0.25f, 0.0f, 1.0f);
-   const float target = most * dark;
-   const float tau = target > g_darkAdapted ? 6.0f : 1.0f;
-   g_darkAdapted += (target - g_darkAdapted) * (1.0f - std::exp(-dt / tau));
 }
 
 void draw_frame(bool sceneDrawn)
@@ -6147,6 +6119,49 @@ struct Bvh {
       nodes[size_t(id)].right = r;
       return id;
    }
+   // the nearest thing between o and o + d * len: its distance (or false)
+   bool nearest(const float o[3], const float d[3], float len, float &at) const
+   {
+      if (nodes.empty())
+         return false;
+      float inv[3];
+      for (int k = 0; k < 3; ++k)
+         inv[k] = std::fabs(d[k]) > 1e-9f ? 1.0f / d[k] : 1e30f;
+      int stack[96], sp = 0;
+      stack[sp++] = 0;
+      float best = len;
+      bool found = false;
+      while (sp) {
+         const Node &nd = nodes[size_t(stack[--sp])];
+         float t0 = 0.0f, t1 = best;
+         bool miss = false;
+         for (int k = 0; k < 3 && !miss; ++k) {
+            float a = (nd.mn[k] - o[k]) * inv[k], b = (nd.mx[k] - o[k]) * inv[k];
+            if (a > b)
+               std::swap(a, b);
+            t0 = std::max(t0, a);
+            t1 = std::min(t1, b);
+            miss = t0 > t1;
+         }
+         if (miss)
+            continue;
+         if (nd.left < 0) {
+            for (int i = nd.start; i < nd.start + nd.count; ++i) {
+               const float *t = &tris[size_t(order[size_t(i)]) * 9];
+               float hit;
+               if (ray_triangle(o, d, t, t + 3, t + 6, hit) && hit < best) {
+                  best = hit;
+                  found = true;
+               }
+            }
+         } else if (sp + 2 <= 96) {
+            stack[sp++] = nd.left;
+            stack[sp++] = nd.right;
+         }
+      }
+      at = best;
+      return found;
+   }
    // anything between o and o + d * len?
    bool blocked(const float o[3], const float d[3], float len) const
    {
@@ -6295,6 +6310,38 @@ void RenderRTPrepEnd(void)
 namespace {
 float lightRadius(const PendingLight &L);   // (below)
 float light_gain(const PendingLight &L);    // (below)
+// The light gem's light at the places the view's fifteen lines from the eye
+// meet the walls (update_dark_adapt); none met: the player's own.
+std::vector<float> sample_view_light()
+{
+   ensure_world_bvh();
+   const RgFloat3D o3 = to_rt(g_camera.pos);
+   const float o[3] = {o3.data[0], o3.data[1], o3.data[2]};
+   std::vector<float> seen;
+   for (int iy = -1; iy <= 1; ++iy)
+      for (int ix = -2; ix <= 2; ++ix) {
+         float d[3];
+         for (int k = 0; k < 3; ++k)
+            d[k] = g_camera.fwd[k] + g_camera.left[k] * (0.3f * ix) + g_camera.up[k] * (0.35f * iy);
+         const float n = std::sqrt(d[0] * d[0] + d[1] * d[1] + d[2] * d[2]);
+         if (n < 1e-6f)
+            continue;
+         for (float &x : d)
+            x /= n;
+         float t;
+         if (!g_worldBvh.nearest(o, d, 30.0f, t))
+            continue;
+         const float back = std::max(t - 0.3f, 0.0f);
+         float at[3];
+         for (int k = 0; k < 3; ++k)
+            at[k] = (o[k] + d[k] * back) / kMetersPerUnit;
+         seen.push_back(gem_value(at, nullptr) * g_cfg.gemScale);
+      }
+   if (seen.empty())
+      seen.push_back(gem_value(g_camera.pos, nullptr) * g_cfg.gemScale);
+   return seen;
+}
+
 // The light gem's light at a point: the lights given to the path tracer last
 // frame, each as RTGL1 spreads it (a sphere, a spot's cone), at the player's
 // legs, middle and head, shadowed by the world's walls (parts: light by light)
