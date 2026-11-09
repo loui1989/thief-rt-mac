@@ -3209,6 +3209,7 @@ extern "C" void RenderRTGameDrawExtraObjects(void)
    const ObjID body = PlayerBodyDouble();
    if (body != OBJ_NULL && RenderRTPlayerBodyWanted((uint32_t)body))
    {
+      PlayerBodyAboutToDraw();
       int idx;
       model_funcs *ptmf = rendobj_get_model_funcs(body, &idx);
       if (ptmf && ptmf->render)

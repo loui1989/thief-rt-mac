@@ -59,6 +59,7 @@ EXTERN void CreaturePoseUndo(ObjID obj);
 // maneuver starting poses it at once, outside its update: drawn so, it
 // stood up for a frame each time its motion looped)
 EXTERN void CreaturePoseReapply(ObjID obj);
+EXTERN int CreaturePoseApplied();   // (how many reshapings so far)
 
 EXTERN BOOL CreatureGetRenderHandle(const ObjID objID, long *pHandle);
 

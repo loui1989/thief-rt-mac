@@ -1359,7 +1359,16 @@ static void PlayerBodyUpdate(ulong dt)
    else if (backing)
       state = 3;
    else
-      state = speed > 11.0f && !crouched ? 2 : 1;
+   {
+      // running: over 8.5 ft/s (walking forward 5.5, running 11, sideways
+      // 0.7 of either -- over 11 only running aslant), with a margin
+      static BOOL s_running = FALSE;
+      if (speed > 8.5f)
+         s_running = TRUE;
+      else if (speed < 7.0f)
+         s_running = FALSE;
+      state = s_running && !crouched ? 2 : 1;
+   }
    char act[96] = "";
    BOOL oneShot = FALSE, stepping = FALSE;
    if (state != 2)
@@ -1685,6 +1694,30 @@ static void PlayerBodyReset()
 {
    PlayerBodyDestroy();
    g_BodyGaveUp = FALSE;
+}
+
+// (the double about to be drawn: crouched, but standing tall -- logged, with
+// what it is doing, to find what stands it up)
+void PlayerBodyAboutToDraw()
+{
+   static int s_told = 0, s_appliedWas = 0;
+   static ulong s_frame = 0;
+   ++s_frame;
+   const int applied = CreaturePoseApplied();
+   float leg, torso;
+   if (s_told < 60 && g_BodyCrouch > 0.95f && !g_BodyHeld && !g_BodyPoseHeld && g_BodyStandLeg > 0.5f &&
+       BodyLegTorso(&leg, &torso) && leg > 0.85f * g_BodyStandLeg)
+   {
+      ++s_told;
+      float frac = 0;
+      const char *name = "?";
+      BodyMotionAt(CreatureGetMotorInterface(g_BodyObj), &frac, &name);
+      mprintf("PlyrBody: drawn standing while crouched (draw %lu): legs %.0f%% of standing; doing \"%s\" "
+              "(%s at %.0f%%, status %d); reshaped %d times since the last draw\n",
+              s_frame, leg / g_BodyStandLeg * 100.0f, g_BodyTags, name, frac * 100.0f,
+              (int)g_pBodyMCoord->GetStatus(), applied - s_appliedWas);
+   }
+   s_appliedWas = applied;
 }
 
 ObjID PlayerBodyDouble()

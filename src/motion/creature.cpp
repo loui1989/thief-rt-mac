@@ -679,8 +679,16 @@ static mxs_vector g_CrPoseOut[64];
 static quat g_CrPoseRelOut[65];
 static int g_CrPoseOutN = 0;
 
+static int g_CrPoseApplied = 0;   // (how many times, for the double's log)
+
+int CreaturePoseApplied()
+{
+   return g_CrPoseApplied;
+}
+
 static void CrPoseApply(ObjID obj, multiped *mp, const int *parents)
 {
+   ++g_CrPoseApplied;
    memcpy(g_CrPoseRelWas, mp->rel_orients, sizeof(quat) * (mp->num_joints + 1));
    g_CrPoseRelSaved = TRUE;
    g_CrPoseHook(obj, mp->num_joints, mp->joints, mp->orients, mp->rel_orients, parents);
