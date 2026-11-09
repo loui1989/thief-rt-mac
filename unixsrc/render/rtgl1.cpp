@@ -3165,13 +3165,13 @@ void upload_world()
          if (!tex) {
             // a water surface with no texture of its own (texture 0, as
             // Black Parade's canals, where the mission has no other water to
-            // borrow one from): dark, murky water, still enough to mirror
-            // the lamps and walls round it -- a traced surface, lit as the
-            // walls are. (The path tracer's own water showed as a flat grey
-            // sheet -- whatever the water setting; as a see-through colour
-            // it was drawn unlit, the same grey glow in the darkest canal,
-            // brightened with the eyes.)
-            flags |= RG_MESH_PRIMITIVE_POLISHED;
+            // borrow one from): dark, murky water -- a traced surface, lit as
+            // the walls are. (The path tracer's own water showed as a flat
+            // grey sheet -- whatever the water setting; as a see-through
+            // colour it was drawn unlit, the same grey glow in the darkest
+            // canal, brightened with the eyes. As a mirror it showed the
+            // world's unfinished undersides and gaps, only ever meant to be
+            // seen from the other side: broken geometry "in" the water.)
             tint[0] = 0.035f;
             tint[1] = 0.055f;
             tint[2] = 0.05f;
@@ -5029,7 +5029,11 @@ void update_dark_adapt(bool sceneDrawn)
          s_avg = avg;
       }
       const float limit = float(g_cfg.evMin) - g_darkAdapted;
-      const float wanted = std::log2(std::max(s_avg, 1e-6f) * 8.0f);
+      // the average with the black pixels in it (the library's leaves them
+      // out: a view mostly black but for a dim patch counted as that patch's
+      // brightness, and the eyes never moved) -- black as 0.0005
+      const float logAll = (1.0f - s_black) * std::log2(std::max(s_avg, 1e-6f)) + s_black * std::log2(0.0005f);
+      const float wanted = logAll + 3.0f;
       const float deficit = std::max(limit - wanted, s_black > 0.7f ? 2.2f + 8.0f * (s_black - 0.7f) : -1e9f);
       static float s_darkFor = 0.0f;   // s the view has been that dark
       s_darkFor = deficit > 2.0f ? s_darkFor + dt : 0.0f;
