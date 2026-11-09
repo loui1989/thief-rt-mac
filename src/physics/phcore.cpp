@@ -5125,6 +5125,11 @@ inline static void Integrate(cPhysModel *pModel, mxs_real t)
    #ifndef SHIP
    if (inworld_checks && !HasObjectWarned(pModel->GetObjID()) && !PhysObjValidPos(pModel->GetObjID(), NULL))
    {
+      // (once an object: warned, it is not checked again -- a floating
+      // weed or bubble pushed by the player wading through a sewer was
+      // checked and logged thousands of times a frame, the frame 0.3 to
+      // 0.9 s long while he walked in the water)
+      SetObjectWarned(pModel->GetObjID());
       mprintf("Partially integrated %s to invalid position!\n", ObjEditName(pModel->GetObjID()));
       for (int i=0; i<pModel->NumSubModels(); i++)
       {
@@ -5252,6 +5257,11 @@ inline void IntegrateToCollision(cPhysModel * pModel, tPhysSubModId subModId,
    #ifndef SHIP
    if (inworld_checks && !HasObjectWarned(pModel->GetObjID()) && !PhysObjValidPos(pModel->GetObjID(), NULL))
    {
+      // (once an object: warned, it is not checked again -- a floating
+      // weed or bubble pushed by the player wading through a sewer was
+      // checked and logged thousands of times a frame, the frame 0.3 to
+      // 0.9 s long while he walked in the water)
+      SetObjectWarned(pModel->GetObjID());
       mprintf("Integrated %s to invalid position!\n", ObjEditName(pModel->GetObjID()));
       for (int i=0; i<pModel->NumSubModels(); i++)
       {

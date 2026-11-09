@@ -272,7 +272,7 @@ void load_settings()
       else if (k == "underwater_brighter") g_cfg.underwaterLift = std::clamp(value, 0.0f, 3.0f);
       else if (k == "heat_haze") g_cfg.heatHaze = std::clamp(value, 0.0f, 3.0f);
       else if (k == "volumetric_smoke") g_cfg.smoke = std::clamp(value, 0.0f, 4.0f);
-      else if (k == "player_body") g_cfg.playerBody = std::clamp(int(value), 0, 1);
+      else if (k == "player_body") g_cfg.playerBody = std::clamp(int(value), 0, 2);
       else if (k == "shadow_alert") g_cfg.shadowAlert = std::clamp(int(value), 0, 1);
       else if (k == "light_soft") g_cfg.lightSoft = std::clamp(value, 0.0f, 4.0f);
       else if (k == "light_fix") g_cfg.lightFix = value != 0;
@@ -2899,7 +2899,7 @@ void upload_objects()
                c.split.push_back(std::move(p));
             c.splitValid = true;
          }
-         g_uploadViewer = obj == g_viewerObj && g_viewerObj != 0;
+         g_uploadViewer = obj == g_viewerObj && g_viewerObj != 0 && g_cfg.playerBody == 1;
          const std::vector<uint64_t> ids = object_prim_ids(obj, c.split);
          c.glowGiven = glowScale;
          c.highlightGiven = g_uploadHighlight;
@@ -2916,7 +2916,7 @@ void upload_objects()
          c.glowGiven = glowScale;
          c.highlightGiven = g_uploadHighlight;
          const bool same = !wasFresh && !c.splitGiven && c.passGiven == c.passLight;
-         g_uploadViewer = obj == g_viewerObj && g_viewerObj != 0;
+         g_uploadViewer = obj == g_viewerObj && g_viewerObj != 0 && g_cfg.playerBody == 1;
          for (size_t i = 0; i < c.prims.size(); ++i)
             upload_captured(ids[i], c.prims[i], c.passLight, same, glowScale,
                             i < lampGlow.size() ? lampGlow[i] : 0.0f);
@@ -4152,7 +4152,7 @@ std::string row_value(int row)
       snprintf(buf, sizeof(buf), "%.2fx (the mission's sun, brightness %.0f)", g_cfg.sun, g_sun.bright);
       return buf;
    case kRowPlayerBody:
-      return g_cfg.playerBody ? "On" : "Off (as the game)";
+      return g_cfg.playerBody == 2 ? "Shown ahead of you (test)" : g_cfg.playerBody ? "On" : "Off (as the game)";
    case kRowShadowAlert:
       return g_cfg.shadowAlert ? "On (suspicious; searching when near)" : "Off (as the game)";
    case kRowSmoke:
@@ -4397,7 +4397,7 @@ void change_row(int row, int dir)
                              : (g_cfg.sun <= 0.25f && dir < 0 ? 0.0f : step_mul(g_cfg.sun, dir, 0.25f, 4.0f));
       break;
    case kRowFog: g_cfg.fog = (g_cfg.fog + dir + 4) % 4; break;
-   case kRowPlayerBody: g_cfg.playerBody = !g_cfg.playerBody; break;
+   case kRowPlayerBody: g_cfg.playerBody = (g_cfg.playerBody + dir + 3) % 3; break;
    case kRowShadowAlert:
       g_cfg.shadowAlert = !g_cfg.shadowAlert;
       g_PlayerShadowAlert = g_cfg.shadowAlert;
@@ -7260,7 +7260,7 @@ void RenderRTObjectBegin(uint32_t obj, int flags)
    g_RenderRTCaptureCalls = g_RenderRTCaptureDropped = 0;
 }
 
-int RenderRTPlayerBodyActive(void) { return g_active && g_cfg.playerBody ? 1 : 0; }
+int RenderRTPlayerBodyActive(void) { return g_active ? g_cfg.playerBody : 0; }
 
 int RenderRTPlayerBodyWanted(uint32_t obj)
 {

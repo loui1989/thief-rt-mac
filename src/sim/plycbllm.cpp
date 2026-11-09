@@ -745,16 +745,35 @@ static void PlayerBodyUpdate(ulong dt)
    const mxs_ang going = (mxs_ang)(atan2f(vel.y, vel.x) / (2.0f * 3.14159265f) * 65536.0f);
    const short ahead = (short)(going - look);   // how far from where he looks he goes
    const BOOL crouched = GetPlayerMode() == kPM_Crouch;
+   // Facing: where he looks; going sideways (a humanoid has no side step
+   // in its schemas) turned part of the way, a third of a right angle at
+   // most, walking forward -- turned all the way it looked like walking off
+   // to the side. Backing away: walking backwards, facing ahead.
    int state;
-   mxs_ang facingTo = look;
+   short turn = 0;
    if (speed < 1.0f)
       state = crouched ? 4 : 0;
-   else if (crouched)
-      state = 5, facingTo = going;
    else if (ahead > 0x6000 || ahead < -0x6000)
-      state = 3;   // backing away, facing ahead
+      state = crouched ? 5 : 3;
    else
-      state = speed > 11.0f ? 2 : 1, facingTo = going;
+   {
+      state = crouched ? 5 : speed > 11.0f ? 2 : 1;
+      turn = ahead > 0x1555 ? 0x1555 : ahead < -0x1555 ? -0x1555 : ahead;
+   }
+   // turning as a body turns, not at once: up to a turn and a half a second
+   static mxs_ang s_facing = 0;
+   static BOOL s_facingSet = FALSE;
+   const mxs_ang want = (mxs_ang)(look + turn);
+   if (!s_facingSet)
+      s_facing = want, s_facingSet = TRUE;
+   {
+      short d = (short)(want - s_facing);
+      const int most = (int)(dt * 98.3f) + 1;   // 65536 * 1.5 / 1000 per ms
+      if (d > most) d = (short)most;
+      else if (d < -most) d = (short)-most;
+      s_facing = (mxs_ang)(s_facing + d);
+   }
+   mxs_ang facingTo = s_facing;
 
    // kept where he stands: the creature's own walk moves it a little each
    // frame, put back (its feet on his floor)
@@ -771,6 +790,15 @@ static void PlayerBodyUpdate(ulong dt)
    mxs_angvec fac;
    fac.tx = fac.ty = 0;
    fac.tz = facingTo;
+   if (RenderRTPlayerBodyActive() == 2)
+   {
+      // shown (the setting's test): seven feet ahead of him, facing him,
+      // doing as he does -- to see what makes the shadow
+      const float a = look * (2.0f * 3.14159265f / 65536.0f);
+      at.x += cosf(a) * 7.0f;
+      at.y += sinf(a) * 7.0f;
+      fac.tz = (mxs_ang)(facingTo + 0x8000);
+   }
    ObjPosUpdate(g_BodyObj, &at, &fac);
 
    // what it is doing: as the AIs' bodies are told (cAIMoveEnactor)
@@ -780,7 +808,7 @@ static void PlayerBodyUpdate(ulong dt)
       sMcMoveParams params;
       params.mask = kMotParmFlag_Direction | kMotParmFlag_Duration | kMotParmFlag_Facing;
       params.direction.tx = params.direction.ty = 0;
-      params.direction.tz = facingTo;
+      params.direction.tz = (state == 0 || state == 4) ? facingTo : going;   // (the way he goes)
       params.facing = fac;
       params.duration = dt;
       params.tags = cTagSet(BodyStateTags(state));
