@@ -40,6 +40,10 @@
 #include <objshape.h>
 #include <render_rt.h>
 #include <objmodel.h>
+#include <drkwbow.h>   // IsBowEquipped
+#include <drkwswd.h>   // WeaponIsSword
+#include <weapon.h>    // GetWeaponObjID
+#include <string.h>
 #include <mprintf.h>
 #include <math.h>
 
@@ -640,47 +644,87 @@ static void PlayerBodyDestroy()
    g_BodyState = -1;
 }
 
-static BOOL PlayerBodyMake()
+// a model the mission has, and a jointed one: a name with no model behind
+// it is drawn as the engine's placeholder wedge
+static BOOL BodyModelLoads(const char *name)
+{
+   const int idx = objmodelLoadModel((char *)name);
+   return idx != MIDX_INVALID && objmodelGetModelType(idx) == OM_TYPE_MESH;
+}
+
+// What he holds: 0 nothing (or the blackjack), 1 his sword, 2 his bow
+static int PlayerBodyWeapon(ObjID player)
+{
+   if (IsBowEquipped())
+      return 2;
+   const ObjID w = GetWeaponObjID(player);
+   return (w != OBJ_NULL && WeaponIsSword(player, w)) ? 1 : 0;
+}
+
+// The model for him holding that: the first of g_BodyModels the mission
+// has; the bow thief, with his bow out, where it is the hooded thief (a
+// Garrett has no bow of his own). And whether its weapon is his: the
+// sword thief's sword with his sword out, the bow thief's bow with his bow
+// -- else the model's weapon is not drawn (rendobj.cpp)
+static char g_BodyModel[32] = "";
+static int g_BodyWeapon = -1;
+static BOOL g_BodyShowsWeapon = FALSE;
+
+static const char *PlayerBodyModelFor(int weapon)
+{
+   const char *first = NULL;
+   for (int m = 0; m < (int)(sizeof(g_BodyModels) / sizeof(g_BodyModels[0])) && !first; ++m)
+      if (BodyModelLoads(g_BodyModels[m]))
+         first = g_BodyModels[m];
+   if (first && weapon == 2 && strcmp(first, "garrett") != 0 && BodyModelLoads("thiefbow"))
+      return "thiefbow";
+   return first;
+}
+
+static BOOL PlayerBodyMake(const char *model)
 {
    PlayerBodyDestroy();
-   for (int m = 0; m < (int)(sizeof(g_BodyModels) / sizeof(g_BodyModels[0])); ++m)
+   if (!model)
    {
-      // only a model the mission has, and a jointed one: a name with no
-      // model behind it is drawn as the engine's placeholder wedge
-      const int idx = objmodelLoadModel((char *)g_BodyModels[m]);
-      if (idx == MIDX_INVALID || objmodelGetModelType(idx) != OM_TYPE_MESH)
-         continue;
-      IObjectSystem *objsys = AppGetObj(IObjectSystem);
-      ObjID obj = objsys->BeginCreate(ROOT_ARCHETYPE, kObjectConcrete);
-      mxs_vector pos;
-      mxs_angvec facing;
-      mx_zero_vec(&pos);
-      facing.tx = facing.ty = facing.tz = 0;
-      ObjPosUpdate(obj, &pos, &facing);
-      objsys->NameObject(obj, "PlyrBody");
-      objsys->SetObjTransience(obj, TRUE);
-      objsys->EndCreate(obj);
-      SafeRelease(objsys);
-
-      ObjSetModelName(obj, g_BodyModels[m]);
-      ObjSetCreatureType(obj, 0);   // a humanoid (kDCRTYPE_Humanoid)
-      IMotor *pMotor = CreatureExists(obj) ? CreatureGetMotorInterface(obj) : NULL;
-      if (!pMotor)
-      {
-         DestroyObject(obj);
-         continue;
-      }
-      ObjSetHasRefs(obj, FALSE);    // in no cell: the view never draws it
-      CreatureMakeNonPhysical(obj);
-      g_BodyObj = obj;
-      g_pBodyMCoord = MotSysCreateMotionCoordinator();
-      g_pBodyMCoord->SetMotor(pMotor);
-      g_BodyState = -1;
-      mprintf("Garrett's shadow: his body double is a \"%s\" (object %d)\n", g_BodyModels[m], obj);
-      return TRUE;
+      mprintf("Garrett's shadow: no thief model found for his body double\n");
+      return FALSE;
    }
-   mprintf("Garrett's shadow: no thief model found for his body double\n");
-   return FALSE;
+   IObjectSystem *objsys = AppGetObj(IObjectSystem);
+   ObjID obj = objsys->BeginCreate(ROOT_ARCHETYPE, kObjectConcrete);
+   mxs_vector pos;
+   mxs_angvec facing;
+   mx_zero_vec(&pos);
+   facing.tx = facing.ty = facing.tz = 0;
+   ObjPosUpdate(obj, &pos, &facing);
+   objsys->NameObject(obj, "PlyrBody");
+   objsys->SetObjTransience(obj, TRUE);
+   objsys->EndCreate(obj);
+   SafeRelease(objsys);
+
+   ObjSetModelName(obj, model);
+   ObjSetCreatureType(obj, 0);   // a humanoid (kDCRTYPE_Humanoid)
+   IMotor *pMotor = CreatureExists(obj) ? CreatureGetMotorInterface(obj) : NULL;
+   if (!pMotor)
+   {
+      DestroyObject(obj);
+      mprintf("Garrett's shadow: \"%s\" made no creature\n", model);
+      return FALSE;
+   }
+   ObjSetHasRefs(obj, FALSE);    // in no cell: the view never draws it
+   CreatureMakeNonPhysical(obj);
+   g_BodyObj = obj;
+   g_pBodyMCoord = MotSysCreateMotionCoordinator();
+   g_pBodyMCoord->SetMotor(pMotor);
+   g_BodyState = -1;
+   strncpy(g_BodyModel, model, sizeof(g_BodyModel) - 1);
+   g_BodyModel[sizeof(g_BodyModel) - 1] = 0;
+   mprintf("Garrett's shadow: his body double is a \"%s\" (object %d)\n", model, obj);
+   return TRUE;
+}
+
+BOOL PlayerBodyShowsWeapon()
+{
+   return g_BodyShowsWeapon;
 }
 
 // 0 standing, 1 walking, 2 running, 3 walking backwards, 4 crouching,
@@ -719,10 +763,27 @@ static void PlayerBodyUpdate(ulong dt)
          }
          g_BodyObj = OBJ_NULL;
       }
-      if (g_BodyGaveUp || !PlayerBodyMake())
+      g_BodyWeapon = -1;   // (made below)
+   }
+   {
+      // the model for what he holds (made again when that changes it)
+      const int weapon = PlayerBodyWeapon(player);
+      if (weapon != g_BodyWeapon || g_BodyObj == OBJ_NULL)
       {
-         g_BodyGaveUp = TRUE;
-         return;
+         if (g_BodyGaveUp)
+            return;
+         const char *model = PlayerBodyModelFor(weapon);
+         if (g_BodyObj == OBJ_NULL || !model || strcmp(model, g_BodyModel) != 0)
+         {
+            if (!PlayerBodyMake(model))
+            {
+               g_BodyGaveUp = TRUE;
+               return;
+            }
+         }
+         g_BodyWeapon = weapon;
+         const BOOL bow = strcmp(g_BodyModel, "thiefbow") == 0;
+         g_BodyShowsWeapon = (weapon == 2 && bow) || (weapon == 1 && !bow);
       }
    }
 
@@ -798,12 +859,11 @@ static void PlayerBodyUpdate(ulong dt)
    fac.tz = facingTo;
    if (RenderRTPlayerBodyActive() == 2)
    {
-      // shown (the setting's test): seven feet ahead of him, facing him,
-      // doing as he does -- to see what makes the shadow
+      // shown (the setting's test): seven feet ahead of him, facing as
+      // he faces, doing as he does -- to see what makes the shadow
       const float a = look * (2.0f * 3.14159265f / 65536.0f);
       at.x += cosf(a) * 7.0f;
       at.y += sinf(a) * 7.0f;
-      fac.tz = (mxs_ang)(facingTo + 0x8000);
    }
    ObjPosUpdate(g_BodyObj, &at, &fac);
 

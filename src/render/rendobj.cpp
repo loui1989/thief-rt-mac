@@ -6,6 +6,7 @@
 // $Header: r:/t2repos/thief2/src/render/rendobj.cpp,v 1.5 2000/02/28 16:50:59 MAT Exp $
 
 // Render an object
+#include <vector>   // (first: the headers below declare C linkage)
 #include <objarray.h>
 
 #include <math.h>
@@ -2462,10 +2463,11 @@ BOOL rendobj_core_render_object(ObjID obj, int fragment, int idx, uchar *clut,
       // an object is always captured, whatever pass draws it
       rt_suppressed = RenderRTSuppressCapture(0);
       lgd3d_render_flush();
+      const BOOL rt_own = rt_first_person_object(obj);
       RenderRTObjectBegin(obj, (rt_whole ? kRenderRTObjectWhole : 0) |
-                               ((rt_type != OM_TYPE_MD && rt_type != OM_TYPE_MESH) ||
-                                        rt_first_person_object(obj)
-                                   ? kRenderRTObjectNoShadow : 0));
+                               ((rt_type != OM_TYPE_MD && rt_type != OM_TYPE_MESH) || rt_own
+                                   ? kRenderRTObjectNoShadow : 0) |
+                               (rt_own ? kRenderRTObjectFirstPerson : 0));
       if (rt_whole)
          r3d_rt_noclip = 1;
    }
@@ -3117,6 +3119,61 @@ extern "C" int RenderRTGameObjectPose(uint32_t obj, float pose[6])
 // once each while they stay where they are (it keeps them), every frame
 // while they move. At most a few per frame, so walking into a crowded room
 // does not stall a frame.
+// Garrett's body double's weapon, hidden while he holds none (or another
+// than its model carries): a thief model's sword or bow is part of a hand's
+// piece of it, reaching out from the wrist past where any hand does (the
+// hands of Thief's thief models end within 0.65 ft of the wrist joint; a
+// sword's guard begins at 0.69, a bow at 1.0). The polygons with a corner
+// that far out from a wrist are not drawn.
+static const mms_model *g_BodyFilterModel = NULL;
+static std::vector<bool> g_BodyWeaponVerts;
+static std::vector<mms_pgon> g_BodyPgons;
+static mmf_block_render_cback g_BodyPrevBlock = NULL;
+
+static void body_weapon_verts(const mms_model *m)
+{
+   if (m == g_BodyFilterModel)
+      return;
+   g_BodyFilterModel = m;
+   g_BodyWeaponVerts.assign(m->verts, false);
+   const mms_segment *segs = mm_segment_list(m);
+   const mms_mapping *maps = mm_mapping_list(m);
+   const mms_smatseg *smatsegs = mm_smatseg_list(m);
+   const mxs_vector *pos = mm_vert_vec_list(m);
+   int hidden = 0;
+   for (int s = 0; s < m->segs; ++s)
+   {
+      const mms_segment &seg = segs[s];
+      // (a humanoid's wrists: kCJ_LWrist, kCJ_RWrist as its joints 14, 15)
+      if ((seg.flags & MMSEG_FLAG_STRETCHY) || (seg.joint_id != 14 && seg.joint_id != 15))
+         continue;
+      for (int k = 0; k < seg.smatsegs; ++k)
+      {
+         const mms_data_chunk &d = smatsegs[maps[seg.map_start + k]].data;
+         for (int v = d.vert_start; v < d.vert_start + d.verts && v < m->verts; ++v)
+            if (mx_mag2_vec((mxs_vector *)&pos[v]) > 0.65f * 0.65f)
+               g_BodyWeaponVerts[v] = true, ++hidden;
+      }
+   }
+   mprintf("Garrett's shadow: %d of the body double's %d corners are its weapon's\n", hidden, m->verts);
+}
+
+static void body_pgon_block(mms_pgon *pgons, int num)
+{
+   g_BodyPgons.clear();
+   for (int i = 0; i < num; ++i)
+   {
+      const mms_pgon &p = pgons[i];
+      bool weapon = false;
+      for (int k = 0; k < 3 && !weapon; ++k)
+         weapon = p.v[k] < g_BodyWeaponVerts.size() && g_BodyWeaponVerts[p.v[k]];
+      if (!weapon)
+         g_BodyPgons.push_back(p);
+   }
+   if (!g_BodyPgons.empty())
+      g_BodyPrevBlock(g_BodyPgons.data(), (int)g_BodyPgons.size());
+}
+
 extern "C" void RenderRTGameDrawExtraObjects(void)
 {
    const float kRadius = 130.0f;  // feet, ~40 m
@@ -3155,7 +3212,18 @@ extern "C" void RenderRTGameDrawExtraObjects(void)
       int idx;
       model_funcs *ptmf = rendobj_get_model_funcs(body, &idx);
       if (ptmf && ptmf->render)
+      {
+         const mms_model *m = rendobj_type(body) == OM_TYPE_MESH ? (const mms_model *)objmodelGetModel(idx) : NULL;
+         const BOOL filter = m && !PlayerBodyShowsWeapon();
+         if (filter)
+         {
+            body_weapon_verts(m);
+            g_BodyPrevBlock = mm_set_block_render_cback(body_pgon_block);
+         }
          rendobj_core_render_object(body, OBJ_NO_SPLIT, idx, NULL, ptmf->render, ptmf);
+         if (filter)
+            mm_set_block_render_cback(g_BodyPrevBlock);
+      }
    }
 }
 

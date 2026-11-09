@@ -35,6 +35,8 @@ EXTERN ObjID PlayerArm();
 // Garrett's body double for the ray tracer's shadow and reflection of him
 // (OBJ_NULL when there is none)
 EXTERN ObjID PlayerBodyDouble();
+// whether the double's model holds what he holds (its weapon drawn)
+EXTERN BOOL PlayerBodyShowsWeapon();
 
 // schema utility funcs
 //

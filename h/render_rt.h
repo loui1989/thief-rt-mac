@@ -64,8 +64,11 @@ void RenderRTDrawWorld(int primitive, const sRenderBackendVertex *vertices,
 // flags: kRenderRTObjectWhole, the object is drawn in full, unclipped by the
 // view (a second draw in the same frame, for another cell it reaches into,
 // adds nothing); kRenderRTObjectNoShadow, it casts no shadow (a camera-facing
-// bitmap: a glow, a light cone -- turning with the view, its shadow would too).
-enum { kRenderRTObjectWhole = 1, kRenderRTObjectNoShadow = 2 };
+// bitmap: a glow, a light cone -- turning with the view, its shadow would too);
+// kRenderRTObjectFirstPerson, the player's own arm, weapon or arrow, drawn
+// before the camera: seen by it, but in no mirror, glass or water (his body
+// double holds what he holds there).
+enum { kRenderRTObjectWhole = 1, kRenderRTObjectNoShadow = 2, kRenderRTObjectFirstPerson = 4 };
 void RenderRTObjectBegin(uint32_t obj, int flags);
 void RenderRTObjectEnd(void);
 // Nonzero if an object that was not drawn this frame should be drawn for the

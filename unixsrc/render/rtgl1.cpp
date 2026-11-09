@@ -1559,6 +1559,7 @@ struct CapturedPrim {
    uint32_t texSerial = 0;
    int blend = 0;
    bool alphaTest = false, sprite = false;
+   bool firstPerson = false;   // the player's arm, weapon, arrow (kRenderRTObjectFirstPerson)
    float avgColor[4] = {};  // the game's vertex colours, before they were replaced
 };
 
@@ -1650,6 +1651,7 @@ uint32_t g_currentObject = 0;
 uint32_t g_emptyCaptures = 0, g_pieceCaptures = 0;   // for the inspector
 bool g_currentWhole = false;
 bool g_currentNoShadow = false;
+bool g_currentFirstPerson = false;
 std::vector<CapturedPrim> g_currentCapture;
 bool g_emissiveSpriteNow = false;
 
@@ -2231,7 +2233,7 @@ void upload_captured(uint64_t id, const CapturedPrim &p, bool passLight = false,
       .classicLight = 1.0f,
       .emissiveGi = glows ? std::max(pEmissive * 0.06f, ambient) : 0.0f,
    };
-   upload(id, prim);
+   upload(id, prim, p.firstPerson);
 }
 
 uint32_t g_cachedDrawn = 0;
@@ -7159,6 +7161,7 @@ void RenderRTDrawWorld(int primitive, const sRenderBackendVertex *v, const float
    // a camera-facing bitmap object: seen, but it must not shadow anything
    if (g_currentObject && g_currentNoShadow && !g_RenderRTShadowOnly)
       prim.flags |= RG_MESH_PRIMITIVE_NO_SHADOW;
+   prim.firstPerson = g_currentObject && g_currentFirstPerson;
    prim.tex = tex;
    prim.texSerial = tex ? tex->serial : 0;
    prim.blend = g_blend;
@@ -7255,6 +7258,7 @@ void RenderRTObjectBegin(uint32_t obj, int flags)
    g_currentObject = g_inScene ? obj : 0;
    g_currentWhole = (flags & kRenderRTObjectWhole) != 0;
    g_currentNoShadow = (flags & kRenderRTObjectNoShadow) != 0;
+   g_currentFirstPerson = (flags & kRenderRTObjectFirstPerson) != 0;
    g_currentCapture.clear();
    g_currentPuffed = false;
    g_RenderRTCaptureCalls = g_RenderRTCaptureDropped = 0;
