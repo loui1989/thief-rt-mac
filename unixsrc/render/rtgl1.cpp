@@ -56,6 +56,7 @@
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
+#include <set>
 #include <dlfcn.h>
 #include <cerrno>
 #include <execinfo.h>
@@ -166,6 +167,7 @@ struct Settings {
    float smoke = 1.0f;        // smoke and steam particles as volumetric smoke, at this density (0: flat sprites)
    int playerBody = 1;        // Garrett's own model: his shadow, and him in mirrors and water (unseen by the camera)
    int shadowAlert = 0;       // the guards notice his shadow (g_PlayerShadowAlert, objlight.c)
+   int testMirror = 0;        // inspecting a wall makes its texture a mirror (to see Garrett whole)
    float lightSoft = 1.0f;    // a strong lamp's light is a bigger source: no white spot on the wall next to it (0 off)  // a torch's body casts shadows (only its cup lets the flame's light out)
    bool steadyFaces = true;   // models' faces seen or shadow-only by a fixed rule, not by the view
    bool lightFix = true;      // lights moved out of the walls they sit in
@@ -3056,6 +3058,23 @@ std::unordered_map<int, RtTexture *> g_worldTextures;
 
 bool g_worldFresh = false;   // a new world: its textures to preload
 
+// The test mirror (its setting): the world textures inspected while it is
+// on, drawn as perfect mirrors -- to see Garrett's body double whole
+std::set<int> g_mirrorTextures;
+
+void mirror_world_regive(int textureId)
+{
+   for (WorldGroup &g : g_world)
+      if (textureId < 0 || g.textureId == textureId)
+         g.given = false;
+}
+
+void mirror_textures_clear()
+{
+   g_mirrorTextures.clear();
+   mirror_world_regive(-1);
+}
+
 void upload_world()
 {
    if (!g_worldValid)
@@ -3218,6 +3237,11 @@ void upload_world()
       if (tex && tex->polished && g_cfg.polish && g_cfg.materials &&
           !(flags & (RG_MESH_PRIMITIVE_WATER | RG_MESH_PRIMITIVE_TRANSLUCENT | RG_MESH_PRIMITIVE_ALPHA_TESTED)))
          flags |= RG_MESH_PRIMITIVE_POLISHED;
+      if (g_cfg.testMirror && g_mirrorTextures.count(g.textureId) &&
+          !(flags & (RG_MESH_PRIMITIVE_WATER | RG_MESH_PRIMITIVE_TRANSLUCENT | RG_MESH_PRIMITIVE_ALPHA_TESTED))) {
+         flags &= ~RgMeshPrimitiveFlags(RG_MESH_PRIMITIVE_POLISHED);
+         flags |= RG_MESH_PRIMITIVE_MIRROR;
+      }
       auto prim = RgMeshPrimitiveInfo{
          .sType = RG_STRUCTURE_TYPE_MESH_PRIMITIVE_INFO,
          .pNext = nullptr,
@@ -4068,7 +4092,7 @@ const char *kUpscaleNames[] = {"Off",
                                "MetalFX Custom"};
 
 enum UiRow {
-   kRowUpscale, kRowScale, kRowOutput, kRowDynres, kRowBounces, kRowReach, kRowLights, kRowLightFade, kRowCandidates, kRowLightCull, kRowResponse, kRowFlicker, kRowVolumetric, kRowShafts, kRowFog, kRowSmoke, kRowPlayerBody, kRowShadowAlert, kRowBloom, kRowVsync, kRowFrameCap,
+   kRowUpscale, kRowScale, kRowOutput, kRowDynres, kRowBounces, kRowReach, kRowLights, kRowLightFade, kRowCandidates, kRowLightCull, kRowResponse, kRowFlicker, kRowVolumetric, kRowShafts, kRowFog, kRowSmoke, kRowPlayerBody, kRowShadowAlert, kRowTestMirror, kRowBloom, kRowVsync, kRowFrameCap,
    kRowFps, kRowDetection, kRowGemScale, kRowGemMatch, kRowGemEase, kRowLight, kRowExposure, kRowDarkAdapt, kRowAmbient, kRowAmbientFollow, kRowShadowCool, kRowSkySeen, kRowSky, kRowMoon, kRowMoonDir, kRowMoonHeight, kRowSun, kRowLightSize, kRowRough, kRowSmooth, kRowSteady, kRowFixtures, kRowFixtureLight, kRowSmallLamps, kRowLightFix, kRowGlow, kRowFlameGlow, kRowMaterials, kRowBump, kRowCrevice, kRowTexDetail, kRowParallax, kRowPolish, kRowWater, kRowUnderwater, kRowTracedSound, kRowHrtf,
    kRowDebug, kRowFreeze, kRowBackFaces, kRowReuse, kRowBlink, kRowPerf, kRowInspect, kRowSkipMission, kRowReset, kRowCount
 };
@@ -4076,7 +4100,7 @@ enum UiRow {
 const char *kRowLabels[kRowCount] = {
    "Upscaler", "Render resolution", "Output resolution", "Dynamic resolution", "Bounce light", "Light reach", "Lights traced",
    "Lights coming into range", "Lights tried per pixel", "Lights behind walls", "Light changes", "Light flicker",
-   "God rays (volumetric)", "  God ray strength", "Mission fog", "Smoke and steam", "Garrett's shadow and reflection", "  Guards notice his shadow", "Bloom", "VSync", "Frame rate limit", "FPS counter", "Light gem and guards", "  Light gem brightness", "  Light gem falloff", "  Light gem response", "Light brightness", "Darkest exposure", "  Eyes adjust to the dark", "Ambient light", "  Follows the game's light", "  Shadow colour", "Sky brightness (as seen)", "Sky light (on the level)", "Moonlight", "  Moon direction", "  Moon height", "Sunlight (Thief 2 missions)",
+   "God rays (volumetric)", "  God ray strength", "Mission fog", "Smoke and steam", "Garrett's shadow and reflection", "  Guards notice his shadow", "  Test mirror", "Bloom", "VSync", "Frame rate limit", "FPS counter", "Light gem and guards", "  Light gem brightness", "  Light gem falloff", "  Light gem response", "Light brightness", "Darkest exposure", "  Eyes adjust to the dark", "Ambient light", "  Follows the game's light", "  Shadow colour", "Sky brightness (as seen)", "Sky light (on the level)", "Moonlight", "  Moon direction", "  Moon height", "Sunlight (Thief 2 missions)",
    "Light size (soft shadows)", "Surface roughness", "Model shading", "Model faces", "Torches and lamps", "Lamp and torch light", "Lamp reach", "Lights in walls", "Lamp glow", "Flame glow", "Materials", "Bumps", "Crevices", "Texture detail", "Parallax depth", "Polished reflections", "Water", "  Under water: brighter", "Traced sound (Steam Audio)", "  Headphone 3D sound (HRTF)",
    "Debug view", "Freeze scene (test)", "Back faces (test)", "Light sampling (test)", "Blink nearest light (test)", "Performance log", "Inspect centre of view", "Skip to next mission (test)", "Reset to defaults",
 };
@@ -4159,6 +4183,10 @@ std::string row_value(int row)
       return g_cfg.playerBody == 2 ? "Shown ahead of you (test)" : g_cfg.playerBody ? "On" : "Off (as the game)";
    case kRowShadowAlert:
       return g_cfg.shadowAlert ? "On (suspicious; searching when near)" : "Off (as the game)";
+   case kRowTestMirror:
+      if (!g_cfg.testMirror) return "Off";
+      snprintf(buf, sizeof(buf), "On: inspect a wall to mirror it (%zu mirrored)", g_mirrorTextures.size());
+      return buf;
    case kRowSmoke:
       if (g_cfg.smoke <= 0.0f) return "Flat sprites (as the game)";
       snprintf(buf, sizeof(buf), "Volumetric, %d%% density", int(g_cfg.smoke * 100.0f + 0.5f));
@@ -4405,6 +4433,11 @@ void change_row(int row, int dir)
    case kRowShadowAlert:
       g_cfg.shadowAlert = !g_cfg.shadowAlert;
       g_PlayerShadowAlert = g_cfg.shadowAlert;
+      break;
+   case kRowTestMirror:
+      g_cfg.testMirror = !g_cfg.testMirror;
+      if (!g_cfg.testMirror)
+         mirror_textures_clear();
       break;
    case kRowSmoke: {
       static const float steps[] = {0.0f, 0.5f, 0.75f, 1.0f, 1.5f, 2.0f, 3.0f};
@@ -5696,7 +5729,10 @@ void inspect_view()
    float best = 1e30f;
    uint32_t bestObj = 0;
    size_t bestPrim = 0, bestGroup = SIZE_MAX;
-   for (const auto &e : g_objects)
+   for (const auto &e : g_objects) {
+      // (not Garrett's body double, nor what it holds: the camera is in it)
+      if (e.first && (e.first == g_viewerObj || e.first == g_viewerItem))
+         continue;
       for (size_t i = 0; i < e.second.prims.size(); ++i) {
          const auto &v = e.second.prims[i].verts;
          for (size_t k = 0; k + 2 < v.size(); k += 3) {
@@ -5707,6 +5743,7 @@ void inspect_view()
             }
          }
       }
+   }
    for (size_t g = 0; g < g_world.size(); ++g) {
       const WorldGroup &w = g_world[g];
       for (size_t k = 0; k + 2 < w.indices.size(); k += 3) {
@@ -5812,6 +5849,17 @@ void inspect_view()
          out("    texture saved as logs%s.ppm\n", base);
       }
       snprintf(what, sizeof(what), "Inspect: world texture %d logged", w.textureId);
+      if (g_cfg.testMirror) {
+         const bool on = !g_mirrorTextures.count(w.textureId);
+         if (on)
+            g_mirrorTextures.insert(w.textureId);
+         else
+            g_mirrorTextures.erase(w.textureId);
+         mirror_world_regive(w.textureId);
+         out("test mirror: world texture %d %s\n", w.textureId, on ? "made a mirror" : "back as it was");
+         snprintf(what, sizeof(what), "Test mirror: world texture %d %s", w.textureId,
+                  on ? "is a mirror" : "back as it was");
+      }
    }
    auto list_models = [&](const float *at, float radius, const char *title) {
       out("%s:\n", title);
@@ -6626,6 +6674,10 @@ void upload_player_body()
    // his body double drawn this frame (a thief of the game's, walking):
    // that is him. One not drawn this frame goes.
    if (g_viewerObj && g_viewerFrame != g_frameNumber) {
+      static int s_told = 0;
+      if (s_told++ < 40)
+         fprintf(stderr, "RT: Garrett's body double not drawn in frame %u (last %u) -- gone from the scene\n",
+                 g_frameNumber, g_viewerFrame);
       g_objects.erase(g_viewerObj);
       g_viewerObj = 0;
    }

@@ -675,6 +675,17 @@ static tCreaturePoseHook g_CrPoseHook = NULL;
 static quat g_CrPoseRelWas[65];
 static BOOL g_CrPoseRelSaved = FALSE;
 
+void CreaturePoseUndo(ObjID obj)
+{
+   if (!g_CrPoseRelSaved || obj != g_CrPoseHookObj)
+      return;
+   cCreature *pCreature = CreatureFromObj(obj);
+   const multiped *mp = pCreature ? pCreature->GetMultiped() : NULL;
+   if (mp && mp->rel_orients && mp->num_joints < 64)
+      memcpy(mp->rel_orients, g_CrPoseRelWas, sizeof(quat) * (mp->num_joints + 1));
+   g_CrPoseRelSaved = FALSE;
+}
+
 void CreatureSetPoseHook(ObjID obj, tCreaturePoseHook hook)
 {
    g_CrPoseHookObj = obj;

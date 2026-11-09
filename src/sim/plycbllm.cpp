@@ -711,11 +711,44 @@ static void BodyRotBetween(mxs_matrix *r, const mxs_vector *from, const mxs_vect
 // thigh and shin turned to it (a two-bone reach) -- and each changed joint's
 // orientation relative to its parent's made to agree (the mesh's stretchy
 // parts are drawn by those: parent * relative)
+static void BodyPoseReshape(ObjID obj, int n, mxs_vector *J, mxs_matrix *O, quat *rel, const int *parents);
+
 static void BodyPoseHook(ObjID obj, int n, mxs_vector *J, mxs_matrix *O, void *relv, const int *parents)
 {
    if (obj != g_BodyObj || g_BodyCrouch < 0.01f)
       return;
    quat *rel = (quat *)relv;
+   if (n > 64)
+      return;
+   mxs_vector jWas[64];
+   mxs_matrix oWas[64];
+   quat rWas[65];
+   memcpy(jWas, J, sizeof(mxs_vector) * n);
+   memcpy(oWas, O, sizeof(mxs_matrix) * n);
+   memcpy(rWas, rel, sizeof(quat) * (n + 1));
+   BodyPoseReshape(obj, n, J, O, rel, parents);
+   // (anything not a number: as its motion had it)
+   BOOL bad = FALSE;
+   for (int j = 0; j < n && !bad; ++j)
+   {
+      bad = !(J[j].x == J[j].x && J[j].y == J[j].y && J[j].z == J[j].z);
+      for (int k = 0; k < 9 && !bad; ++k)
+         bad = !(O[j].el[k] == O[j].el[k]);
+      bad = bad || !(rel[j].w == rel[j].w && rel[j].x == rel[j].x && rel[j].y == rel[j].y && rel[j].z == rel[j].z);
+   }
+   if (bad)
+   {
+      memcpy(J, jWas, sizeof(mxs_vector) * n);
+      memcpy(O, oWas, sizeof(mxs_matrix) * n);
+      memcpy(rel, rWas, sizeof(quat) * (n + 1));
+      static int s_told = 0;
+      if (s_told++ < 10)
+         mprintf("PlyrBody: its crouch came out not a number -- left as its motion had it\n");
+   }
+}
+
+static void BodyPoseReshape(ObjID obj, int n, mxs_vector *J, mxs_matrix *O, quat *rel, const int *parents)
+{
    const int butt = GetCreatureJointID(obj, kCJ_Butt), abd = GetCreatureJointID(obj, kCJ_Abdomen);
    const int hip[2] = { GetCreatureJointID(obj, kCJ_LHip), GetCreatureJointID(obj, kCJ_RHip) };
    const int knee[2] = { GetCreatureJointID(obj, kCJ_LKnee), GetCreatureJointID(obj, kCJ_RKnee) };
@@ -1299,11 +1332,29 @@ static void PlayerBodyUpdate(ulong dt)
       const float to = crouched && !inAir ? 1.0f : 0.0f, most = dt * 0.005f;   // (0.2 s)
       g_BodyCrouch += (to - g_BodyCrouch) > most ? most : (to - g_BodyCrouch) < -most ? -most : (to - g_BodyCrouch);
    }
+   // (moving, backing away: each with a margin, and moving at all held a
+   // moment -- creeping hovers about any one speed, and a slow body's way
+   // wavers: walk, stand, walk again each a fresh start, jerking)
+   static BOOL s_moving = FALSE, s_backing = FALSE;
+   static ulong s_stillFor = 0;
+   if (speed > 1.5f)
+      s_moving = TRUE, s_stillFor = 0;
+   else if (speed < 0.6f && (s_stillFor += dt) > 150)
+      s_moving = FALSE;
+   if (speed > 1.0f)
+   {
+      const short m = ahead < 0 ? (short)-ahead : ahead;
+      if (m > 0x6400)
+         s_backing = TRUE;
+      else if (m < 0x5400)
+         s_backing = FALSE;
+   }
+   const BOOL moving = s_moving;
    int state;
-   const BOOL backing = ahead > 0x6000 || ahead < -0x6000;
+   const BOOL backing = s_backing;
    if (inAir)
       state = 0;   // (no jump of the schemas': standing, carried up)
-   else if (speed < 1.0f)
+   else if (!moving)
       state = 0;
    else if (backing)
       state = 3;
@@ -1340,7 +1391,7 @@ static void PlayerBodyUpdate(ulong dt)
             // (the blackjack held as he walks: no fighting stance)
             if (g_BodyWeapon == 3)
                break;
-            if (speed < 1.0f)
+            if (!moving)
                strcpy(act, "MeleeCombat 0, Stand 0");
             else
             {
@@ -1531,6 +1582,7 @@ static void PlayerBodyUpdate(ulong dt)
          strcpy(tries[n++], BodyStateTags(state));
       if (state == 4 || state == 5)
          strcpy(tries[n++], BodyStateTags(state == 4 ? 0 : 1));
+      CreaturePoseUndo(g_BodyObj);
       IMotionPlan *pPlan = NULL;
       int got = -1;
       for (int i = 0; i < n && !pPlan; ++i)

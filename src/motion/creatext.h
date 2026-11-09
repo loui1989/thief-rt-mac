@@ -52,6 +52,9 @@ EXTERN void CreatureFreeHeight(ObjID objID);
 typedef void (*tCreaturePoseHook)(ObjID obj, int nJoints, mxs_vector *joints, mxs_matrix *orients,
                                   void *relOrients, const int *parents);
 EXTERN void CreatureSetPoseHook(ObjID obj, tCreaturePoseHook hook);
+// its motion's own relative orientations back (before a new maneuver: the
+// motion library blends from them -- reshaped, it reshaped them twice)
+EXTERN void CreaturePoseUndo(ObjID obj);
 
 EXTERN BOOL CreatureGetRenderHandle(const ObjID objID, long *pHandle);
 
