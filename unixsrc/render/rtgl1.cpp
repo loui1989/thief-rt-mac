@@ -6597,6 +6597,147 @@ bool smoke_from_sprite(RtTexture *tex, const char *name, const sRenderBackendVer
    return true;
 }
 
+// Garrett's shadow and reflection (the setting): a figure of him -- head,
+// shoulders, body, arms and legs -- from the floor under the camera to just
+// over its eyes, turned as the view turns, lower when he crouches, its legs
+// and arms swinging as he walks. Given as RTGL1's first-person viewer:
+// the camera never sees it, his shadow and his reflection do. (Thief
+// Gold's own player model is a box -- "playbox" -- with a face on it: a
+// block of a shadow, and a dark square on the floor under him.)
+void upload_player_body()
+{
+   static float s_phase = 0.0f, s_swing = 0.0f, s_last[2] = {0, 0};
+   static uint32_t s_lastFrame = 0;
+   if (!g_cfg.playerBody || g_underwater)
+      return;
+   ensure_world_bvh();
+   const RgFloat3D cam = to_rt(g_camera.pos);
+   const float down[3] = {0, 0, -1};
+   float t;
+   if (!g_worldBvh.nearest(cam.data, down, 2.5f, t))
+      return;   // (no floor under him: on a rope, falling)
+   const float floorZ = cam.data[2] - t;
+   const float H = std::clamp(t + 0.1f, 0.7f, 1.95f);
+   // facing: the view, level
+   float f[2] = {g_camera.fwd[0], g_camera.fwd[1]};
+   float fl = std::sqrt(f[0] * f[0] + f[1] * f[1]);
+   if (fl < 1e-4f)
+      f[0] = 1, f[1] = 0, fl = 1;
+   f[0] /= fl, f[1] /= fl;
+   const float l[2] = {-f[1], f[0]};
+   // walking: the legs swing a stride (0.7 m) a half swing, as far as he
+   // goes, more as he goes faster; still, they settle
+   {
+      const float dx = cam.data[0] - s_last[0], dy = cam.data[1] - s_last[1];
+      const float moved = std::sqrt(dx * dx + dy * dy);
+      s_last[0] = cam.data[0], s_last[1] = cam.data[1];
+      const bool fresh = g_frameNumber != s_lastFrame + 1 || moved > 1.0f;
+      s_lastFrame = g_frameNumber;
+      if (!fresh) {
+         s_phase += moved / 0.7f * 3.14159265f;
+         const float want = std::clamp(moved * 60.0f / 3.0f, 0.0f, 1.0f) * 0.5f;
+         s_swing += (want - s_swing) * 0.15f;
+      }
+   }
+   const float swing = s_swing * std::sin(s_phase);
+   const float base[3] = {cam.data[0] - f[0] * 0.08f, cam.data[1] - f[1] * 0.08f, floorZ};
+   auto at = [&](float side, float ahead, float up, float out[3]) {
+      out[0] = base[0] + l[0] * side + f[0] * ahead;
+      out[1] = base[1] + l[1] * side + f[1] * ahead;
+      out[2] = base[2] + up;
+   };
+   std::vector<RgPrimitiveVertex> v;
+   const uint32_t colour = pack_color(0.07f, 0.06f, 0.05f, 1.0f);
+   auto tri = [&](const float *a, const float *b, const float *c) {
+      for (const float *p : {a, b, c}) {
+         RgPrimitiveVertex q{};
+         memcpy(q.position, p, sizeof(q.position));
+         q.color = colour;
+         v.push_back(q);
+      }
+   };
+   // a capsule from a to b, radius r: eight sides, a point at each end
+   auto capsule = [&](const float a[3], const float b[3], float r) {
+      float ax[3] = {b[0] - a[0], b[1] - a[1], b[2] - a[2]};
+      const float len = std::sqrt(ax[0] * ax[0] + ax[1] * ax[1] + ax[2] * ax[2]);
+      if (len < 1e-4f)
+         ax[0] = 0, ax[1] = 0, ax[2] = 1;
+      else
+         for (float &x : ax)
+            x /= len;
+      float u[3] = {std::fabs(ax[2]) < 0.9f ? 0.0f : 1.0f, 0.0f, std::fabs(ax[2]) < 0.9f ? 1.0f : 0.0f};
+      float p[3] = {ax[1] * u[2] - ax[2] * u[1], ax[2] * u[0] - ax[0] * u[2], ax[0] * u[1] - ax[1] * u[0]};
+      float pl = std::sqrt(p[0] * p[0] + p[1] * p[1] + p[2] * p[2]);
+      for (float &x : p)
+         x /= pl;
+      const float q[3] = {ax[1] * p[2] - ax[2] * p[1], ax[2] * p[0] - ax[0] * p[2], ax[0] * p[1] - ax[1] * p[0]};
+      float ra[8][3], rb[8][3];
+      for (int i = 0; i < 8; ++i) {
+         const float an = float(i) * 0.785398f, cs = std::cos(an) * r, sn = std::sin(an) * r;
+         for (int k = 0; k < 3; ++k) {
+            ra[i][k] = a[k] + p[k] * cs + q[k] * sn;
+            rb[i][k] = b[k] + p[k] * cs + q[k] * sn;
+         }
+      }
+      const float ea[3] = {a[0] - ax[0] * r, a[1] - ax[1] * r, a[2] - ax[2] * r};
+      const float eb[3] = {b[0] + ax[0] * r, b[1] + ax[1] * r, b[2] + ax[2] * r};
+      for (int i = 0; i < 8; ++i) {
+         const int j = (i + 1) % 8;
+         tri(ra[i], rb[i], rb[j]);
+         tri(ra[i], rb[j], ra[j]);
+         tri(ea, ra[j], ra[i]);
+         tri(eb, rb[i], rb[j]);
+      }
+   };
+   float a[3], b[3];
+   // head
+   at(0, 0, H - 0.12f, a);
+   at(0, 0, H - 0.10f, b);
+   capsule(a, b, 0.105f);
+   // body: two side by side, shoulders to hips
+   const float shoulder = H * 0.81f, hip = H * 0.50f;
+   for (float s : {-0.08f, 0.08f}) {
+      at(s, 0, shoulder, a);
+      at(s * 0.8f, 0, hip + 0.05f, b);
+      capsule(a, b, 0.11f);
+   }
+   // legs, swinging opposite; shorter crouching is the lower H
+   const float leg = hip - 0.05f;
+   for (int side = 0; side < 2; ++side) {
+      const float s = side ? 0.09f : -0.09f, ang = side ? swing : -swing;
+      at(s, 0, hip, a);
+      at(s, leg * std::sin(ang), hip - leg * std::cos(ang), b);
+      capsule(a, b, 0.075f);
+   }
+   // arms, against the legs
+   const float arm = H * 0.36f;
+   for (int side = 0; side < 2; ++side) {
+      const float s = side ? 0.22f : -0.22f, ang = (side ? -swing : swing) * 0.7f;
+      at(s, 0, shoulder - 0.03f, a);
+      at(s * 1.05f, arm * std::sin(ang), shoulder - 0.03f - arm * std::cos(ang), b);
+      capsule(a, b, 0.05f);
+   }
+   auto prim = RgMeshPrimitiveInfo{
+      .sType = RG_STRUCTURE_TYPE_MESH_PRIMITIVE_INFO,
+      .pNext = nullptr,
+      .flags = RgMeshPrimitiveFlags(RG_MESH_PRIMITIVE_FORCE_EXACT_NORMALS),
+      .primitiveIndexInMesh = 0,
+      .pVertices = v.data(),
+      .vertexCount = uint32_t(v.size()),
+      .pIndices = nullptr,
+      .indexCount = 0,
+      .pTextureName = nullptr,
+      .textureFrame = 0,
+      .color = pack_color(1, 1, 1, 1),
+      .emissive = ambient_emissive(),
+      .classicLight = 1.0f,
+      .emissiveGi = 0.0f,
+   };
+   g_uploadViewer = true;
+   upload(0x600000000ull, prim);
+   g_uploadViewer = false;
+}
+
 } // namespace
 extern "C" {
 
@@ -6757,6 +6898,7 @@ void RenderRTSceneEnd(void)
    {
       PartTimer t(g_capParts.models);
       upload_objects();
+      upload_player_body();
    }
    upload_sky();
    // the material maps being made (texture_name), now and then
@@ -7105,15 +7247,14 @@ int RenderRTPlayerBodyWanted(uint32_t obj)
 {
    if (!g_inScene)
       return 0;
-   if (!g_cfg.playerBody) {
-      // turned off: what was kept of it goes
-      if (g_viewerObj)
-         g_objects.erase(g_viewerObj);
-      g_viewerObj = 0;
-      return 0;
-   }
-   g_viewerObj = obj;
-   return 1;
+   // (the game's own player model is not drawn: Thief Gold's is a box --
+   // upload_player_body draws a figure of Garrett instead; one kept from
+   // before goes)
+   (void)obj;
+   if (g_viewerObj)
+      g_objects.erase(g_viewerObj);
+   g_viewerObj = 0;
+   return 0;
 }
 
 int RenderRTObjectWanted(uint32_t obj)
