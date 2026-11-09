@@ -18,6 +18,7 @@
 
 //#define CLSN_COUNT
 
+#include <map>   // (first: the headers below declare C linkage)
 #include <lg.h>
 
 #include <math.h>
@@ -6397,10 +6398,22 @@ static void ResolveCollision(cPhysClsn * pClsn, mxs_real dt)
 int clsn_count = 0;
 #endif
 
+// Resolving a collision can make more (PostCollisionUpdate), and objects
+// pinned against each other -- floating weeds and bubbles in the water as
+// Garrett jumped in among them -- went on bouncing off each other thousands
+// of times a frame, each bounce an impact and a collision sound: physics
+// frames of a second and a half. Each pair (or object and the world) is
+// resolved at most kMaxPairClsns times a frame; the ones over are dropped
+// (logged, each pair once).
+static const int kMaxPairClsns = 32;
+static const int kMaxFrameClsns = 4000;
+
 static void ResolveCollisions(mxs_real dt)
 {
    cPhysClsn * pClsn;
    int i=0;
+   std::map<unsigned long long, int> pairs;
+   static int s_logged = 0;
 
    pClsn = g_PhysClsns.GetFirst();
    while (pClsn != NULL)
@@ -6412,6 +6425,40 @@ static void ResolveCollisions(mxs_real dt)
          clsn_count++;
          #endif
 
+         ObjID a = pClsn->GetObjID(), b = ((pClsn->GetType()) & kPC_Object) ? pClsn->GetObjID2() : OBJ_NULL;
+         if (b != OBJ_NULL && b < a)
+         {
+            const ObjID t = a;
+            a = b;
+            b = t;
+         }
+         const unsigned long long key = ((unsigned long long)(unsigned)a << 32) | (unsigned)b;
+         int &n = pairs[key];
+         if (++i > kMaxFrameClsns)
+         {
+            // (and a frame at most kMaxFrameClsns in all)
+            if (i == kMaxFrameClsns + 1 && s_logged < 40)
+            {
+               ++s_logged;
+               mprintf("Physics: over %d collisions in a frame (%d pairs) -- the rest dropped\n",
+                       kMaxFrameClsns, (int)pairs.size());
+            }
+            delete pClsn;
+            pClsn = g_PhysClsns.GetFirst();
+            continue;
+         }
+         if (++n > kMaxPairClsns)
+         {
+            if (n == kMaxPairClsns + 1 && s_logged < 40)
+            {
+               ++s_logged;
+               mprintf("Physics: %s and %s collided over %d times in a frame -- the rest dropped\n",
+                       ObjWarnName(a), b != OBJ_NULL ? ObjWarnName(b) : "the world", kMaxPairClsns);
+            }
+            delete pClsn;
+            pClsn = g_PhysClsns.GetFirst();
+            continue;
+         }
          ResolveCollision(pClsn, dt);
       }
       else

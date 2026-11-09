@@ -633,6 +633,8 @@ static BOOL g_BodyOneShot = FALSE;  // that, once through (a swing, a shot, read
 // His bow drawn and held: the archer's shot stopped at its loosing (its
 // motion's fire-release flag), the creature frozen there until he lets go
 static BOOL g_BodyAiming = FALSE, g_BodyHeld = FALSE;
+// crouching or in the air: a pose held (no schema has either for a humanoid)
+static BOOL g_BodyPoseHeld = FALSE;
 static BOOL g_BodyShotFlagged = FALSE;   // this shot's loosing flag reached
 static int g_BodyShotLog = 0;
 
@@ -704,7 +706,7 @@ static void PlayerBodyDestroy()
       DestroyObject(g_BodyObj);
    }
    g_BodyObj = OBJ_NULL;
-   g_BodyAiming = g_BodyHeld = FALSE;
+   g_BodyAiming = g_BodyHeld = g_BodyPoseHeld = FALSE;
    PlayerBodyItemDestroy();
    g_BodyState = -1;
    g_BodyTags[0] = 0;
@@ -1072,7 +1074,7 @@ static void PlayerBodyUpdate(ulong dt)
    const int arm = armed ? PlayerBodyArmAction(g_BodyWeapon, &swing) : kBodyArm_None;
    // (the bow held drawn: let go -- loosed, relaxed, put away -- the shot
    // goes on from where it stopped)
-   g_BodyAiming = arm == kBodyArm_Aim && !crouched;
+   g_BodyAiming = arm == kBodyArm_Aim && !crouched && !inAir;
    if (g_BodyHeld && !g_BodyAiming)
    {
       CreatureUnFreeze(g_BodyObj);
@@ -1155,6 +1157,31 @@ static void PlayerBodyUpdate(ulong dt)
       if (oneShot && strcmp(act, s_done) == 0)
          act[0] = 0, oneShot = FALSE;
    }
+   // Crouching, in the air: no schema has either for a humanoid -- a pose
+   // held: a guard's reach down to the floor stopped at its lowest, a
+   // stride of the run stopped in mid-air
+   const int pose = inAir ? 2 : crouched ? 1 : 0;
+   static int s_pose = 0, s_poseFor = 0;
+   static float s_lowest = 1e9f;
+   BOOL poseEnded = FALSE;
+   if (pose != s_pose)
+   {
+      if (g_BodyPoseHeld)
+      {
+         CreatureUnFreeze(g_BodyObj);
+         g_BodyPoseHeld = FALSE;
+      }
+      poseEnded = TRUE;
+      s_pose = pose;
+      s_lowest = 1e9f;
+      s_poseFor = 0;
+   }
+   if (pose)
+   {
+      strcpy(act, pose == 1 ? "WorldFrob 0, OnFloor 0" : "Locomote 0, LocoUrgent 0");
+      oneShot = TRUE;
+      stepping = FALSE;
+   }
    // turning as a body turns, not at once: up to a turn and a half a second
    static mxs_ang s_facing = 0;
    static BOOL s_facingSet = FALSE;
@@ -1180,8 +1207,20 @@ static void PlayerBodyUpdate(ulong dt)
       if (butt > 1.0f && butt < 6.0f)
          g_BodyButt += (butt - g_BodyButt) * 0.1f;
    }
+   // (held -- a pose, the bow drawn -- its height over his feet as it was
+   // when it stopped, carried up and down with him: the jump, the stairs)
+   const BOOL held = g_BodyHeld || g_BodyPoseHeld;
+   static float s_heldButt = 3.0f;
+   static BOOL s_heldButtSet = FALSE;
+   if (!held)
+      s_heldButtSet = FALSE;
+   else if (!s_heldButtSet && bp)
+   {
+      s_heldButt = bp->loc.vec.z - foot.z;
+      s_heldButtSet = TRUE;
+   }
    mxs_vector at = foot;
-   at.z += g_BodyButt;
+   at.z += held ? s_heldButt : g_BodyButt;
    mxs_angvec fac;
    fac.tx = fac.ty = 0;
    fac.tz = facingTo;
@@ -1193,7 +1232,7 @@ static void PlayerBodyUpdate(ulong dt)
       at.x += cosf(a) * 7.0f;
       at.y += sinf(a) * 7.0f;
    }
-   CreatureFreeHeight(s_sinceAir < 30 ? g_BodyObj : OBJ_NULL);
+   CreatureFreeHeight((s_sinceAir < 30 || held) ? g_BodyObj : OBJ_NULL);
    ObjPosUpdate(g_BodyObj, &at, &fac);
    CreatureFreeHeight(OBJ_NULL);
 
@@ -1208,8 +1247,9 @@ static void PlayerBodyUpdate(ulong dt)
    // flick -- only another of them, or putting the weapon away, does)
    static ulong s_oneShotFor = 0;
    s_oneShotFor += dt;
-   const BOOL busy = g_BodyOneShot && status != kMCoord_Idle && g_BodyTags[0] && armed &&
-                     (g_BodyHeld || s_oneShotFor < 5000) &&   // (none stuck playing)
+   const BOOL busy = g_BodyOneShot && status != kMCoord_Idle && g_BodyTags[0] && (armed || pose) &&
+                     !poseEnded &&
+                     (g_BodyHeld || g_BodyPoseHeld || s_oneShotFor < 5000) &&   // (none stuck playing)
                      !(oneShot && strncmp(g_BodyTags, act, strlen(act)) != 0);
    if (!busy && (strcmp(tags, g_BodyTags) != 0 || status == kMCoord_Idle || status == kMCoord_ActiveInterrupt))
    {
@@ -1268,14 +1308,49 @@ static void PlayerBodyUpdate(ulong dt)
          s_oneShotFor = 0;
          g_BodyShotFlagged = FALSE;
       }
-      if (g_BodyHeld)
+      if (g_BodyHeld || g_BodyPoseHeld)
       {
          CreatureUnFreeze(g_BodyObj);
-         g_BodyHeld = FALSE;
+         g_BodyHeld = g_BodyPoseHeld = FALSE;
       }
       strcpy(g_BodyTags, tags);
       g_BodyOneShot = oneShot;
       g_BodyState = state;
+   }
+   // the pose stopped: crouching, where the reach down is lowest (where
+   // it begins to rise again; at most at 60% of it); in the air, a quarter
+   // of the way through the run's stride (a few updates in: not the motion
+   // before it, still blending out)
+   if (pose && !g_BodyPoseHeld && g_BodyOneShot && strncmp(g_BodyTags, act, strlen(act)) == 0 &&
+       ++s_poseFor >= 3)
+   {
+      float frac = 0;
+      const char *name = "?";
+      const BOOL known = BodyMotionAt(CreatureGetMotorInterface(g_BodyObj), &frac, &name);
+      BOOL stop = FALSE;
+      if (pose == 1)
+      {
+         mxs_vector lo, hi;
+         if (ObjGetWorldBBox(g_BodyObj, &lo, &hi))
+         {
+            const float h = hi.z - lo.z;
+            if (h < s_lowest)
+               s_lowest = h;
+            else if (h > s_lowest + 0.05f && frac > 0.1f)
+               stop = TRUE;
+         }
+         if (known && frac >= 0.6f)
+            stop = TRUE;
+      }
+      else if (known && frac >= 0.25f)
+         stop = TRUE;
+      if (stop)
+      {
+         CreatureFreeze(g_BodyObj);
+         g_BodyPoseHeld = TRUE;
+         if (g_BodyShotLog++ < 100)
+            mprintf("PlyrBody: %s held (%s at %.0f%%)\n", pose == 1 ? "crouching" : "in the air", name, frac * 100.0f);
+      }
    }
    if (g_BodyState != -1 && g_BodyPosed < 1000)
       ++g_BodyPosed;
