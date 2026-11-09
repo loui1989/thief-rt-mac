@@ -70,6 +70,7 @@ public:
    void FinishMode();
 
    cPlayerAbility *GetCurrentAbility() { return m_pCurAbility; }
+   int GetCurSkill() { return m_CurSkill; }
 
 private:
    void SetInput(ePlayerInput input, tPlayerActionType actType=kPlayerActionTypeInvalid) { m_Input=input; m_ActionType=actType; }
@@ -622,6 +623,9 @@ static IMotionCoordinator *g_pBodyMCoord = NULL;
 static int g_BodyState = -1;     // what it was last set doing (BodyStateTags)
 static float g_BodyButt = 3.0f;  // its object's height over its feet (ft)
 static BOOL g_BodyGaveUp = FALSE;
+static int g_BodyPosed = 0;      // updates since its first motion (drawn after: not in its bind pose)
+static char g_BodyTags[128] = "";   // what it was last set doing
+static BOOL g_BodyOneShot = FALSE;  // that, once through (a swing, a shot, readying)
 
 static const char *const g_BodyModels[] =
 {
@@ -642,6 +646,8 @@ static void PlayerBodyDestroy()
       DestroyObject(g_BodyObj);
    g_BodyObj = OBJ_NULL;
    g_BodyState = -1;
+   g_BodyTags[0] = 0;
+   g_BodyPosed = 0;
 }
 
 // a model the mission has, and a jointed one: a name with no model behind
@@ -727,6 +733,65 @@ BOOL PlayerBodyShowsWeapon()
    return g_BodyShowsWeapon;
 }
 
+// What his hands do, from the first-person arm's skill (this cerebellum's):
+// the sword drawn and ready (its wind-up too), swung, blocking, being drawn;
+// the bow lifted, drawn, loosed, being readied. A skill without a sword tag
+// (held at the block, held wound up) goes on as the one before it.
+enum { kBodyArm_None, kBodyArm_Ready, kBodyArm_Swing, kBodyArm_Block, kBodyArm_Readying, kBodyArm_Aim };
+
+static int BodyTagValue(const cTagSet &tags, const char *type)
+{
+   for (int i = 0; i < tags.Size(); ++i)
+   {
+      const cTag *t = tags.GetEntry(i);
+      if (strcasecmp(t->GetType(), type) == 0)
+         return t->GetIntValue();
+   }
+   return -1;
+}
+
+static int PlayerBodyArmAction(int weapon, int *swing)
+{
+   static int s_sword = kBodyArm_None, s_swing = 0;
+   *swing = s_swing;
+   if (!g_pPlayerCerebellum || weapon == 0)
+      return s_sword = kBodyArm_None;
+   cPlayerAbility *pA = g_pPlayerCerebellum->GetCurrentAbility();
+   const int skill = g_pPlayerCerebellum->GetCurSkill();
+   if (!pA || skill == kSkillInvalid)
+      return kBodyArm_None;
+   if (weapon == 2)
+   {
+      // drkwbow_.c: 0 idle, 1 lift, 2 draw, 3 loose, 4 relax, 5 begin, 6 end
+      switch (skill)
+      {
+         case 1: case 2: case 3: return kBodyArm_Aim;
+         case 5: return kBodyArm_Readying;
+         default: return kBodyArm_None;
+      }
+   }
+   // drkwswd_.c: PlyrSword 0 ready, 1 wind-up, 2 swing (PlyrSwordSwing 0
+   // short, 1 medium, 2 long), 3 block, 4 begin, 5 end, 6 directed block
+   cTagSet tags;
+   if (!pA->GetMotionTags(skill, &tags))
+      return s_sword;
+   switch (BodyTagValue(tags, "PlyrSword"))
+   {
+      case 0: case 1: s_sword = kBodyArm_Ready; break;
+      case 2:
+         s_sword = kBodyArm_Swing;
+         s_swing = BodyTagValue(tags, "PlyrSwordSwing");
+         if (s_swing < 0) s_swing = 0;
+         break;
+      case 3: case 6: s_sword = kBodyArm_Block; break;
+      case 4: s_sword = kBodyArm_Readying; break;
+      case 5: s_sword = kBodyArm_None; break;
+      default: break;
+   }
+   *swing = s_swing;
+   return s_sword;
+}
+
 // 0 standing, 1 walking, 2 running, 3 walking backwards, 4 crouching,
 // 5 creeping (crouched, moving)
 static const char *BodyStateTags(int state)
@@ -773,13 +838,23 @@ static void PlayerBodyUpdate(ulong dt)
          if (g_BodyGaveUp)
             return;
          const char *model = PlayerBodyModelFor(weapon);
-         if (g_BodyObj == OBJ_NULL || !model || strcmp(model, g_BodyModel) != 0)
+         if (g_BodyObj == OBJ_NULL || !model)
          {
             if (!PlayerBodyMake(model))
             {
                g_BodyGaveUp = TRUE;
                return;
             }
+         }
+         else if (strcmp(model, g_BodyModel) != 0)
+         {
+            // the same creature, another model (a humanoid's both): it goes
+            // on with what it was doing -- made anew, it stood in its bind
+            // pose (arms out) until its first motion
+            ObjSetModelName(g_BodyObj, model);
+            strncpy(g_BodyModel, model, sizeof(g_BodyModel) - 1);
+            g_BodyModel[sizeof(g_BodyModel) - 1] = 0;
+            mprintf("Garrett's shadow: his body double is now a \"%s\"\n", model);
          }
          g_BodyWeapon = weapon;
          const BOOL bow = strcmp(g_BodyModel, "thiefbow") == 0;
@@ -812,10 +887,16 @@ static void PlayerBodyUpdate(ulong dt)
    const mxs_ang going = (mxs_ang)(atan2f(vel.y, vel.x) / (2.0f * 3.14159265f) * 65536.0f);
    const short ahead = (short)(going - look);   // how far from where he looks he goes
    const BOOL crouched = GetPlayerMode() == kPM_Crouch;
-   // Facing: where he looks; going sideways (a humanoid has no side step
-   // in its schemas) turned part of the way, a third of a right angle at
-   // most, walking forward -- turned all the way it looked like walking off
-   // to the side. Backing away: walking backwards, facing ahead.
+   // What he does: with his sword out, as a guard fights -- stepping
+   // forward, back and to the side facing ahead (the schemas' sword
+   // fighting moves), swinging, blocking; with his bow, an archer's
+   // shot as he draws it; drawing either, a guard's readying of it. Else
+   // (and running, crouching): walking. Facing where he looks; walking
+   // sideways turned part of the way, a third of a right angle at most
+   // (a humanoid has no side step to walk with) -- turned all the way it
+   // looked like walking off to the side. Backing away: walking backwards.
+   int swing = 0;
+   const int arm = g_BodyShowsWeapon ? PlayerBodyArmAction(g_BodyWeapon, &swing) : kBodyArm_None;
    int state;
    short turn = 0;
    if (speed < 1.0f)
@@ -826,6 +907,57 @@ static void PlayerBodyUpdate(ulong dt)
    {
       state = crouched ? 5 : speed > 11.0f ? 2 : 1;
       turn = ahead > 0x1555 ? 0x1555 : ahead < -0x1555 ? -0x1555 : ahead;
+   }
+   char act[96] = "";
+   BOOL oneShot = FALSE, stepping = FALSE;
+   if (!crouched && state != 2)
+   {
+      const char *item = g_BodyWeapon == 2 ? "ItemBow" : "ItemSword";
+      switch (arm)
+      {
+         case kBodyArm_Swing:
+            // (short: at the middle; medium: high; long: low)
+            sprintf(act, "MeleeCombat 0, Attack 0, Direction %d", swing == 1 ? 5 : swing == 2 ? 6 : 0);
+            oneShot = TRUE;
+            break;
+         case kBodyArm_Block:
+            strcpy(act, "MeleeCombat 0, Block 0");
+            break;
+         case kBodyArm_Readying:
+            sprintf(act, "ReadyItem 0, %s 0", item);
+            oneShot = TRUE;
+            break;
+         case kBodyArm_Aim:
+            strcpy(act, "RangedCombat 0");
+            oneShot = TRUE;
+            break;
+         case kBodyArm_Ready:
+            if (speed < 1.0f)
+               strcpy(act, "MeleeCombat 0, Stand 0");
+            else
+            {
+               // Direction 1 left, 2 right, 3 forward, 4 backward
+               const int dir = (ahead < 0x2000 && ahead > -0x2000) ? 3
+                             : (ahead > 0x6000 || ahead < -0x6000) ? 4
+                             : ahead > 0 ? 1 : 2;
+               sprintf(act, "MeleeCombat 0, Locomote 0, Direction %d", dir);
+               stepping = TRUE;
+            }
+            break;
+      }
+      // (a swing, a shot, a readying once through: what he does besides,
+      // until his hands do something else)
+      static int s_lastArm = -1;
+      static char s_done[96] = "";
+      if (arm != s_lastArm)
+         s_done[0] = 0, s_lastArm = arm;
+      if (act[0] && g_BodyOneShot && g_pBodyMCoord->GetStatus() == kMCoord_Idle &&
+          strncmp(g_BodyTags, act, strlen(act)) == 0)
+         strcpy(s_done, act);
+      if (oneShot && strcmp(act, s_done) == 0)
+         act[0] = 0, oneShot = FALSE;
+      if (act[0])
+         turn = 0;
    }
    // turning as a body turns, not at once: up to a turn and a half a second
    static mxs_ang s_facing = 0;
@@ -867,36 +999,71 @@ static void PlayerBodyUpdate(ulong dt)
    }
    ObjPosUpdate(g_BodyObj, &at, &fac);
 
-   // what it is doing: as the AIs' bodies are told (cAIMoveEnactor)
+   // what it is doing: as the AIs' bodies are told (cAIMoveEnactor), with
+   // the weapon he holds as an armed AI's persistent tag
+   const char *with = !g_BodyShowsWeapon ? "" : g_BodyWeapon == 1 ? ", WithSword 0" : g_BodyWeapon == 2 ? ", WithBow 0" : "";
+   char tags[128];
+   snprintf(tags, sizeof(tags), "%s%s", act[0] ? act : BodyStateTags(state), with);
    const eMCoordStatus status = g_pBodyMCoord->GetStatus();
-   if (state != g_BodyState || status == kMCoord_Idle || status == kMCoord_ActiveInterrupt)
+   // (a swing, a shot, a readying not cut short)
+   const BOOL busy = act[0] && g_BodyOneShot && status != kMCoord_Idle &&
+                     strncmp(g_BodyTags, act, strlen(act)) == 0;
+   if (!busy && (strcmp(tags, g_BodyTags) != 0 || status == kMCoord_Idle || status == kMCoord_ActiveInterrupt))
    {
       sMcMoveParams params;
       params.mask = kMotParmFlag_Direction | kMotParmFlag_Duration | kMotParmFlag_Facing;
       params.direction.tx = params.direction.ty = 0;
-      params.direction.tz = (state == 0 || state == 4) ? facingTo : going;   // (the way he goes)
+      const BOOL moving = stepping || (!act[0] && (state == 1 || state == 2 || state == 3 || state == 5));
+      params.direction.tz = moving ? going : facingTo;   // (the way he goes)
       params.facing = fac;
       params.duration = dt;
-      params.tags = cTagSet(BodyStateTags(state));
-      if (state == 1 || state == 2 || state == 3 || state == 5)
+      if (moving)
       {
          params.distance = speed * 0.5f;
          params.mask |= kMotParmFlag_Distance;
       }
-      IMotionPlan *pPlan = g_pBodyMCoord->BuildPlan(g_pBodyMCoord->GetNextEndState(), &params);
-      if (!pPlan && (state == 4 || state == 5))
+      // what it is asked, then without the weapon's tag, then the walk
+      // (crouched: standing, walking) -- the first the schemas have
+      char tries[4][128];
+      int n = 0;
+      strcpy(tries[n++], tags);
+      if (with[0])
+         strcpy(tries[n++], act[0] ? act : BodyStateTags(state));
+      if (act[0])
+         strcpy(tries[n++], BodyStateTags(state));
+      if (state == 4 || state == 5)
+         strcpy(tries[n++], BodyStateTags(state == 4 ? 0 : 1));
+      IMotionPlan *pPlan = NULL;
+      int got = -1;
+      for (int i = 0; i < n && !pPlan; ++i)
       {
-         // no crouching schema for it: standing, walking
-         params.tags = cTagSet(BodyStateTags(state == 4 ? 0 : 1));
+         params.tags = cTagSet(tries[i]);
          pPlan = g_pBodyMCoord->BuildPlan(g_pBodyMCoord->GetNextEndState(), &params);
+         if (pPlan)
+            got = i;
       }
       if (pPlan)
       {
          g_pBodyMCoord->SetCurrentManeuver(pPlan->PopFirstManeuver());
          delete pPlan;
       }
+      static int s_logged = 0;
+      if (strcmp(tags, g_BodyTags) != 0 && s_logged < 200)
+      {
+         ++s_logged;
+         if (got == 0)
+            mprintf("PlyrBody: %s\n", tags);
+         else if (got > 0)
+            mprintf("PlyrBody: %s -- no schema, so %s\n", tags, tries[got]);
+         else
+            mprintf("PlyrBody: %s -- no schema (nor for its fallbacks)\n", tags);
+      }
+      strcpy(g_BodyTags, tags);
+      g_BodyOneShot = oneShot;
       g_BodyState = state;
    }
+   if (g_BodyState != -1 && g_BodyPosed < 1000)
+      ++g_BodyPosed;
 }
 
 static void PlayerBodyReset()
@@ -907,7 +1074,8 @@ static void PlayerBodyReset()
 
 ObjID PlayerBodyDouble()
 {
-   return (g_BodyObj != OBJ_NULL && ObjectExists(g_BodyObj)) ? g_BodyObj : OBJ_NULL;
+   // (not until its first motion has posed it)
+   return (g_BodyObj != OBJ_NULL && ObjectExists(g_BodyObj) && g_BodyPosed >= 2) ? g_BodyObj : OBJ_NULL;
 }
 
 void PlayerCbllmUpdate(ulong dt)
