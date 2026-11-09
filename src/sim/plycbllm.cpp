@@ -44,6 +44,7 @@
 #include <drkwswd.h>   // WeaponIsSword
 #include <weapon.h>    // GetWeaponObjID
 #include <crjoint.h>   // GetCreatureJointPos
+#include <mvrflags.h>  // MF_FIRE_RELEASE
 #include <string.h>
 #include <mprintf.h>
 #include <math.h>
@@ -627,6 +628,18 @@ static BOOL g_BodyGaveUp = FALSE;
 static int g_BodyPosed = 0;      // updates since its first motion (drawn after: not in its bind pose)
 static char g_BodyTags[128] = "";   // what it was last set doing
 static BOOL g_BodyOneShot = FALSE;  // that, once through (a swing, a shot, readying)
+// His bow drawn and held: the archer's shot stopped at its loosing (its
+// motion's fire-release flag), the creature frozen there until he lets go
+static BOOL g_BodyAiming = FALSE, g_BodyHeld = FALSE;
+
+static void BodyFireRelease(ObjID obj, IMotor *, cMotionCoordinator *, const int)
+{
+   if (obj == g_BodyObj && g_BodyAiming && !g_BodyHeld)
+   {
+      CreatureFreeze(obj);
+      g_BodyHeld = TRUE;
+   }
+}
 
 static const char *const g_BodyModels[] =
 {
@@ -646,8 +659,12 @@ static void PlayerBodyDestroy()
       g_pBodyMCoord = NULL;
    }
    if (g_BodyObj != OBJ_NULL && ObjectExists(g_BodyObj))
+   {
+      RemoveMotionFlagListener(g_BodyObj, MF_FIRE_RELEASE);
       DestroyObject(g_BodyObj);
+   }
    g_BodyObj = OBJ_NULL;
+   g_BodyAiming = g_BodyHeld = FALSE;
    PlayerBodyItemDestroy();
    g_BodyState = -1;
    g_BodyTags[0] = 0;
@@ -728,6 +745,7 @@ static BOOL PlayerBodyMake(const char *model)
    g_pBodyMCoord = MotSysCreateMotionCoordinator();
    g_pBodyMCoord->SetMotor(pMotor);
    g_BodyState = -1;
+   AddMotionFlagListener(obj, MF_FIRE_RELEASE, BodyFireRelease);
    strncpy(g_BodyModel, model, sizeof(g_BodyModel) - 1);
    g_BodyModel[sizeof(g_BodyModel) - 1] = 0;
    mprintf("Garrett's shadow: his body double is a \"%s\" (object %d)\n", model, obj);
@@ -789,19 +807,22 @@ ObjID PlayerBodyHeldItem()
    if (g_BodyItem == OBJ_NULL || !ObjectExists(g_BodyItem) || g_BodyObj == OBJ_NULL ||
        !CreatureExists(g_BodyObj))
       return OBJ_NULL;
-   // In the right wrist's frame a thief model's sword runs out along -y,
-   // its hilt in the fist 0.45 ft out; the blackjack model lies along z,
-   // its handle at -z (its end at -0.98), its head at +z. So: the model's
-   // z along the hand's -y, its grip (0.75 ft from its middle) in the fist.
+   // In the right wrist's frame (a thief model's) the hand runs out along
+   // -y, the forearm's line, flat across z (its palm), its fist 0.45 ft
+   // out; a sword runs on along -y (tipped a little toward +x, the thumb).
+   // The blackjack model lies along z, its handle at -z (its end at -0.98),
+   // its head at +z. Held upright, as he holds it: across the fist, its
+   // head out at the thumb (+x), its grip (0.7 ft from its middle) in the
+   // fist -- along the forearm it hung from the hand.
    const mxs_vector &wrist = GetCreatureJointPos(g_BodyObj, kCJ_RWrist);
    const mxs_matrix &orient = GetCreatureJointOrient(g_BodyObj, kCJ_RWrist);
    mxs_matrix r, m;
-   mx_mk_vec(&r.vec[0], 1, 0, 0);
+   mx_mk_vec(&r.vec[0], 0, 1, 0);    // (the model's x, y, z in the wrist's frame)
    mx_mk_vec(&r.vec[1], 0, 0, 1);
-   mx_mk_vec(&r.vec[2], 0, -1, 0);
+   mx_mk_vec(&r.vec[2], 1, 0, 0);
    mx_mul_mat(&m, &orient, &r);
    mxs_vector rel, at;
-   mx_mk_vec(&rel, 0.04f, -1.20f, -0.04f);
+   mx_mk_vec(&rel, 0.75f, -0.45f, -0.04f);
    mx_mat_mul_vec(&at, &orient, &rel);
    mx_addeq_vec(&at, &wrist);
    mxs_angvec fac;
@@ -814,7 +835,8 @@ ObjID PlayerBodyHeldItem()
 // the sword drawn and ready (its wind-up too), swung, blocking, being drawn;
 // the bow lifted, drawn, loosed, being readied. A skill without a sword tag
 // (held at the block, held wound up) goes on as the one before it.
-enum { kBodyArm_None, kBodyArm_Ready, kBodyArm_Swing, kBodyArm_Block, kBodyArm_Readying, kBodyArm_Aim };
+enum { kBodyArm_None, kBodyArm_Ready, kBodyArm_Swing, kBodyArm_Block, kBodyArm_Readying, kBodyArm_Aim,
+       kBodyArm_Loose };
 
 static int BodyTagValue(const cTagSet &tags, const char *type)
 {
@@ -842,7 +864,8 @@ static int PlayerBodyArmAction(int weapon, int *swing)
       // drkwbow_.c: 0 idle, 1 lift, 2 draw, 3 loose, 4 relax, 5 begin, 6 end
       switch (skill)
       {
-         case 1: case 2: case 3: return kBodyArm_Aim;
+         case 1: case 2: return kBodyArm_Aim;
+         case 3: return kBodyArm_Loose;
          case 5: return kBodyArm_Readying;
          default: return kBodyArm_None;
       }
@@ -979,6 +1002,14 @@ static void PlayerBodyUpdate(ulong dt)
    int swing = 0;
    const BOOL armed = g_BodyShowsWeapon || (g_BodyWeapon == 3 && g_BodyItem != OBJ_NULL);
    const int arm = armed ? PlayerBodyArmAction(g_BodyWeapon, &swing) : kBodyArm_None;
+   // (the bow held drawn: let go -- loosed, relaxed, put away -- the shot
+   // goes on from where it stopped)
+   g_BodyAiming = arm == kBodyArm_Aim && !crouched;
+   if (g_BodyHeld && !g_BodyAiming)
+   {
+      CreatureUnFreeze(g_BodyObj);
+      g_BodyHeld = FALSE;
+   }
    int state;
    const BOOL backing = ahead > 0x6000 || ahead < -0x6000;
    if (speed < 1.0f)
@@ -1010,6 +1041,7 @@ static void PlayerBodyUpdate(ulong dt)
             oneShot = TRUE;
             break;
          case kBodyArm_Aim:
+         case kBodyArm_Loose:
             strcpy(act, "RangedCombat 0");
             oneShot = TRUE;
             break;
@@ -1088,9 +1120,11 @@ static void PlayerBodyUpdate(ulong dt)
    char tags[128];
    snprintf(tags, sizeof(tags), "%s%s", act[0] ? act : BodyStateTags(state), with);
    const eMCoordStatus status = g_pBodyMCoord->GetStatus();
-   // (a swing, a shot, a readying not cut short)
-   const BOOL busy = act[0] && g_BodyOneShot && status != kMCoord_Idle &&
-                     strncmp(g_BodyTags, act, strlen(act)) == 0;
+   // (a swing, a shot, a readying not cut short: his own swing is over
+   // well before a guard's, and his hands back at the ready cut it to a
+   // flick -- only another of them, or putting the weapon away, does)
+   const BOOL busy = g_BodyOneShot && status != kMCoord_Idle && g_BodyTags[0] && armed &&
+                     !(oneShot && strncmp(g_BodyTags, act, strlen(act)) != 0);
    if (!busy && (strcmp(tags, g_BodyTags) != 0 || status == kMCoord_Idle || status == kMCoord_ActiveInterrupt))
    {
       sMcMoveParams params;
