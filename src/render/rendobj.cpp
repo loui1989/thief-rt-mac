@@ -3146,25 +3146,16 @@ extern "C" void RenderRTGameDrawExtraObjects(void)
       rendobj_core_render_object(obj, OBJ_NO_SPLIT, idx, NULL, ptmf->render, ptmf);
       --budget;
    }
-   // Garrett himself, every frame: the player's own model (in Thief Gold a
-   // standing figure, not walking), upright -- the player object leans with
-   // the view as it looks up and down -- for his shadow and his reflection.
+   // Garrett himself, every frame: his body double (plycbllm.cpp), a thief
+   // of the game's walking as he walks, for his shadow and his reflection.
    // The ray tracer keeps it from the camera.
-   if (player != OBJ_NULL && ObjHasRefs(player) && ObjRenderType(player) != kRenderNotAtAll &&
-       RenderRTPlayerBodyWanted((uint32_t)player))
+   const ObjID body = PlayerBodyDouble();
+   if (body != OBJ_NULL && RenderRTPlayerBodyWanted((uint32_t)body))
    {
-      Position *pos = ObjPosGet(player);
-      const int type = rendobj_type(player);
       int idx;
-      model_funcs *ptmf = rendobj_get_model_funcs(player, &idx);
-      if (pos && ptmf && ptmf->render && (type == OM_TYPE_MD || type == OM_TYPE_MESH))
-      {
-         const mxs_angvec keep = pos->fac;
-         pos->fac.tx = 0;
-         pos->fac.ty = 0;
-         rendobj_core_render_object(player, OBJ_NO_SPLIT, idx, NULL, ptmf->render, ptmf);
-         pos->fac = keep;
-      }
+      model_funcs *ptmf = rendobj_get_model_funcs(body, &idx);
+      if (ptmf && ptmf->render)
+         rendobj_core_render_object(body, OBJ_NO_SPLIT, idx, NULL, ptmf->render, ptmf);
    }
 }
 

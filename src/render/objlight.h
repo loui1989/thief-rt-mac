@@ -48,6 +48,10 @@ EXTERN void setup_object_lighting(ObjID o, mxs_vector *newlight, float bright);
 
 // compute correct lighting
 EXTERN float compute_object_lighting(ObjID o);
+// where the light most on an object casts its shadow (the guards seeing the
+// player's: g_PlayerShadowAlert, the setting)
+EXTERN BOOL compute_object_shadow_spot(ObjID o, mxs_vector *spot, float *strength);
+EXTERN int g_PlayerShadowAlert;
 
 // for highlighting currently focused object
 EXTERN float objlight_highlight_level;

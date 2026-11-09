@@ -72,6 +72,10 @@
 #include <objslit.h>
 
 // Must be last header
+#include <objlight.h>
+#include <port.h>
+#include <wrtype.h>
+#include <mprintf.h>
 #include <dbmem.h>
 
 #define ClearVision(pAwareness) { pSense->flags &= ~(kAIAF_Seen | kAIAF_HaveLOS);  }
@@ -1168,6 +1172,8 @@ STDMETHODIMP cAISenses::Update(ObjID objId, unsigned flags)
 
    sVisionArgs args;
    float zDiff;
+   BOOL shadowSeen = FALSE;   // (the player's shadow, below)
+   mxs_vector shadowSpot;
 
    if ((!IsAPlayer(objId) || m_pAIState->GetMode() >= kAIM_Normal) &&
        (zDiff = m_pAIState->DiffZ(locObject)) < kMaxZSense &&
@@ -1196,6 +1202,42 @@ STDMETHODIMP cAISenses::Update(ObjID objId, unsigned flags)
          visionPulse = Look(args, pAwareness);
 
       soundPulse = Listen(objId, pAwareness, &soundLoc);
+
+      // The player's shadow, seen where it falls (the port's setting, off
+      // unless chosen): the light most on him casts it on the wall or floor
+      // behind him; a guard looking that way, the place in its sight, a
+      // shadow strong enough (his light at least 0.15) -- something moved
+      // there. Suspicious; searching if it is strong and near. It goes to
+      // look where the shadow was, not where he is. Not once it sees him.
+      if (IsAPlayer(objId) && g_PlayerShadowAlert && visionPulse < kAIAL_Low && args.pVisionDesc)
+      {
+         float strength;
+         if (compute_object_shadow_spot(objId, &shadowSpot, &strength) && strength >= 0.15f)
+         {
+            const float dx = shadowSpot.x - args.fromLoc.vec.x, dy = shadowSpot.y - args.fromLoc.vec.y;
+            const float dz = shadowSpot.z - args.fromLoc.vec.z;
+            const float distSq = dx * dx + dy * dy;
+            if (distSq < sq(40.0) && distSq > sq(1.0) && ffabsf(dz) < 15.0 &&
+                ffabsf(Delta(GetVisionFacing(), floatang(args.fromLoc.vec.x, args.fromLoc.vec.y,
+                                                          shadowSpot.x, shadowSpot.y)).value) < DEGREES(70))
+            {
+               Location at, hit;
+               MakeHintedLocationFromVector(&at, &shadowSpot, &args.fromLoc);
+               if (PortalRaycast(&args.fromLoc, &at, &hit, 0))
+               {
+                  visionPulse = (strength >= 0.4f && distSq < sq(20.0)) ? kAIAL_Moderate : kAIAL_Low;
+                  shadowSeen = TRUE;
+                  static int s_told = 0;
+                  if (s_told < 20)
+                  {
+                     ++s_told;
+                     mprintf("AI %d saw the player's shadow %.0f ft away (light %.2f): %s\n", GetID(),
+                             sqrt(distSq), strength, visionPulse == kAIAL_Moderate ? "searching" : "suspicious");
+                  }
+               }
+            }
+         }
+      }
    }
    else
    {
@@ -1270,7 +1312,7 @@ STDMETHODIMP cAISenses::Update(ObjID objId, unsigned flags)
    //
    // Update the awareness and awareness links
    //
-   Pulse(pAwareness, visionPulse, locObject, soundPulse, soundLoc);
+   Pulse(pAwareness, visionPulse, shadowSeen ? cMxsVector(shadowSpot) : locObject, soundPulse, soundLoc);
    SetAwareness(objId, linkID, pAwareness);
 
    return S_OK;

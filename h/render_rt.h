@@ -77,8 +77,12 @@ int RenderRTGameObjectPose(uint32_t obj, float pose[6]);
 // Implemented by the game, called before RenderRTSceneEnd: draws the objects
 // near the camera the view did not (RenderRTObjectWanted decides which).
 void RenderRTGameDrawExtraObjects(void);
-// Garrett's own model, drawn each frame for the ray tracer (the setting):
-// unseen by the camera, but casting his shadow and seen in reflections.
+// Garrett's body double (plycbllm.cpp), drawn each frame for the ray
+// tracer: unseen by the camera, but casting his shadow and seen in
+// reflections. RenderRTPlayerBodyActive: whether there is to be one (the
+// setting, and the ray tracer running); RenderRTPlayerBodyWanted, as it is
+// drawn: nonzero to draw it.
+int RenderRTPlayerBodyActive(void);
 int RenderRTPlayerBodyWanted(uint32_t obj);
 // Implemented by the game: the object's name, for the inspector.
 void RenderRTGameObjectName(uint32_t obj, char *buf, int size);

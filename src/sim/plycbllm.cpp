@@ -31,6 +31,16 @@
 #include <rendprop.h>
 #include <mnumprop.h>
 #include <dmgmodel.h>
+#include <objsys.h>
+#include <creatext.h>
+#include <physapi.h>
+#include <port.h>
+#include <wrtype.h>
+#include <plyrmode.h>
+#include <objshape.h>
+#include <render_rt.h>
+#include <mprintf.h>
+#include <math.h>
 
 #include <dbmem.h> // must be last header
 
@@ -576,8 +586,11 @@ void PlayerCbllmCreate()
    AssertMsg(g_pPlayerCerebellum,"Could not create player cerebellum\n");
 }
 
+static void PlayerBodyReset();   // (below)
+
 void PlayerCbllmDestroy()
 {
+   PlayerBodyReset();
    PlayerSwitchMode(kPlayerModeInvalid); // so handler knows we're finished
    if(g_pPlayerCerebellum)
    {
@@ -586,12 +599,230 @@ void PlayerCbllmDestroy()
    }
 }
 
+
+////////////////////////////////////////////////////////////////
+//
+// Garrett's body double, for the ray tracer's shadow and reflection of him
+// (its setting: RenderRTPlayerBodyActive). A thief of the game's own -- a
+// model and the motion-captured walk the guards' thieves have -- made as
+// the player's arm is (a transient creature, in no cell, unseen by the
+// view), kept where the player stands, facing as he faces or goes, walking,
+// running, standing (crouching, where a schema has it) as he does, by the
+// motion system as the AIs are (cAIMoveEnactor's tags). The ray tracer
+// draws it as its "first-person viewer": the camera never sees it.
+//
+
+static ObjID g_BodyObj = OBJ_NULL;
+static IMotionCoordinator *g_pBodyMCoord = NULL;
+static int g_BodyState = -1;     // what it was last set doing (BodyStateTags)
+static float g_BodyButt = 3.0f;  // its object's height over its feet (ft)
+static BOOL g_BodyGaveUp = FALSE;
+
+static const char *const g_BodyModels[] =
+{
+   // Garrett where a mission has him (The Black Parade), else Thief Gold's
+   // and Thief 2's hooded thieves
+   "garrett", "thiefsw", "thief", "thiefbow", "thiefsw2",
+};
+
+static void PlayerBodyDestroy()
+{
+   if (g_pBodyMCoord)
+   {
+      g_pBodyMCoord->SetMotor(NULL);
+      delete g_pBodyMCoord;
+      g_pBodyMCoord = NULL;
+   }
+   if (g_BodyObj != OBJ_NULL && ObjectExists(g_BodyObj))
+      DestroyObject(g_BodyObj);
+   g_BodyObj = OBJ_NULL;
+   g_BodyState = -1;
+}
+
+static BOOL PlayerBodyMake()
+{
+   PlayerBodyDestroy();
+   for (int m = 0; m < (int)(sizeof(g_BodyModels) / sizeof(g_BodyModels[0])); ++m)
+   {
+      IObjectSystem *objsys = AppGetObj(IObjectSystem);
+      ObjID obj = objsys->BeginCreate(ROOT_ARCHETYPE, kObjectConcrete);
+      mxs_vector pos;
+      mxs_angvec facing;
+      mx_zero_vec(&pos);
+      facing.tx = facing.ty = facing.tz = 0;
+      ObjPosUpdate(obj, &pos, &facing);
+      objsys->NameObject(obj, "PlyrBody");
+      objsys->SetObjTransience(obj, TRUE);
+      objsys->EndCreate(obj);
+      SafeRelease(objsys);
+
+      ObjSetModelName(obj, g_BodyModels[m]);
+      ObjSetCreatureType(obj, 0);   // a humanoid (kDCRTYPE_Humanoid)
+      IMotor *pMotor = CreatureExists(obj) ? CreatureGetMotorInterface(obj) : NULL;
+      if (!pMotor)
+      {
+         DestroyObject(obj);
+         continue;
+      }
+      ObjSetHasRefs(obj, FALSE);    // in no cell: the view never draws it
+      CreatureMakeNonPhysical(obj);
+      g_BodyObj = obj;
+      g_pBodyMCoord = MotSysCreateMotionCoordinator();
+      g_pBodyMCoord->SetMotor(pMotor);
+      g_BodyState = -1;
+      mprintf("Garrett's shadow: his body double is a \"%s\" (object %d)\n", g_BodyModels[m], obj);
+      return TRUE;
+   }
+   mprintf("Garrett's shadow: no thief model found for his body double\n");
+   return FALSE;
+}
+
+// 0 standing, 1 walking, 2 running, 3 walking backwards, 4 crouching,
+// 5 creeping (crouched, moving)
+static const char *BodyStateTags(int state)
+{
+   switch (state)
+   {
+      case 1: return "Locomote 0";
+      case 2: return "Locomote 0, LocoUrgent 0";
+      case 3: return "Locomote 0, Direction 4";
+      case 4: return "Crouch 0";
+      case 5: return "Locomote 0, Crouch 0";
+      default: return "Stand 0";
+   }
+}
+
+static void PlayerBodyUpdate(ulong dt)
+{
+   ObjID player = PlayerObjectExists() ? PlayerObject() : OBJ_NULL;
+   if (!RenderRTPlayerBodyActive() || player == OBJ_NULL)
+   {
+      if (g_BodyObj != OBJ_NULL)
+         PlayerBodyDestroy();
+      return;
+   }
+   if (g_BodyObj == OBJ_NULL || !ObjectExists(g_BodyObj) || !CreatureExists(g_BodyObj))
+   {
+      // (a load or a new mission takes transient objects away)
+      if (g_BodyObj != OBJ_NULL)
+      {
+         if (g_pBodyMCoord)
+         {
+            delete g_pBodyMCoord;
+            g_pBodyMCoord = NULL;
+         }
+         g_BodyObj = OBJ_NULL;
+      }
+      if (g_BodyGaveUp || !PlayerBodyMake())
+      {
+         g_BodyGaveUp = TRUE;
+         return;
+      }
+   }
+
+   // where he stands and where he looks, and how he goes
+   mxs_vector camPos;
+   mxs_angvec camAng;
+   CameraGetLocation(PlayerCamera(), &camPos, &camAng);
+   mxs_vector foot;
+   PhysGetSubModLocation(player, PLAYER_FOOT, &foot);
+   {
+      // the floor under his feet
+      Location a, b, hit;
+      mxs_vector below = foot;
+      below.z -= 3.0f;
+      MakeLocationFromVector(&a, &foot);
+      MakeLocationFromVector(&b, &below);
+      if (!PortalRaycast(&a, &b, &hit, 0))
+         foot.z = hit.vec.z;
+      else
+         foot.z -= 0.5f;
+   }
+   mxs_vector vel;
+   PhysGetVelocity(player, &vel);
+   const float speed = sqrtf(vel.x * vel.x + vel.y * vel.y);
+   const mxs_ang look = camAng.tz;
+   const mxs_ang going = (mxs_ang)(atan2f(vel.y, vel.x) / (2.0f * 3.14159265f) * 65536.0f);
+   const short ahead = (short)(going - look);   // how far from where he looks he goes
+   const BOOL crouched = GetPlayerMode() == kPM_Crouch;
+   int state;
+   mxs_ang facingTo = look;
+   if (speed < 1.0f)
+      state = crouched ? 4 : 0;
+   else if (crouched)
+      state = 5, facingTo = going;
+   else if (ahead > 0x6000 || ahead < -0x6000)
+      state = 3;   // backing away, facing ahead
+   else
+      state = speed > 11.0f ? 2 : 1, facingTo = going;
+
+   // kept where he stands: the creature's own walk moves it a little each
+   // frame, put back (its feet on his floor)
+   mxs_vector mn, mx;
+   Position *bp = ObjPosGet(g_BodyObj);
+   if (bp && ObjGetWorldBBox(g_BodyObj, &mn, &mx) && mx.z > mn.z)
+   {
+      const float butt = bp->loc.vec.z - mn.z;
+      if (butt > 1.0f && butt < 6.0f)
+         g_BodyButt += (butt - g_BodyButt) * 0.1f;
+   }
+   mxs_vector at = foot;
+   at.z += g_BodyButt;
+   mxs_angvec fac;
+   fac.tx = fac.ty = 0;
+   fac.tz = facingTo;
+   ObjPosUpdate(g_BodyObj, &at, &fac);
+
+   // what it is doing: as the AIs' bodies are told (cAIMoveEnactor)
+   const eMCoordStatus status = g_pBodyMCoord->GetStatus();
+   if (state != g_BodyState || status == kMCoord_Idle || status == kMCoord_ActiveInterrupt)
+   {
+      sMcMoveParams params;
+      params.mask = kMotParmFlag_Direction | kMotParmFlag_Duration | kMotParmFlag_Facing;
+      params.direction.tx = params.direction.ty = 0;
+      params.direction.tz = facingTo;
+      params.facing = fac;
+      params.duration = dt;
+      params.tags = cTagSet(BodyStateTags(state));
+      if (state == 1 || state == 2 || state == 3 || state == 5)
+      {
+         params.distance = speed * 0.5f;
+         params.mask |= kMotParmFlag_Distance;
+      }
+      IMotionPlan *pPlan = g_pBodyMCoord->BuildPlan(g_pBodyMCoord->GetNextEndState(), &params);
+      if (!pPlan && (state == 4 || state == 5))
+      {
+         // no crouching schema for it: standing, walking
+         params.tags = cTagSet(BodyStateTags(state == 4 ? 0 : 1));
+         pPlan = g_pBodyMCoord->BuildPlan(g_pBodyMCoord->GetNextEndState(), &params);
+      }
+      if (pPlan)
+      {
+         g_pBodyMCoord->SetCurrentManeuver(pPlan->PopFirstManeuver());
+         delete pPlan;
+      }
+      g_BodyState = state;
+   }
+}
+
+static void PlayerBodyReset()
+{
+   PlayerBodyDestroy();
+   g_BodyGaveUp = FALSE;
+}
+
+ObjID PlayerBodyDouble()
+{
+   return (g_BodyObj != OBJ_NULL && ObjectExists(g_BodyObj)) ? g_BodyObj : OBJ_NULL;
+}
+
 void PlayerCbllmUpdate(ulong dt)
 {
    if(g_pPlayerCerebellum)
    {
       g_pPlayerCerebellum->Update(dt);
    }
+   PlayerBodyUpdate(dt);
 }
 
 // @TODO: take power out of plycbllm

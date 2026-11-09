@@ -40,6 +40,7 @@
 #ifdef DARK_RT
 #include "rt_backend_internal.h"
 #endif
+#include "rt_font.h"
 
 extern "C" void DarkInputKey(uchar scan, int down);
 extern "C" void DarkInputMouse(short x, short y, uchar type, uchar buttons, char wheel);
@@ -102,6 +103,8 @@ GLint g_minLightUniform = -1;
 // the corners no lamp reaches show a hint of their texture, not black. 0 is
 // the original look.
 float g_minLight = 0.06f;
+extern "C" int g_PlayerShadowAlert;   // (src/render/objlight.c: the guards seeing the player's shadow)
+bool g_glFps = false;   // the OpenGL panel's frame counter
 void load_gl_settings()
 {
    const char *home = getenv("HOME");
@@ -118,6 +121,10 @@ void load_gl_settings()
       while (fscanf(f, "%63s %f", key, &value) == 2)
          if (!strcmp(key, "min_light"))
             g_minLight = std::clamp(value, 0.0f, 0.5f);
+         else if (!strcmp(key, "shadow_alert"))
+            g_PlayerShadowAlert = value != 0.0f ? 1 : 0;
+         else if (!strcmp(key, "fps"))
+            g_glFps = value != 0.0f;
       fclose(f);
    } else if (FILE *w = fopen(path.c_str(), "w")) {
       // (written once with the default, to be edited)
@@ -487,6 +494,237 @@ void update_relative_mouse()
    }
 }
 
+// ---------------------------------------------------------------------------
+// The OpenGL renderer's settings panel (F10 or Cmd+, in game, as the ray
+// tracer's): what applies without the ray tracer. Kept in gl_settings.txt.
+extern "C" void SetSimTimePassing(int passing);
+extern "C" int IsSimTimePassing(void);
+void bind_texture(int level, Texture *texture);
+bool draw_vertices(GLenum primitive, const sRenderBackendVertex *vertices, int count, bool second,
+                   int width, int height, bool fog, uint32_t fogColor, bool alphaTest,
+                   bool transparentBlack);
+namespace glpanel {
+bool g_open = false;
+int g_row = 0;
+enum { kShadow, kMinLight, kFps, kRows };
+Texture *g_font = nullptr, *g_white = nullptr;
+
+std::string settings_path()
+{
+   const char *home = getenv("HOME");
+   return home && *home ?
+#if defined(__APPLE__)
+      std::string(home) + "/Library/Application Support/Dark Engine Restored/gl_settings.txt"
+#else
+      std::string(home) + "/.config/dark-engine-restored/gl_settings.txt"
+#endif
+      : std::string("gl_settings.txt");
+}
+
+void save()
+{
+   if (FILE *w = fopen(settings_path().c_str(), "w")) {
+      fprintf(w, "min_light %.2f\nshadow_alert %d\nfps %d\n", g_minLight, g_PlayerShadowAlert, g_glFps ? 1 : 0);
+      fclose(w);
+   }
+}
+
+const char *label(int row)
+{
+   switch (row) {
+   case kShadow: return "Guards notice your shadow";
+   case kMinLight: return "Unlit corners lifted to";
+   default: return "FPS counter";
+   }
+}
+
+std::string value(int row)
+{
+   char b[64];
+   switch (row) {
+   case kShadow: return g_PlayerShadowAlert ? "On" : "Off (as the game)";
+   case kMinLight:
+      if (g_minLight <= 0.0f) return "Off (black, as the game)";
+      snprintf(b, sizeof(b), "%.0f%% of full light", g_minLight * 100.0f);
+      return b;
+   default: return g_glFps ? "On" : "Off";
+   }
+}
+
+void change(int row, int dir)
+{
+   switch (row) {
+   case kShadow: g_PlayerShadowAlert = !g_PlayerShadowAlert; break;
+   case kMinLight: g_minLight = std::clamp(std::round((g_minLight + 0.02f * dir) * 50.0f) / 50.0f, 0.0f, 0.5f); break;
+   default: g_glFps = !g_glFps; break;
+   }
+   save();
+}
+
+void pause(bool open)
+{
+   static bool s_paused = false;
+   static int s_was = 1;
+   if (open && !s_paused && g_scene) {
+      s_was = IsSimTimePassing();
+      SetSimTimePassing(0);
+      s_paused = true;
+   } else if (!open && s_paused) {
+      SetSimTimePassing(s_was);
+      s_paused = false;
+   }
+}
+
+// true: the key was the panel's
+bool key(int scancode, int mods, bool down, bool repeat)
+{
+   const bool toggle = scancode == SDL_SCANCODE_F10 || (scancode == SDL_SCANCODE_COMMA && (mods & KMOD_GUI));
+   if (toggle) {
+      if (down && !repeat) {
+         g_open = !g_open;
+         pause(g_open);
+      }
+      return true;
+   }
+   if (!g_open || !down)
+      return false;
+   switch (scancode) {
+   case SDL_SCANCODE_ESCAPE:
+      g_open = false;
+      pause(false);
+      break;
+   case SDL_SCANCODE_UP: g_row = (g_row + kRows - 1) % kRows; break;
+   case SDL_SCANCODE_DOWN: g_row = (g_row + 1) % kRows; break;
+   case SDL_SCANCODE_LEFT: change(g_row, -1); break;
+   case SDL_SCANCODE_RIGHT:
+   case SDL_SCANCODE_RETURN:
+   case SDL_SCANCODE_SPACE: change(g_row, 1); break;
+   default: break;
+   }
+   return true;
+}
+
+void make_textures()
+{
+   if (g_font)
+      return;
+   std::vector<uint8_t> rgba(size_t(rtfont::kWidth) * rtfont::kHeight * 4);
+   for (int i = 0; i < rtfont::kWidth * rtfont::kHeight; ++i) {
+      const uint8_t b = rtfont::kAlpha4[i / 2];
+      const uint8_t a4 = (i & 1) ? (b >> 4) : (b & 15);
+      rgba[size_t(i) * 4 + 0] = rgba[size_t(i) * 4 + 1] = rgba[size_t(i) * 4 + 2] = 255;
+      rgba[size_t(i) * 4 + 3] = uint8_t(a4 * 17);
+   }
+   const uint8_t white[4] = {255, 255, 255, 255};
+   auto make = [](int w, int h, const void *px) {
+      Texture *t = new Texture;
+      glGenTextures(1, &t->name);
+      t->width = w, t->height = h;
+      glBindTexture(GL_TEXTURE_2D, t->name);
+      glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+      glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+      glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+      glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+      glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, w, h, 0, GL_RGBA, GL_UNSIGNED_BYTE, px);
+      t->wrap = 0, t->smooth = 1;
+      return t;
+   };
+   g_font = make(rtfont::kWidth, rtfont::kHeight, rgba.data());
+   g_white = make(1, 1, white);
+}
+
+struct Batch {
+   std::vector<sRenderBackendVertex> v;
+   void quad(float x0, float y0, float x1, float y1, float u0, float v0, float u1, float v1, const float c[4])
+   {
+      const sRenderBackendVertex q[4] = {
+         {x0, y0, 0, 1, c[0], c[1], c[2], c[3], 1, u0, v0, 0, 0},
+         {x1, y0, 0, 1, c[0], c[1], c[2], c[3], 1, u1, v0, 0, 0},
+         {x1, y1, 0, 1, c[0], c[1], c[2], c[3], 1, u1, v1, 0, 0},
+         {x0, y1, 0, 1, c[0], c[1], c[2], c[3], 1, u0, v1, 0, 0}};
+      for (int i : {0, 1, 2, 0, 2, 3})
+         v.push_back(q[i]);
+   }
+};
+
+// text at (x, y) (its top left), cells s pixels of the font's
+float text(Batch &b, float x, float y, float s, const char *str, const float c[4])
+{
+   for (; *str; ++str) {
+      int ch = (unsigned char)*str;
+      if (ch < 32 || ch > 127)
+         ch = '?';
+      const int i = ch - 32, cx = i % rtfont::kCols, cy = i / rtfont::kCols;
+      const float u0 = float(cx * rtfont::kCellW) / rtfont::kWidth, v0 = float(cy * rtfont::kCellH) / rtfont::kHeight;
+      const float u1 = float((cx + 1) * rtfont::kCellW) / rtfont::kWidth,
+                  v1 = float((cy + 1) * rtfont::kCellH) / rtfont::kHeight;
+      if (ch != ' ')
+         b.quad(x, y, x + rtfont::kCellW * s, y + rtfont::kCellH * s, u0, v0, u1, v1, c);
+      x += rtfont::kCellW * s;
+   }
+   return x;
+}
+
+void draw()
+{
+   static Uint64 s_last = 0;
+   static float s_ms = 16.0f;
+   const Uint64 now = SDL_GetPerformanceCounter();
+   if (s_last)
+      s_ms += (float(double(now - s_last) * 1000.0 / double(SDL_GetPerformanceFrequency())) - s_ms) * 0.1f;
+   s_last = now;
+   if (!g_open && !g_glFps)
+      return;
+   make_textures();
+   int dw, dh;
+   window_drawable_size(dw, dh);
+   if (dw <= 0 || dh <= 0)
+      return;
+   glViewport(0, 0, dw, dh);
+   glDisable(GL_DEPTH_TEST);
+   glDepthMask(GL_FALSE);
+   glEnable(GL_BLEND);
+   glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+   const float s = std::max(1.0f, float(dh) / 1100.0f);
+   const float white[4] = {1, 1, 1, 1}, dim[4] = {0.75f, 0.75f, 0.75f, 1}, pick[4] = {1.0f, 0.85f, 0.45f, 1},
+               shade[4] = {0, 0, 0, 0.72f};
+   Batch bg, fg;
+   if (g_glFps) {
+      char b[64];
+      snprintf(b, sizeof(b), "%3.0f fps  %5.1f ms", 1000.0f / std::max(s_ms, 0.1f), s_ms);
+      bg.quad(8 * s, 8 * s, 8 * s + (strlen(b) + 1) * rtfont::kCellW * s, 8 * s + rtfont::kCellH * s * 1.2f, 0, 0, 1, 1, shade);
+      text(fg, 14 * s, 10 * s, s, b, white);
+   }
+   if (g_open) {
+      const float lineH = rtfont::kCellH * s * 1.3f, w = 64 * rtfont::kCellW * s;
+      const float h = lineH * (kRows + 4);
+      const float x0 = (dw - w) * 0.5f, y0 = (dh - h) * 0.5f;
+      bg.quad(x0, y0, x0 + w, y0 + h, 0, 0, 1, 1, shade);
+      float y = y0 + lineH * 0.5f;
+      text(fg, x0 + 20 * s, y, s, "Settings (OpenGL)", white);
+      y += lineH * 1.5f;
+      for (int r = 0; r < kRows; ++r, y += lineH) {
+         const float *c = r == g_row ? pick : dim;
+         text(fg, x0 + 20 * s, y, s, r == g_row ? ">" : " ", c);
+         text(fg, x0 + 40 * s, y, s, label(r), c);
+         text(fg, x0 + w * 0.5f, y, s, value(r).c_str(), c);
+      }
+      text(fg, x0 + 20 * s, y + lineH * 0.5f, s, "Up/Down: choose   Left/Right: change   F10: close", dim);
+   }
+   const bool wrap = g_samplerWrap[0], smooth = g_samplerSmooth[0];
+   g_samplerWrap[0] = false, g_samplerSmooth[0] = true;
+   if (!bg.v.empty()) {
+      bind_texture(0, g_white);
+      draw_vertices(GL_TRIANGLES, bg.v.data(), int(bg.v.size()), false, dw, dh, false, 0, false, false);
+   }
+   if (!fg.v.empty()) {
+      bind_texture(0, g_font);
+      draw_vertices(GL_TRIANGLES, fg.v.data(), int(fg.v.size()), false, dw, dh, false, 0, false, false);
+   }
+   g_samplerWrap[0] = wrap, g_samplerSmooth[0] = smooth;
+}
+} // namespace glpanel
+
 void swap_presented_frame()
 {
 #ifdef DARK_RT
@@ -505,6 +743,7 @@ void swap_presented_frame()
    // in the window-system swap before the editor reaches its first hardware
    // frame.  Keep ordinary interactive presentation unchanged and make the
    // no-swap behavior an explicit test-only opt-in.
+   glpanel::draw();
    const char *headlessCapture = getenv("DARK_RENDER_CAPTURE_HEADLESS");
    if (headlessCapture && atoi(headlessCapture) != 0)
       glFlush();
@@ -894,6 +1133,9 @@ bool DarkRenderPumpEvents(void)
                                        event.type == SDL_KEYDOWN, event.key.repeat != 0))
             continue;
 #endif
+         if (!g_rt && glpanel::key(event.key.keysym.scancode, event.key.keysym.mod,
+                                   event.type == SDL_KEYDOWN, event.key.repeat != 0))
+            continue;
          uchar scan = key_scan(event.key.keysym.scancode);
          if (scan != KBC_NONE && !event.key.repeat) {
             DarkInputKey(scan, event.type == SDL_KEYDOWN);

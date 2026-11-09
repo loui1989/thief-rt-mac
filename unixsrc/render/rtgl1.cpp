@@ -165,6 +165,7 @@ struct Settings {
    float heatHaze = 1.0f;     // the air over torches and fires shimmers (0 off)
    float smoke = 1.0f;        // smoke and steam particles as volumetric smoke, at this density (0: flat sprites)
    int playerBody = 1;        // Garrett's own model: his shadow, and him in mirrors and water (unseen by the camera)
+   int shadowAlert = 0;       // the guards notice his shadow (g_PlayerShadowAlert, objlight.c)
    float lightSoft = 1.0f;    // a strong lamp's light is a bigger source: no white spot on the wall next to it (0 off)  // a torch's body casts shadows (only its cup lets the flame's light out)
    bool steadyFaces = true;   // models' faces seen or shadow-only by a fixed rule, not by the view
    bool lightFix = true;      // lights moved out of the walls they sit in
@@ -205,6 +206,7 @@ std::string settings_path()
 }
 
 constexpr float kDefaultsSpriteGlow = 1.0f;
+extern "C" int g_PlayerShadowAlert;   // (src/render/objlight.c: the guards noticing his shadow)
 
 void load_settings()
 {
@@ -271,6 +273,7 @@ void load_settings()
       else if (k == "heat_haze") g_cfg.heatHaze = std::clamp(value, 0.0f, 3.0f);
       else if (k == "volumetric_smoke") g_cfg.smoke = std::clamp(value, 0.0f, 4.0f);
       else if (k == "player_body") g_cfg.playerBody = std::clamp(int(value), 0, 1);
+      else if (k == "shadow_alert") g_cfg.shadowAlert = std::clamp(int(value), 0, 1);
       else if (k == "light_soft") g_cfg.lightSoft = std::clamp(value, 0.0f, 4.0f);
       else if (k == "light_fix") g_cfg.lightFix = value != 0;
       else if (k == "fixtures_pass") g_cfg.fixturesPass = value != 0;
@@ -334,6 +337,7 @@ void save_settings()
    fprintf(f, "gem_ease_s = %.2f\n", g_cfg.gemEase);
    fprintf(f, "volumetric_smoke = %.2f\n", g_cfg.smoke);
    fprintf(f, "player_body = %d\n", g_cfg.playerBody);
+   fprintf(f, "shadow_alert = %d\n", g_cfg.shadowAlert);
    fclose(f);
 }
 
@@ -1486,7 +1490,7 @@ double g_uploadLibrarySecs = 0;   // time inside rgUploadMeshPrimitive (the "cap
 // Garrett's own model (RenderRTPlayerBodyWanted): the object, and whether
 // what is being given now is it -- unseen by the camera (it is inside it),
 // but casting his shadow and seen in mirrors, glass and water
-uint32_t g_viewerObj = 0;
+uint32_t g_viewerObj = 0, g_viewerFrame = 0;
 bool g_uploadViewer = false;
 
 bool upload(uint64_t id, const RgMeshPrimitiveInfo &prim, bool firstPerson = false)
@@ -3325,6 +3329,7 @@ bool Wanted()
 bool Open(SDL_Window *window)
 {
    load_settings();
+   g_PlayerShadowAlert = g_cfg.shadowAlert;
    wd_start();
    // the Metal backend's GPU timeline, every 2 seconds, in the log
    if (env_float("THIEF_RT_PERF", 0) != 0)
@@ -4059,7 +4064,7 @@ const char *kUpscaleNames[] = {"Off",
                                "MetalFX Custom"};
 
 enum UiRow {
-   kRowUpscale, kRowScale, kRowOutput, kRowDynres, kRowBounces, kRowReach, kRowLights, kRowLightFade, kRowCandidates, kRowLightCull, kRowResponse, kRowFlicker, kRowVolumetric, kRowShafts, kRowFog, kRowSmoke, kRowPlayerBody, kRowBloom, kRowVsync, kRowFrameCap,
+   kRowUpscale, kRowScale, kRowOutput, kRowDynres, kRowBounces, kRowReach, kRowLights, kRowLightFade, kRowCandidates, kRowLightCull, kRowResponse, kRowFlicker, kRowVolumetric, kRowShafts, kRowFog, kRowSmoke, kRowPlayerBody, kRowShadowAlert, kRowBloom, kRowVsync, kRowFrameCap,
    kRowFps, kRowDetection, kRowGemScale, kRowGemMatch, kRowGemEase, kRowLight, kRowExposure, kRowDarkAdapt, kRowAmbient, kRowAmbientFollow, kRowShadowCool, kRowSkySeen, kRowSky, kRowMoon, kRowMoonDir, kRowMoonHeight, kRowSun, kRowLightSize, kRowRough, kRowSmooth, kRowSteady, kRowFixtures, kRowFixtureLight, kRowSmallLamps, kRowLightFix, kRowGlow, kRowFlameGlow, kRowMaterials, kRowBump, kRowCrevice, kRowTexDetail, kRowParallax, kRowPolish, kRowWater, kRowUnderwater, kRowTracedSound, kRowHrtf,
    kRowDebug, kRowFreeze, kRowBackFaces, kRowReuse, kRowBlink, kRowPerf, kRowInspect, kRowSkipMission, kRowReset, kRowCount
 };
@@ -4067,7 +4072,7 @@ enum UiRow {
 const char *kRowLabels[kRowCount] = {
    "Upscaler", "Render resolution", "Output resolution", "Dynamic resolution", "Bounce light", "Light reach", "Lights traced",
    "Lights coming into range", "Lights tried per pixel", "Lights behind walls", "Light changes", "Light flicker",
-   "God rays (volumetric)", "  God ray strength", "Mission fog", "Smoke and steam", "Garrett's shadow and reflection", "Bloom", "VSync", "Frame rate limit", "FPS counter", "Light gem and guards", "  Light gem brightness", "  Light gem falloff", "  Light gem response", "Light brightness", "Darkest exposure", "  Eyes adjust to the dark", "Ambient light", "  Follows the game's light", "  Shadow colour", "Sky brightness (as seen)", "Sky light (on the level)", "Moonlight", "  Moon direction", "  Moon height", "Sunlight (Thief 2 missions)",
+   "God rays (volumetric)", "  God ray strength", "Mission fog", "Smoke and steam", "Garrett's shadow and reflection", "  Guards notice his shadow", "Bloom", "VSync", "Frame rate limit", "FPS counter", "Light gem and guards", "  Light gem brightness", "  Light gem falloff", "  Light gem response", "Light brightness", "Darkest exposure", "  Eyes adjust to the dark", "Ambient light", "  Follows the game's light", "  Shadow colour", "Sky brightness (as seen)", "Sky light (on the level)", "Moonlight", "  Moon direction", "  Moon height", "Sunlight (Thief 2 missions)",
    "Light size (soft shadows)", "Surface roughness", "Model shading", "Model faces", "Torches and lamps", "Lamp and torch light", "Lamp reach", "Lights in walls", "Lamp glow", "Flame glow", "Materials", "Bumps", "Crevices", "Texture detail", "Parallax depth", "Polished reflections", "Water", "  Under water: brighter", "Traced sound (Steam Audio)", "  Headphone 3D sound (HRTF)",
    "Debug view", "Freeze scene (test)", "Back faces (test)", "Light sampling (test)", "Blink nearest light (test)", "Performance log", "Inspect centre of view", "Skip to next mission (test)", "Reset to defaults",
 };
@@ -4148,6 +4153,8 @@ std::string row_value(int row)
       return buf;
    case kRowPlayerBody:
       return g_cfg.playerBody ? "On" : "Off (as the game)";
+   case kRowShadowAlert:
+      return g_cfg.shadowAlert ? "On (suspicious; searching when near)" : "Off (as the game)";
    case kRowSmoke:
       if (g_cfg.smoke <= 0.0f) return "Flat sprites (as the game)";
       snprintf(buf, sizeof(buf), "Volumetric, %d%% density", int(g_cfg.smoke * 100.0f + 0.5f));
@@ -4391,6 +4398,10 @@ void change_row(int row, int dir)
       break;
    case kRowFog: g_cfg.fog = (g_cfg.fog + dir + 4) % 4; break;
    case kRowPlayerBody: g_cfg.playerBody = !g_cfg.playerBody; break;
+   case kRowShadowAlert:
+      g_cfg.shadowAlert = !g_cfg.shadowAlert;
+      g_PlayerShadowAlert = g_cfg.shadowAlert;
+      break;
    case kRowSmoke: {
       static const float steps[] = {0.0f, 0.5f, 0.75f, 1.0f, 1.5f, 2.0f, 3.0f};
       int i = 0;
@@ -6608,7 +6619,13 @@ void upload_player_body()
 {
    static float s_phase = 0.0f, s_swing = 0.0f, s_last[2] = {0, 0};
    static uint32_t s_lastFrame = 0;
-   if (!g_cfg.playerBody || g_underwater)
+   // his body double drawn this frame (a thief of the game's, walking):
+   // that is him. One not drawn this frame goes.
+   if (g_viewerObj && g_viewerFrame != g_frameNumber) {
+      g_objects.erase(g_viewerObj);
+      g_viewerObj = 0;
+   }
+   if (g_viewerObj || !g_cfg.playerBody || g_underwater)
       return;
    ensure_world_bvh();
    const RgFloat3D cam = to_rt(g_camera.pos);
@@ -7243,18 +7260,17 @@ void RenderRTObjectBegin(uint32_t obj, int flags)
    g_RenderRTCaptureCalls = g_RenderRTCaptureDropped = 0;
 }
 
+int RenderRTPlayerBodyActive(void) { return g_active && g_cfg.playerBody ? 1 : 0; }
+
 int RenderRTPlayerBodyWanted(uint32_t obj)
 {
-   if (!g_inScene)
+   if (!g_inScene || !g_cfg.playerBody)
       return 0;
-   // (the game's own player model is not drawn: Thief Gold's is a box --
-   // upload_player_body draws a figure of Garrett instead; one kept from
-   // before goes)
-   (void)obj;
-   if (g_viewerObj)
+   if (g_viewerObj && g_viewerObj != obj)
       g_objects.erase(g_viewerObj);
-   g_viewerObj = 0;
-   return 0;
+   g_viewerObj = obj;
+   g_viewerFrame = g_frameNumber;
+   return 1;
 }
 
 int RenderRTObjectWanted(uint32_t obj)

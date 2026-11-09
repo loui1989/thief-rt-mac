@@ -32,6 +32,9 @@ EXTERN int  PlayerGetMode();
 EXTERN int  PlayerGetNextMode();
 
 EXTERN ObjID PlayerArm();
+// Garrett's body double for the ray tracer's shadow and reflection of him
+// (OBJ_NULL when there is none)
+EXTERN ObjID PlayerBodyDouble();
 
 // schema utility funcs
 //

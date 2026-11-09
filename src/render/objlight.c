@@ -504,6 +504,90 @@ float compute_object_lighting(ObjID o)
    return total;
 }
 
+// Guards seeing the player's shadow (a setting of the port, off unless
+// chosen: shadow_alert, in either renderer's panel).
+int g_PlayerShadowAlert = 0;
+
+// Where an object's shadow falls: the light that lights it most (the
+// game's own lights, as compute_object_lighting takes them -- the lights of
+// its cell that reach it, the moving ones by a raycast), straight on from
+// it away from that light to the first wall or floor (within 20 ft). Its
+// strength is that light on the object (compute_object_lighting's scale).
+// FALSE when nothing lights it or its shadow falls on nothing near.
+BOOL compute_object_shadow_spot(ObjID o, mxs_vector *spot, float *strength)
+{
+   Location dummy;
+   Position* pos = ObjPosGet(o);
+   Location *loc;
+   int cell, shadows, *shadPtr;
+   int i, num, k, inner_frac;
+   ushort *lt;
+   float best = 0.0f;
+   mxs_vector from;
+
+   if (!pos)
+      return FALSE;
+   loc = &pos->loc;
+   cell = CellFromLoc(loc);
+   if (cell == CELL_INVALID)
+      return FALSE;
+   lt = WR_CELL(cell)->light_indices;
+   num = num_light + num_dyn;
+   shadPtr = objGetShadows(o);
+   for (i = 0; i <= lt[0]; i += 32, shadPtr++)
+   {
+      if (i + 32 <= lt[0])
+         inner_frac = 32;
+      else
+         inner_frac = lt[0] & 0x1f;
+      for (k = 1, shadows = *shadPtr; k <= inner_frac; ++k, shadows >>= 1)
+         if (shadows & 1)
+         {
+            const float v = _apply_one_light(lt[i + k], loc);
+            if (v > best)
+            {
+               best = v;
+               from = light_data[lt[i + k]].loc;
+            }
+         }
+   }
+   for (i = num_light; i < num; ++i)
+   {
+      Location p;
+      MakeLocationFromVector(&p, &light_data[i].loc);
+      if (PortalRaycast(loc, &p, &dummy, 0) &&
+          ObjRaycastC(loc, &p, &dummy, TRUE, 0, 0, g_pObjShadowProp, FALSE) == kObjCastNone)
+      {
+         const float v = ml_multi_light_on_object(&light_data[i], &loc->vec);
+         if (v > best)
+         {
+            best = v;
+            from = light_data[i].loc;
+         }
+      }
+   }
+   if (best <= 0.02f)
+      return FALSE;
+   {
+      mxs_vector dir, end;
+      Location a, b, hit;
+      float len;
+      mx_sub_vec(&dir, &loc->vec, &from);
+      len = mx_mag_vec(&dir);
+      if (len < 0.01f)
+         return FALSE;
+      mx_scaleeq_vec(&dir, 1.0f / len);
+      mx_scale_add_vec(&end, &loc->vec, &dir, 20.0f);
+      MakeLocationFromVector(&a, &loc->vec);
+      MakeLocationFromVector(&b, &end);
+      if (PortalRaycast(&a, &b, &hit, 0))
+         return FALSE;   // (on nothing near)
+      mx_scale_add_vec(spot, &hit.vec, &dir, -0.5f);
+   }
+   *strength = best;
+   return TRUE;
+}
+
 
 #ifndef SHIP
 #include <objedit.h>
