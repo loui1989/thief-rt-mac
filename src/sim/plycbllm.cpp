@@ -635,6 +635,37 @@ static BOOL g_BodyOneShot = FALSE;  // that, once through (a swing, a shot, read
 static BOOL g_BodyAiming = FALSE, g_BodyHeld = FALSE;
 // crouching or in the air: a pose held (no schema has either for a humanoid)
 static BOOL g_BodyPoseHeld = FALSE;
+static BOOL g_BodyAskMissed = FALSE;   // the last thing asked had no schema (a fallback played)
+
+// What a crouch (and a jump's tuck) is borrowed from: motions a humanoid
+// has, tried in turn, the first that comes to a frame with the legs folded
+// and the body upright (BodyPoseFrame) kept -- per pose, each one found
+// wanting skipped after
+static const char *const kBodyPoseFrom[] =
+{
+   "WorldFrob 0, OnFloor 0",
+   "Search 0, Peek 0, Direction 3",
+   "Stalled 0, Stunned 0",
+   "ReceiveWound 0, SevereWound 0",
+   "Discover 0, Recoil 0",
+   "Crumple 0, Knockout 0",
+};
+static const int kBodyPoseFroms = sizeof(kBodyPoseFrom) / sizeof(kBodyPoseFrom[0]);
+static BOOL g_BodyPoseBad[3][16];
+static float g_BodyStandLeg = 0.0f, g_BodyStandTorso = 0.0f;   // standing: butt over ankles, head over butt
+
+// the creature's legs (butt over its lower ankle) and torso (head over butt)
+static BOOL BodyLegTorso(float *leg, float *torso)
+{
+   if (g_BodyObj == OBJ_NULL || !CreatureExists(g_BodyObj))
+      return FALSE;
+   const float butt = GetCreatureJointPos(g_BodyObj, kCJ_Butt).z;
+   const float la = GetCreatureJointPos(g_BodyObj, kCJ_LAnkle).z;
+   const float ra = GetCreatureJointPos(g_BodyObj, kCJ_RAnkle).z;
+   *leg = butt - (la < ra ? la : ra);
+   *torso = GetCreatureJointPos(g_BodyObj, kCJ_Head).z - butt;
+   return TRUE;
+}
 static BOOL g_BodyShotFlagged = FALSE;   // this shot's loosing flag reached
 static int g_BodyShotLog = 0;
 
@@ -1160,9 +1191,8 @@ static void PlayerBodyUpdate(ulong dt)
    // Crouching, in the air: no schema has either for a humanoid -- a pose
    // held: a guard's reach down to the floor stopped at its lowest, a
    // stride of the run stopped in mid-air
-   const int pose = inAir ? 2 : crouched ? 1 : 0;
-   static int s_pose = 0, s_poseFor = 0;
-   static float s_lowest = 1e9f;
+   int pose = inAir ? 2 : crouched ? 1 : 0;
+   static int s_pose = 0, s_poseFor = 0, s_from = -1;
    BOOL poseEnded = FALSE;
    if (pose != s_pose)
    {
@@ -1173,14 +1203,37 @@ static void PlayerBodyUpdate(ulong dt)
       }
       poseEnded = TRUE;
       s_pose = pose;
-      s_lowest = 1e9f;
       s_poseFor = 0;
+      s_from = -1;
    }
    if (pose)
    {
-      strcpy(act, pose == 1 ? "WorldFrob 0, OnFloor 0" : "Locomote 0, LocoUrgent 0");
-      oneShot = TRUE;
-      stepping = FALSE;
+      if (s_from < 0 || g_BodyPoseBad[pose][s_from])
+      {
+         s_from = -1;
+         for (int i = 0; i < kBodyPoseFroms && s_from < 0; ++i)
+            if (!g_BodyPoseBad[pose][i])
+               s_from = i;
+         s_poseFor = 0;
+      }
+      if (s_from >= 0 && g_BodyStandLeg > 0.5f)
+      {
+         strcpy(act, kBodyPoseFrom[s_from]);
+         oneShot = TRUE;
+         stepping = FALSE;
+      }
+      else
+         pose = 0;   // (none found: walking, standing)
+   }
+   else if (state == 0 && !g_BodyHeld && g_BodyPosed > 10)
+   {
+      // (standing: how tall he stands, the measure of a crouch)
+      float leg, torso;
+      if (BodyLegTorso(&leg, &torso))
+      {
+         if (leg > g_BodyStandLeg) g_BodyStandLeg = leg;
+         if (torso > g_BodyStandTorso) g_BodyStandTorso = torso;
+      }
    }
    // turning as a body turns, not at once: up to a turn and a half a second
    static mxs_ang s_facing = 0;
@@ -1303,6 +1356,8 @@ static void PlayerBodyUpdate(ulong dt)
          else
             mprintf("PlyrBody: %s -- no schema (nor for its fallbacks)\n", tags);
       }
+      // (what was asked, with or without the weapon's tag, or not at all)
+      g_BodyAskMissed = got < 0 || (with[0] ? got > 1 : got > 0);
       if (oneShot && strcmp(tags, g_BodyTags) != 0)
       {
          s_oneShotFor = 0;
@@ -1317,39 +1372,41 @@ static void PlayerBodyUpdate(ulong dt)
       g_BodyOneShot = oneShot;
       g_BodyState = state;
    }
-   // the pose stopped: crouching, where the reach down is lowest (where
-   // it begins to rise again; at most at 60% of it); in the air, a quarter
-   // of the way through the run's stride (a few updates in: not the motion
-   // before it, still blending out)
-   if (pose && !g_BodyPoseHeld && g_BodyOneShot && strncmp(g_BodyTags, act, strlen(act)) == 0 &&
-       ++s_poseFor >= 3)
+   // the pose stopped: at the first frame of what it is borrowed from with
+   // the legs folded (to 60% of his standing, crouching; 85%, tucked in the
+   // air) and the body upright (70% of his standing) -- a few updates in
+   // (not the motion before it, still blending out). One without such a
+   // frame (or without a schema) is not tried again for that pose.
+   if (pose && !g_BodyPoseHeld && g_BodyOneShot && strncmp(g_BodyTags, act, strlen(act)) == 0)
    {
-      float frac = 0;
-      const char *name = "?";
-      const BOOL known = BodyMotionAt(CreatureGetMotorInterface(g_BodyObj), &frac, &name);
-      BOOL stop = FALSE;
-      if (pose == 1)
+      if (g_BodyAskMissed)
       {
-         mxs_vector lo, hi;
-         if (ObjGetWorldBBox(g_BodyObj, &lo, &hi))
-         {
-            const float h = hi.z - lo.z;
-            if (h < s_lowest)
-               s_lowest = h;
-            else if (h > s_lowest + 0.05f && frac > 0.1f)
-               stop = TRUE;
-         }
-         if (known && frac >= 0.6f)
-            stop = TRUE;
+         g_BodyPoseBad[pose][s_from] = TRUE;
+         mprintf("PlyrBody: no \"%s\" to borrow a pose from\n", kBodyPoseFrom[s_from]);
+         g_BodyTags[0] = 0;
       }
-      else if (known && frac >= 0.25f)
-         stop = TRUE;
-      if (stop)
+      else if (++s_poseFor >= 3)
       {
-         CreatureFreeze(g_BodyObj);
-         g_BodyPoseHeld = TRUE;
-         if (g_BodyShotLog++ < 100)
-            mprintf("PlyrBody: %s held (%s at %.0f%%)\n", pose == 1 ? "crouching" : "in the air", name, frac * 100.0f);
+         float leg, torso, frac = 0;
+         const char *name = "?";
+         const BOOL known = BodyMotionAt(CreatureGetMotorInterface(g_BodyObj), &frac, &name);
+         if (BodyLegTorso(&leg, &torso) && leg <= (pose == 1 ? 0.62f : 0.85f) * g_BodyStandLeg &&
+             torso >= 0.7f * g_BodyStandTorso)
+         {
+            CreatureFreeze(g_BodyObj);
+            g_BodyPoseHeld = TRUE;
+            if (g_BodyShotLog++ < 100)
+               mprintf("PlyrBody: %s held: \"%s\" (%s at %.0f%%), legs %.0f%%, body %.0f%% of standing\n",
+                       pose == 1 ? "crouching" : "in the air", kBodyPoseFrom[s_from], name, frac * 100.0f,
+                       leg / g_BodyStandLeg * 100.0f, torso / g_BodyStandTorso * 100.0f);
+         }
+         else if (g_pBodyMCoord->GetStatus() == kMCoord_Idle || (known && frac >= 0.97f))
+         {
+            g_BodyPoseBad[pose][s_from] = TRUE;
+            mprintf("PlyrBody: \"%s\" has no %s in it\n", kBodyPoseFrom[s_from],
+                    pose == 1 ? "crouch" : "tuck");
+            g_BodyTags[0] = 0;
+         }
       }
    }
    if (g_BodyState != -1 && g_BodyPosed < 1000)
