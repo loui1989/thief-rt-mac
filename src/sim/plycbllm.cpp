@@ -39,6 +39,7 @@
 #include <plyrmode.h>
 #include <objshape.h>
 #include <render_rt.h>
+#include <objmodel.h>
 #include <mprintf.h>
 #include <math.h>
 
@@ -621,7 +622,7 @@ static BOOL g_BodyGaveUp = FALSE;
 static const char *const g_BodyModels[] =
 {
    // Garrett where a mission has him (The Black Parade), else Thief Gold's
-   // and Thief 2's hooded thieves
+   // and Thief 2's hooded thieves (the first of them the mission has)
    "garrett", "thiefsw", "thief", "thiefbow", "thiefsw2",
 };
 
@@ -644,6 +645,11 @@ static BOOL PlayerBodyMake()
    PlayerBodyDestroy();
    for (int m = 0; m < (int)(sizeof(g_BodyModels) / sizeof(g_BodyModels[0])); ++m)
    {
+      // only a model the mission has, and a jointed one: a name with no
+      // model behind it is drawn as the engine's placeholder wedge
+      const int idx = objmodelLoadModel((char *)g_BodyModels[m]);
+      if (idx == MIDX_INVALID || objmodelGetModelType(idx) != OM_TYPE_MESH)
+         continue;
       IObjectSystem *objsys = AppGetObj(IObjectSystem);
       ObjID obj = objsys->BeginCreate(ROOT_ARCHETYPE, kObjectConcrete);
       mxs_vector pos;
