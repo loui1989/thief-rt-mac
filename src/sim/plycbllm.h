@@ -40,8 +40,6 @@ EXTERN BOOL PlayerBodyShowsWeapon();
 // what the double holds that its model has not (his blackjack), put in its
 // hand: OBJ_NULL when nothing
 EXTERN ObjID PlayerBodyHeldItem();
-// (just before it is drawn: its log of being drawn standing while crouched)
-EXTERN void PlayerBodyAboutToDraw();
 
 // schema utility funcs
 //

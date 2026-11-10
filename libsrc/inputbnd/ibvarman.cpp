@@ -530,13 +530,16 @@ const char* cIBVariableManager::ProcessCommand(
 	if (!chan_ret)
 		strcpy(final_val, var->var.val);
 
-	// A command given a value by a key just pressed (inv_select sword) acts each
-	// time, as the game had it -- not only when the value changes: pressing 2
-	// for the blackjack after it was put away (a ladder, a body carried, a
-	// saved game loaded) was the same value as last time and did nothing,
-	// until another weapon's key was pressed first. (+/- held controls, and a
-	// key held down repeating, still act only on a change.)
-	if (strcmp(var->var.last_val, final_val) || (!active_toggle && !already_down && num_tokens > 1))
+	// A command given a value by a key just pressed (inv_select sword,
+	// cycle_item 1) acts each time, as the game had it -- not only when the
+	// value changes: pressing 2 for the blackjack after it was put away (a
+	// ladder, a body carried, a saved game loaded) was the same value as last
+	// time and did nothing, until another weapon's key was pressed first; the
+	// item key cycled once, not again. (Not on "already down": the mapper marks
+	// a key down before it sends it -- every press but a key's very first came
+	// as one held. The platform layer passes no key repeats. +/- held controls
+	// still act only on a change.)
+	if (strcmp(var->var.last_val, final_val) || (!active_toggle && num_tokens > 1))
 	{
 		if (var->var.cb)
 			ret_val = var->var.cb(var->var.name, final_val, already_down);

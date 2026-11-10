@@ -274,7 +274,8 @@ void load_settings()
       else if (k == "underwater_brighter") g_cfg.underwaterLift = std::clamp(value, 0.0f, 3.0f);
       else if (k == "heat_haze") g_cfg.heatHaze = std::clamp(value, 0.0f, 3.0f);
       else if (k == "volumetric_smoke") g_cfg.smoke = std::clamp(value, 0.0f, 4.0f);
-      else if (k == "player_body") g_cfg.playerBody = std::clamp(int(value), 0, 2);
+      // (the test, the double shown ahead of you, is never kept: on)
+      else if (k == "player_body") g_cfg.playerBody = std::clamp(int(value), 0, 1);
       else if (k == "shadow_alert") g_cfg.shadowAlert = std::clamp(int(value), 0, 1);
       else if (k == "light_soft") g_cfg.lightSoft = std::clamp(value, 0.0f, 4.0f);
       else if (k == "light_fix") g_cfg.lightFix = value != 0;
@@ -338,7 +339,7 @@ void save_settings()
            int(g_cfg.moonShafts), g_cfg.shafts, g_cfg.moon, g_cfg.moonAzimuth, g_cfg.moonHeight, int(g_cfg.mfxDenoise));
    fprintf(f, "gem_ease_s = %.2f\n", g_cfg.gemEase);
    fprintf(f, "volumetric_smoke = %.2f\n", g_cfg.smoke);
-   fprintf(f, "player_body = %d\n", g_cfg.playerBody);
+   fprintf(f, "player_body = %d\n", g_cfg.playerBody == 2 ? 1 : g_cfg.playerBody);
    fprintf(f, "shadow_alert = %d\n", g_cfg.shadowAlert);
    fclose(f);
 }

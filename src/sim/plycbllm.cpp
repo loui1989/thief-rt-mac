@@ -46,6 +46,7 @@
 #include <crjoint.h>   // GetCreatureJointPos
 #include <mvrflags.h>  // MF_FIRE_RELEASE
 #include <objscale.h>  // ObjSetScale
+#include <traitman.h>  // the weapon in hand, by its archetype
 #include <multiped.h>  // the archer's shot: its frame
 #include <string.h>
 #include <mprintf.h>
@@ -675,14 +676,12 @@ static BOOL BodyLegTorso(float *leg, float *torso)
 // moves): no humanoid schema crouches. How far: 0 standing, 1 crouched,
 // eased in and out (PlayerBodyUpdate).
 static float g_BodyCrouch = 0.0f;
-// (this update's, for the log of a pop as it is drawn)
+// (this update's: his floor, the crouch set down on it)
 static float g_BodyFootZ = 0.0f;
 // how high its lower toe joint is over the floor, standing on it (learnt
 // walking upright, where its feet are on the floor): a crouch is set down so
 static float g_BodySole = 0.15f;
 static BOOL g_BodySoleKnown = FALSE;
-static BOOL g_BodyInAir = FALSE, g_BodyOnGround = TRUE;
-static int g_BodyMode = 0;
 
 // the rotation by an angle (its sine, cosine) about a unit axis
 static void BodyAxisAngle(mxs_matrix *r, const mxs_vector *k, float s, float c)
@@ -976,7 +975,25 @@ static BOOL BodyModelLoads(const char *name)
    return idx != MIDX_INVALID && objmodelGetModelType(idx) == OM_TYPE_MESH;
 }
 
-// What he holds: 0 nothing, 1 his sword, 2 his bow, 3 his blackjack
+// whether an object is (of) an archetype named with this in it
+static BOOL BodyObjIsA(ObjID obj, const char *part)
+{
+   AutoAppIPtr_(TraitManager, pTraits);
+   AutoAppIPtr_(ObjectSystem, pObjSys);
+   for (ObjID o = obj; o != OBJ_NULL; o = pTraits->GetArchetype(o))
+   {
+      const char *name = pObjSys->GetName(o);
+      if (name && strcasestr(name, part))
+         return TRUE;
+      if (pTraits->GetArchetype(o) == o)
+         break;
+   }
+   return FALSE;
+}
+
+// What he holds: 0 nothing, 1 his sword, 2 his bow, 3 his blackjack -- the
+// object in hand being one (going to the bow, the sword ability still said
+// blackjack of an arrow: the double was handed an arrow)
 static int PlayerBodyWeapon(ObjID player)
 {
    if (IsBowEquipped())
@@ -984,7 +1001,11 @@ static int PlayerBodyWeapon(ObjID player)
    const ObjID w = GetWeaponObjID(player);
    if (w == OBJ_NULL)
       return 0;
-   return WeaponIsSword(player, w) ? 1 : WeaponIsBlackjack(player, w) ? 3 : 0;
+   if (WeaponIsSword(player, w) && !BodyObjIsA(w, "arrow"))
+      return 1;
+   if (WeaponIsBlackjack(player, w) && BodyObjIsA(w, "jack"))
+      return 3;
+   return 0;
 }
 
 // The model for him holding that: the first of g_BodyModels the mission
@@ -1287,9 +1308,6 @@ static void PlayerBodyUpdate(ulong dt)
    static float s_footOver = 0.5f;
    static int s_sinceAir = 1000;
    const BOOL inAir = !PhysObjOnGround(player) || GetPlayerMode() == kPM_Jump;
-   g_BodyInAir = inAir;
-   g_BodyOnGround = PhysObjOnGround(player);
-   g_BodyMode = GetPlayerMode();
    if (inAir)
    {
       foot.z -= s_footOver;
@@ -1648,13 +1666,12 @@ static void PlayerBodyUpdate(ulong dt)
          delete pPlan;
       }
       CreaturePoseReapply(g_BodyObj);
+      // (logged: what it was asked that the schemas did not have)
       static int s_logged = 0;
-      if (strcmp(tags, g_BodyTags) != 0 && s_logged < 2000)
+      if (strcmp(tags, g_BodyTags) != 0 && got != 0 && s_logged < 200)
       {
          ++s_logged;
-         if (got == 0)
-            mprintf("PlyrBody: %s\n", tags);
-         else if (got > 0)
+         if (got > 0)
             mprintf("PlyrBody: %s -- no schema, so %s\n", tags, tries[got]);
          else
             mprintf("PlyrBody: %s -- no schema (nor for its fallbacks)\n", tags);
@@ -1735,46 +1752,6 @@ static void PlayerBodyReset()
 {
    PlayerBodyDestroy();
    g_BodyGaveUp = FALSE;
-}
-
-// (the double about to be drawn: a sudden change in its legs, or in its
-// height over his feet, from one drawing to the next, logged with what it
-// is doing -- to find what stands it up as it creeps; and while crouched,
-// twice a second, how it is)
-void PlayerBodyAboutToDraw()
-{
-   static int s_told = 0, s_appliedWas = 0, s_every = 0;
-   static float s_legWas = -1.0f, s_overWas = 0.0f;
-   static ulong s_frame = 0;
-   ++s_frame;
-   const int applied = CreaturePoseApplied();
-   float leg, torso;
-   const Position *bp = ObjPosGet(g_BodyObj);
-   if (g_BodyStandLeg > 0.5f && bp && BodyLegTorso(&leg, &torso))
-   {
-      const float over = GetCreatureJointPos(g_BodyObj, kCJ_Butt).z - g_BodyFootZ;
-      const BOOL pop = s_legWas >= 0 && (fabsf(leg - s_legWas) > 0.15f * g_BodyStandLeg || fabsf(over - s_overWas) > 0.3f);
-      const BOOL now = g_BodyCrouch > 0.0f && ++s_every >= 30;
-      if ((pop || now) && s_told < 300)
-      {
-         ++s_told;
-         if (now)
-            s_every = 0;
-         float frac = 0;
-         const char *name = "?";
-         BodyMotionAt(CreatureGetMotorInterface(g_BodyObj), &frac, &name);
-         mprintf("PlyrBody: %s (draw %lu): legs %.0f%% of standing (were %.0f%%), butt %.2f ft over his feet "
-                 "(was %.2f); crouched %.2f; doing \"%s\" (%s at %.0f%%, status %d); reshaped %d times since; "
-                 "mode %d, on the ground %d, in the air %d, held %d/%d\n",
-                 pop ? "POP" : "crouching", s_frame, leg / g_BodyStandLeg * 100.0f, s_legWas / g_BodyStandLeg * 100.0f,
-                 over, s_overWas, g_BodyCrouch, g_BodyTags, name, frac * 100.0f, (int)g_pBodyMCoord->GetStatus(),
-                 applied - s_appliedWas, g_BodyMode, (int)g_BodyOnGround, (int)g_BodyInAir, (int)g_BodyHeld,
-                 (int)g_BodyPoseHeld);
-      }
-      s_legWas = leg;
-      s_overWas = over;
-   }
-   s_appliedWas = applied;
 }
 
 ObjID PlayerBodyDouble()
