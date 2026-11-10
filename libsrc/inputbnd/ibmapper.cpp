@@ -1,5 +1,6 @@
 #include <algorithm>
 #include <limits>
+#include <chrono>
 #include <cstdio>
 
 #include "ibmapper.h"
@@ -1338,9 +1339,19 @@ int cIBInputMapper::ProcessMouseButton(uiMouseEvent* event)
 	auto* control = m_control_binds.Find("mouse_wheel");
 	if (isMouseWheel && control != nullptr)
 	{
+		// One step a notch, and at most one each 0.12 s: a Mac trackpad or
+		// Magic Mouse sends a burst of scroll events a swipe, and a weapon or
+		// item bound to the wheel (next_weapon <amount>) spun through the
+		// whole inventory.
+		static long long s_lastWheel = 0;
+		const long long nowMs = std::chrono::duration_cast<std::chrono::milliseconds>(
+			std::chrono::steady_clock::now().time_since_epoch()).count();
+		if (event->wheel == 0 || (s_lastWheel && nowMs - s_lastWheel < 120))
+			return 1;
+		s_lastWheel = nowMs;
 		char final[64]{};
 		StripControl(final, control);
-		sprintf(butt_str, " %d", event->wheel);
+		sprintf(butt_str, " %d", event->wheel > 0 ? 1 : -1);
 		strcat(final, butt_str);
 		g_IB_variable_manager->Cmd(final, false);
 
