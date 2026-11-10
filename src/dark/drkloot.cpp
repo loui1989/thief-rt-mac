@@ -38,6 +38,7 @@
 #include <objdef.h>
 
 #include <traitman.h>
+#include <stdio.h>
 
 // include these last
 #include <initguid.h>
@@ -122,11 +123,99 @@ static BOOL combine_loot(ObjID targ, ObjID src)
    return FALSE;
 }
 
+// The mission's loot objectives (goal_type_N 3), met by what the player
+// carries: as the game's VictoryChecker (convict.osm) has them -- the loot
+// item's total, gold, gems and goods at least the goal's, its special bits
+// all there. That script did not complete one (Black Parade: 807 of 800
+// stolen, the objective still open), so the engine checks them too, on
+// every piece of loot the player takes and as the game resumes. (Only
+// ever completing one -- never undoing what the script has set.)
+static void check_loot_goals(const sLootProp *loot)
+{
+   if (!loot)
+      return;
+   AutoAppIPtr(QuestData);
+   int total = 0;
+   for (int i = 0; i < kLootSpecial; i++)
+      total += loot->count[i];
+   for (int n = 0; n < 32; n++)
+   {
+      char name[64];
+      sprintf(name, "goal_type_%d", n);
+      if (!pQuestData->Exists(name) || pQuestData->Get(name) != 3)
+         continue;
+      sprintf(name, "goal_state_%d", n);
+      if (!pQuestData->Exists(name) || pQuestData->Get(name) != 0)
+         continue;
+      sprintf(name, "goal_visible_%d", n);
+      if (pQuestData->Exists(name) && !pQuestData->Get(name))
+         continue;
+      static const char *const kinds[4] = {"loot", "gold", "gems", "goods"};
+      const int have[4] = {total, loot->count[kLootGold], loot->count[kLootGems], loot->count[kLootArt]};
+      BOOL met = TRUE;
+      for (int k = 0; k < 4 && met; k++)
+      {
+         sprintf(name, "goal_%s_%d", kinds[k], n);
+         if (pQuestData->Exists(name) && pQuestData->Get(name) > have[k])
+            met = FALSE;
+      }
+      int specials = 0;
+      sprintf(name, "goal_specials_%d", n);
+      if (pQuestData->Exists(name))
+         specials = pQuestData->Get(name);
+      sprintf(name, "goal_special_%d", n);
+      if (pQuestData->Exists(name) && pQuestData->Get(name) > 0)
+         specials |= 1 << (pQuestData->Get(name) - 1);
+      if ((loot->count[kLootSpecial] & specials) != specials)
+         met = FALSE;
+      if (!met)
+         continue;
+      fprintf(stderr, "Loot: objective %d met (loot %d: gold %d, gems %d, goods %d) -- completed\n", n, total,
+              loot->count[kLootGold], loot->count[kLootGems], loot->count[kLootArt]);
+      sprintf(name, "goal_state_%d", n);
+      pQuestData->Set(name, 1);
+   }
+}
+
+// the player's own loot (the one item it all combines into: the most of it)
+static void check_player_loot_goals(void)
+{
+   if (!PlayerObjectExists())
+      return;
+   sLootProp best;
+   memset(&best, 0, sizeof(best));
+   int bestTotal = -1;
+   AutoAppIPtr(ContainSys);
+   sContainIter *iter = pContainSys->IterStart(PlayerObject());
+   for (; !iter->finished; pContainSys->IterNext(iter))
+   {
+      sLootProp *prop;
+      if (gpLootProp->Get(iter->containee, &prop))
+      {
+         int t = 0;
+         for (int i = 0; i < kLootSpecial; i++)
+            t += prop->count[i];
+         if (t > bestTotal)
+         {
+            bestTotal = t;
+            best = *prop;
+         }
+      }
+   }
+   pContainSys->IterEnd(iter);
+   if (bestTotal >= 0)
+      check_loot_goals(&best);
+}
+
 static BOOL loot_combine_CB(eContainsEvent event, ObjID targ, ObjID src, eContainType ctype, ContainCBData /*data*/)
 {
    if (event == kContainCombine)
    {
       combine_loot(targ,src);
+      sLootProp* prop;
+      AutoAppIPtr(ContainSys);
+      if (PlayerObjectExists() && pContainSys->Contains(PlayerObject(), targ) && gpLootProp->Get(targ, &prop))
+         check_loot_goals(prop);
    }
    else if (event == kContainAdd)
    {
@@ -135,7 +224,10 @@ static BOOL loot_combine_CB(eContainsEvent event, ObjID targ, ObjID src, eContai
       {
          set_loot_name(src,prop);
          if (IsPlayerObj(targ))
+         {
             InvUIRefreshObj(src);
+            check_loot_goals(prop);
+         }
       }
    }
 
@@ -187,6 +279,10 @@ static void sim_cb(const sDispatchMsg* msg, const sDispatchListenerDesc* desc)
       case kSimTerm:
          tabulate_player_loot(FALSE);
          break;
+
+      case kSimResume:
+         check_player_loot_goals();
+         break;
    }
 }
 
@@ -195,7 +291,7 @@ static void setup_sim_cb()
    sDispatchListenerDesc desc =
    {
       &SIM_Loot,
-      kSimInit|kSimTerm,
+      kSimInit|kSimTerm|kSimResume,
       sim_cb,
       NULL
    };

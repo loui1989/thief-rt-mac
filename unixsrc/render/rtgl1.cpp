@@ -3113,7 +3113,7 @@ void upload_world()
    if (s_hazedFromAbove == g_underwater) {
       s_hazedFromAbove = !g_underwater;
       for (WorldGroup &g : g_world)
-         if (g.underWater > 0)
+         if (g.underWater > 0 || (g.flags & kRenderRTWorldWater))
             g.given = false;
    }
    const RgFloat3D cam = to_rt(g_camera.pos);
@@ -3223,13 +3223,22 @@ void upload_world()
          if (!tex) {
             // a water surface with no texture of its own (texture 0, as
             // Black Parade's canals, where the mission has no other water to
-            // borrow one from): not drawn, as the game draws none -- what is
-            // under it hazed by its depth (below) is all the water shows.
-            // (The path tracer's own water showed as a flat grey sheet; as a
-            // mirror it showed the world's unfinished undersides, only ever
-            // meant to be seen from the other side; as a dark surface, a
-            // black slab where the game shows the canal's bed.)
-            continue;
+            // borrow one from): the game draws none -- what is under it,
+            // hazed by its depth (below), shows the water. Over it, a faint
+            // film, mostly see-through: a third of the way to a very dark
+            // green, so the waterline shows and the bed under it still does.
+            // (Drawn unlit, as see-through surfaces are: so dark it stays
+            // dark however the eyes adapt. The path tracer's own water showed
+            // as a flat grey sheet; as a mirror it showed the world's
+            // unfinished undersides, only ever meant to be seen from the
+            // other side; drawn solid, a black slab over the canal's bed.)
+            if (g_underwater)
+               continue;   // (from under it: the water's own haze)
+            flags |= RG_MESH_PRIMITIVE_TRANSLUCENT;
+            const float top = std::max({g_waterRgb[0], g_waterRgb[1], g_waterRgb[2], 1.0f});
+            for (int k = 0; k < 3; ++k)
+               tint[k] = 0.012f * (0.4f + 0.6f * g_waterRgb[k] / top);
+            alpha = 0.32f;
          } else if (g_cfg.water == 1) {
             flags |= RG_MESH_PRIMITIVE_WATER;    // RTGL1's reflective/refractive water
          } else if (g_cfg.water == 0) {
