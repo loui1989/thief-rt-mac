@@ -15,6 +15,8 @@
 #include <r3d.h>
 #include <md.h>
 #include <mdutil.h>
+
+extern int r3d_rt_noclip;   /* r3d block.c: the ray tracer takes a model whole */
 
 
 // linear breakpoint, this seems pretty safe
@@ -78,8 +80,12 @@ BOOL md_fancy_setup_model(mds_model *m,mds_parm parms[])
 
    and_code = r3_clip_sphere(&cen,m->radius,&or_code);
 
-   // off view, can't see
-   if (and_code!=0) {
+   // off view, can't see -- unless the ray tracer takes the model whole
+   // (r3d_rt_noclip): out of view it still shadows and is seen in mirrors
+   // and water. Turned away here, a model never yet seen on screen was not
+   // there for the ray tracer at all (its shadow and reflection came in as
+   // it came into view), and every model drawn for that came up empty.
+   if (and_code!=0 && !r3d_rt_noclip) {
       return FALSE;
    }
 
