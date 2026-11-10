@@ -620,6 +620,22 @@ static BOOL NewMantle()
    return !config_get_int("new_mantle", &value) || value != 0;
 }
 
+// The object a mantle under way is onto (a statue, a crate, a table: none
+// for the world's own ledges). Climbing an irregular one -- Malazar's
+// Tower's statue, its edge not under its top -- the body met its side on
+// the way up and the mantle broke, every time. Until the mantle is over the
+// body passes it (as it passes a ladder); where it ends was found free of
+// it before the mantle began.
+static ObjID g_MantleOnto = OBJ_NULL;
+
+BOOL PhysMantleIgnores(ObjID mantler, ObjID other)
+{
+   cPhysModel *pModel = g_PhysModels.GetActive(mantler);
+   if (!pModel || !pModel->IsMantling() || other == OBJ_NULL)
+      return FALSE;
+   return other == g_MantleOnto || PhysObjIsLadder(other);
+}
+
 BOOL PhysObjIsLadder(ObjID objID)
 {
    if (objID == OBJ_NULL)
@@ -726,7 +742,10 @@ static BOOL CheckMantleCasts(ObjID objID)
 
       hit_obj = 0;
       if ((PhysRaycast(start_loc, end_loc, &hit_loc, &hit_obj, 0, kCollideOBB | kCollideTerrain) != kCollideNone) && CanMantleOnto(hit_obj))
+      {
          found_ledge = TRUE;
+         g_MantleOnto = hit_obj;
+      }
       else
          why = "no ledge found within reach";
    }

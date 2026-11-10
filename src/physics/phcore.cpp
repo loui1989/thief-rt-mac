@@ -6204,9 +6204,10 @@ static void ResolveCollision(cPhysClsn * pClsn, mxs_real dt)
    // A ladder met on the way up a mantle (begun at its top, or beside it):
    // not an obstacle to the climb. It broke the mantle, and the player was
    // put back off the ladder, falling.
+   // (and the object the mantle is onto: see PhysMantleIgnores)
    if ((pClsn->GetType() & kPC_Object) &&
-       ((pModel->IsMantling() && PhysObjIsLadder(pClsn->GetObjID2())) ||
-        (pClsn->GetModel2()->IsMantling() && PhysObjIsLadder(pClsn->GetObjID()))))
+       (PhysMantleIgnores(pClsn->GetObjID(), pClsn->GetObjID2()) ||
+        PhysMantleIgnores(pClsn->GetObjID2(), pClsn->GetObjID())))
    {
       delete pClsn;
       return;

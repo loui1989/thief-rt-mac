@@ -32,6 +32,8 @@ EXTERN void BreakMantle(ObjID objID);
 EXTERN BOOL CheckMantle(ObjID objID);
 // a ladder: an object with climbable sides (phmodobb)
 EXTERN BOOL PhysObjIsLadder(ObjID objID);
+// the player mantling passes this object (the one it climbs onto, a ladder)
+EXTERN BOOL PhysMantleIgnores(ObjID mantler, ObjID other);
 
 EXTERN void UpdateMantling(cPhysModel *pModel, mxs_real dt);
 
