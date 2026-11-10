@@ -404,6 +404,7 @@ struct RtTexture {
    bool provided = false;  // RTGL1 has a texture of this name
    bool hasAlpha = false;  // any texel not fully opaque
    bool cutout = false;    // any texel see-through (alpha < 50%)
+   bool soft = false;      // its alpha a soft gradient, not a cut-out (a soot mark, a stain)
    bool white = false;     // the 1x1 white "no texture" texture
    // its material maps being made (off the main thread), until they are done
    // it is given to RTGL1 as it is, under its plain name
@@ -535,6 +536,22 @@ void copy_pixels(RtTexture &t, int width, int height, const void *rgba, int rowB
    }
    t.hasAlpha = alpha;
    t.cutout = cutout;
+   // soft: most of what is not clear is partly see-through -- a smudge of
+   // soot behind a torch (Reflections in Red's scorch2: two thirds), not
+   // leaves or a grate (opaque, with a thin soft edge at most)
+   t.soft = false;
+   if (cutout) {
+      size_t some = 0, part = 0;
+      for (size_t i = 3; i < t.rgba.size(); i += 4) {
+         const uint8_t a = t.rgba[i];
+         if (a >= 16) {
+            ++some;
+            if (a < 224)
+               ++part;
+         }
+      }
+      t.soft = some > 0 && part * 2 > some;
+   }
    if (alpha)
       bleed_edges(t.rgba, width, height);
    t.white = width == 1 && height == 1 && t.rgba[0] == 255 && t.rgba[1] == 255 &&
@@ -2642,6 +2659,7 @@ void upload_objects()
       }
       return;
    }
+   bool toward_sky_light(const float c[3], float r);   // (below)
    // A budget for the models kept out of view: the nearest first, to about
    // 30000 triangles. Each is kept within a few metres to 40 m of the camera
    // (a straight line, through floors and walls); a walk round Black
@@ -2669,7 +2687,14 @@ void upload_objects()
          }
          // (only those within their own reach, as below)
          const float ext = std::max({c.bmax[0] - c.bmin[0], c.bmax[1] - c.bmin[1], c.bmax[2] - c.bmin[2], 0.0f});
-         const float keepBase = lit ? 40.0f : std::clamp(4.0f + 8.0f * ext, 4.0f, 25.0f);
+         float keepBase = lit ? 40.0f : std::clamp(4.0f + 8.0f * ext, 4.0f, 25.0f);
+         // (a big one -- a tree, a cart -- toward the moon from round the
+         // camera: its shadow on the ground near you, to 40 m)
+         if (keepBase < 40.0f && ext >= 2.0f) {
+            const float rel[3] = {dx, dy, dz};
+            if (toward_sky_light(rel, 0.5f * ext))
+               keepBase = 40.0f;
+         }
          const float keepAt = keepBase + (c.keptOut ? std::min(8.0f, 0.5f * keepBase) : 0.0f);
          if (d > std::min(keepAt, kKeepDistance))
             continue;
@@ -2722,7 +2747,14 @@ void upload_objects()
          bool lit = c.passLight;
          for (const CapturedPrim &p : c.prims)
             lit = lit || (p.emissive > 0.0f && !p.sprite);
-         const float keepBase = lit ? 40.0f : std::clamp(4.0f + 8.0f * ext, 4.0f, 25.0f);
+         float keepBase = lit ? 40.0f : std::clamp(4.0f + 8.0f * ext, 4.0f, 25.0f);
+         // (a big one -- a tree, a cart -- toward the moon from round the
+         // camera: its shadow on the ground near you, to 40 m)
+         if (keepBase < 40.0f && ext >= 2.0f) {
+            const float rel[3] = {dx, dy, dz};
+            if (toward_sky_light(rel, 0.5f * ext))
+               keepBase = 40.0f;
+         }
          const float keepAt = keepBase + (c.keptOut ? std::min(8.0f, 0.5f * keepBase) : 0.0f);
          if (overBudget.count(obj) ||
              dx * dx + dy * dy + dz * dz > std::min(keepAt, kKeepDistance) * std::min(keepAt, kKeepDistance)) {
@@ -3193,6 +3225,7 @@ struct WorldGroup {
    std::vector<Poly> polys;
    float bmin[3] = {1e30f, 1e30f, 1e30f}, bmax[3] = {-1e30f, -1e30f, -1e30f};   // meters
    bool shown = false;               // given to the path tracer last frame
+   uint32_t wantedFrame = 0;         // the last frame it was wanted (near, in reach or in view)
    bool given = false;               // given to it since the world was made (unchanged since)
    uint64_t givenSig = 0;            // all else it was last given with (world_prim_sig)
    int lmPage = -1;                  // the game's light: its lightmaps' page of the atlas
@@ -3204,6 +3237,26 @@ constexpr float kWorldChunk = 24.0f;      // meters
 constexpr float kWorldReach = 60.0f;      // meters walked from the camera (as Raze RT)
 constexpr float kWorldNear = 20.0f;       // meters in a straight line: always (shadows, reflections)
 constexpr float kWorldView = 300.0f;      // meters in a straight line, in the view's cone: a vista outdoors
+// the sky's light (the mission's sun, the moon) as last given: toward it, in
+// the map's axes (upload_moon), for what may shade the ground round the camera
+float g_skyLightTo[3] = {0, 0, 1};
+bool g_skyLightToSet = false;
+// what lies toward the sky's light from round the camera (within kSunShadowWide
+// of the line from the camera toward it, out to kSunShadowReach): it shadows
+// the ground and walls round the camera -- kept in the scene though out of view
+constexpr float kSunShadowWide = 25.0f, kSunShadowReach = 150.0f;   // meters
+bool toward_sky_light(const float c[3], float r)
+{
+   if (!g_skyLightToSet || !sky_light_on())
+      return false;
+   const float *s = g_skyLightTo;
+   const float t = c[0] * s[0] + c[1] * s[1] + c[2] * s[2];
+   if (t < -r || t > kSunShadowReach + r)
+      return false;
+   const float len2 = c[0] * c[0] + c[1] * c[1] + c[2] * c[2];
+   const float lateral = std::sqrt(std::max(len2 - t * t, 0.0f));
+   return lateral <= kSunShadowWide + r;
+}
 int g_worldCell = -1;
 float g_nextFacing[3] = {0, 0, 1};
 bool g_nextFacingSet = false;
@@ -3542,7 +3595,19 @@ void upload_world()
                const float lateral = std::sqrt(std::max(len2 - d * d, 0.0f));
                in = lateral * coneCos - d * coneSin <= r;
             }
+            // Out of the view's cone, but toward the moon (the sun) from
+            // round the camera: its shadow falls on the ground near you. (Looking
+            // down at Reflections in Red's grass by the stairs, the wall that
+            // shades it left the cone and its shadow went; looking up, back.)
+            if (!in)
+               in = toward_sky_light(c, r);
          }
+         if (in)
+            g.wantedFrame = g_frameNumber;
+         // and once given, for a moment after it is no longer wanted (a
+         // glance down and back up: not gone and rebuilt)
+         else if (g.shown && g_frameNumber - g.wantedFrame < 45u)
+            in = true;
          g.shown = in;
          if (!in)
             continue;
@@ -4660,7 +4725,7 @@ std::string row_value(int row)
    case kRowResponse: return g_cfg.response == 0 ? "As Blood RT" : g_cfg.response == 2 ? "Instant (noisier)" : "Quick";
    case kRowFlicker: return g_cfg.flicker == 1 ? "As the game" : g_cfg.flicker == 2 ? "Nearly steady" : "Smoothed";
    case kRowVolumetric:
-      return g_cfg.volumetric ? "Every light (costly)" : g_cfg.moonShafts ? (g_cfg.moon > 0.0f ? "Moonlight shafts" : "Moonlight shafts (moon off)") : "Off";
+      return g_cfg.volumetric ? "Every light (costly)" : g_cfg.moonShafts ? (sky_light_on() ? "Moonlight shafts (cheap)" : "Moonlight shafts (moon off)") : "Off";
    case kRowShafts: snprintf(buf, sizeof(buf), "%.2fx", g_cfg.shafts); return buf;
    case kRowMoon:
       if (g_cfg.moon <= 0.0f) return "Off";
@@ -6357,6 +6422,7 @@ void dump_texture(const RtTexture *t, const std::string &base)
 
 // the light gem's light, light by light (RenderRTPointLighting; the inspector)
 struct GemPart { uint32_t id; float value, dist; int blocked; };
+constexpr uint32_t kGemSunId = 0xfffffff0u;   // (the mission's sun, in a GemPart)
 float gem_value(const float pos[3], std::vector<GemPart> *parts);
 float g_gemPos[3] = {0, 0, 0};
 bool g_gemPosValid = false;
@@ -6654,6 +6720,10 @@ void inspect_view()
       const RgFloat3D me = to_rt(g_gemPos);
       for (size_t i = 0; i < parts.size() && i < 8; ++i) {
          const GemPart &p = parts[i];
+         if (p.id == kGemSunId) {
+            out("  the mission's sun (moon): %.1f, %d of 9 lines to the sky in shadow\n", p.value, p.blocked);
+            continue;
+         }
          const PendingLight *L = nullptr;
          for (const PendingLight &x : g_lastLights)
             if (x.id == p.id) {
@@ -7164,6 +7234,47 @@ float gem_value(const float pos[3], std::vector<GemPart> *parts)
       total += got;
       if (parts)
          parts->push_back({L.id, got, dFt * 0.3048f, blocked});
+   }
+   // A Thief 2 mission's sun (or moon: Reflections in Red's), where the
+   // player stands open to the sky in its direction: as bright for the gem as
+   // the path tracer shows it -- its light on a wall facing it against a
+   // lamp's 3 m off (the calibration above: a light of the level's strength
+   // 3 m away counts as in the game). Left out, the gem stayed dark in the
+   // moonlit courtyards the screen showed lit (lit 8, game 14). (The game's
+   // own reckoning, its brightness over 125 ft, gave a moon of 128 a gem of
+   // 1.4: lit as by a lamp at arm's length, all over the outdoors.)
+   if (g_sun.on && g_cfg.sun > 0.0f && g_sun.bright > 0.0f) {
+      // (upload_moon: its intensity, as lux on a face square to it; a sphere
+      // light's, flux / distance^2; the gem's 1/distance in feet)
+      const float lux = std::min(0.2f * g_sun.bright, 60.0f) * g_cfg.sun;
+      const float peak = std::max({g_sun.rgb[0], g_sun.rgb[1], g_sun.rgb[2], 1e-3f});
+      const float mag = std::sqrt(g_sun.rgb[0] * g_sun.rgb[0] + g_sun.rgb[1] * g_sun.rgb[1] +
+                                  g_sun.rgb[2] * g_sun.rgb[2]) / peak;
+      // a lamp of peak P at 3 m: flux 4P, so 4P/9 lux; the gem P*mag/32/9.84
+      const float full = lux * mag * 9.0f / (4.0f * 32.0f * 9.843f);
+      const float *d = g_sun.to;
+      float u[3] = {-d[1], d[0], 0.0f};
+      float ul = std::sqrt(u[0] * u[0] + u[1] * u[1]);
+      if (ul < 1e-3f)
+         u[0] = 1.0f, u[1] = 0.0f, ul = 1.0f;
+      u[0] /= ul, u[1] /= ul;
+      int blocked = 0;
+      for (int k = 0; k < 9; ++k) {
+         const int h = k / 3, side = k % 3 - 1;
+         float a[3], b[3];
+         for (int c = 0; c < 3; ++c) {
+            a[c] = body[h][c] + u[c] * 0.2f * float(side);
+            b[c] = a[c] + d[c] * 12.0f;
+         }
+         // the walls and roofs all the way out; solid objects near (a
+         // tree, an awning, a cart), by segment_blocked's own test
+         if (g_worldBvh.blocked(a, d, 400.0f) || segment_blocked(a, b))
+            ++blocked;
+      }
+      const float got = full * float(9 - blocked) / 9.0f;
+      total += got;
+      if (parts)
+         parts->push_back({kGemSunId, got, 0.0f, blocked});
    }
    return total;
 }
@@ -7834,6 +7945,14 @@ void RenderRTDrawWorld(int primitive, const sRenderBackendVertex *v, const float
       d.color = (name && !sprite) ? pack_color(1, 1, 1, v[i].a)
                                   : pack_color(v[i].r, v[i].g, v[i].b, v[i].a);
    }
+   const bool softDecal = tex && tex->soft && g_blend == kRenderBackendBlendAlpha && !sprite;
+   if (g_RenderRTShadowOnly && softDecal)
+      return;   // (a soft see-through stain casts no shadow)
+   if (softDecal)
+      // drawn see-through, so unlit: with the game's light on it, as the
+      // game draws it (else as dark under a lamp as in the dark)
+      for (int i = 0; i < count; ++i)
+         prim.verts[size_t(i)].color = pack_color(v[i].r, v[i].g, v[i].b, v[i].a);
    if (g_RenderRTShadowOnly) {
       // a face turned away from the camera: it blocks light, but is not seen
       // (two-sided model parts are pairs of coincident opposite faces)
@@ -7898,8 +8017,11 @@ void RenderRTDrawWorld(int primitive, const sRenderBackendVertex *v, const float
    } else if (g_blend == kRenderBackendBlendAdd) {
       prim.flags |= RG_MESH_PRIMITIVE_TRANSLUCENT;
       prim.emissive = 1.0f;
-   } else if (g_blend == kRenderBackendBlendAlpha && minAlpha < 0.99f &&
-              !(tex && tex->cutout && g_alphaTest && minAlpha >= 0.5f)) {
+   } else if (softDecal || (g_blend == kRenderBackendBlendAlpha && minAlpha < 0.99f &&
+              !(tex && tex->cutout && g_alphaTest && minAlpha >= 0.5f))) {
+      // (a soft-edged stain -- soot behind a torch, alpha blended and
+      // alpha tested in the game -- see-through as drawn: cut out at half
+      // its alpha it was a hard black blot on the wall)
       prim.flags |= RG_MESH_PRIMITIVE_TRANSLUCENT;
       // (a cut-out texture drawn alpha-tested and a little see-through --
       // a tree's leaves at 0.68: The Black Parade's T2Tree2 -- is cut out,
@@ -9400,7 +9522,7 @@ void build_window_lights()
 // courtyard, a floor under a window -- and casts the window's shadow). Its
 // light counts only where its ray reaches a face of the sky (upload_world),
 // not where it found a way out of the level through a gap. Not in the light
-// gem's reckoning (gem_value: the mission's own lights).
+// gem's reckoning (gem_value: the mission's own lights, and its own sun).
 // the enhanced sky's faces, as last drawn, to the path tracer's rasterized sky
 // (drawn from the origin: RgDrawFrameSkyParams.skyViewerPosition). All
 // translucent, so they are laid down in the game's order, each over the last,
@@ -9588,6 +9710,12 @@ void upload_moon()
       to[0] = std::cos(el) * std::cos(az);
       to[1] = std::cos(el) * std::sin(az);
       to[2] = std::sin(el);
+   }
+   {
+      const float l = std::sqrt(to[0] * to[0] + to[1] * to[1] + to[2] * to[2]);
+      g_skyLightToSet = l > 1e-4f;
+      for (int k = 0; k < 3 && g_skyLightToSet; ++k)
+         g_skyLightTo[k] = to[k] / l;
    }
    auto moon = RgLightDirectionalEXT{
       .sType = RG_STRUCTURE_TYPE_LIGHT_DIRECTIONAL_EXT,
