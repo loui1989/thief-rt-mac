@@ -7,6 +7,7 @@
 
 // Render an object
 #include <vector>   // (first: the headers below declare C linkage)
+#include <set>
 #include <objarray.h>
 
 #include <math.h>
@@ -49,6 +50,7 @@ extern "C" {
 #include <osysbase.h>
 #include <objedit.h>
 #include <objpos.h>
+#include <objsys.h>
 #include <hdskprop.h>
 #include <sprkprop.h>
 #include <rendprop.h>
@@ -2589,6 +2591,21 @@ void rendobj_render_object(ObjID obj, uchar *clut, ulong fragment)
 
    CTIMER_START(kCTimerRendObjTotal);
 
+   // An object no longer in the game (destroyed: a potion or a water arrow
+   // picked up into a stack) that a cell still lists: drawn where it was,
+   // it stood there as a ghost, and could be frobbed (Malazar's Tower).
+   // It is not drawn; the first time each, the log says so.
+   if (obj > 0 && !ObjectExists(obj))
+   {
+      static std::set<ObjID> s_ghosts;
+      if (s_ghosts.insert(obj).second)
+         mprintf("Render: object %d is drawn but no longer exists (in a cell's list still: %s; a position: %s; "
+                 "the arm %d, the arrow %d) -- not drawn\n",
+                 obj, ObjHasRefs(obj) ? "yes" : "no", ObjPosGet(obj) ? "yes" : "no",
+                 PlayerArm(), PlayerArrow());
+      CTIMER_RETURN(kCTimerRendObjTotal);
+   }
+
    if (!rendobj_object_is_visible(obj))
       CTIMER_RETURN(kCTimerRendObjTotal);
 
@@ -3242,6 +3259,7 @@ extern "C" void RenderRTGameDrawExtraObjects(void)
 EXTERN BOOL ObjGetModelName(ObjID obj, char *name);
 EXTERN BOOL CreatureExists(const ObjID objID);
 EXTERN int AIDescribeForDebug(ObjID obj, char * buf, int size);
+EXTERN int PhysDescribeHitboxes(ObjID objID, char *buf, int size);
 extern "C" void RenderRTGameDescribeNearby(const float at[3], float radius,
                                            void (*line)(const char *text, void *ctx), void *ctx)
 {
@@ -3300,6 +3318,17 @@ extern "C" void RenderRTGameDescribeNearby(const float at[3], float radius,
                      mn.x * 0.3048f, mn.y * 0.3048f, mn.z * 0.3048f, mx.x * 0.3048f, mx.y * 0.3048f,
                      mx.z * 0.3048f, n, n == 1 ? "" : "s", cells);
             line(text3, ctx);
+         }
+      }
+      // what a blow or an arrow hits: its physics model's parts
+      if (CreatureExists(obj))
+      {
+         char hit[600];
+         if (PhysDescribeHitboxes(obj, hit, sizeof(hit)))
+         {
+            char text4[660];
+            snprintf(text4, sizeof(text4), "      its physics (what weapons hit): %s\n", hit);
+            line(text4, ctx);
          }
       }
       char ai[400];

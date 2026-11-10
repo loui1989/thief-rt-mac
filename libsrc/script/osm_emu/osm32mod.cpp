@@ -938,6 +938,51 @@ protected:
                                 osm32::cMemory *memory,
                                 std::string *error)
    {
+      // SendMessage (21) and PostMessage (24) of a message the guest made
+      // itself (NVScript's relays: NVRelayTrap's TurnOn and TurnOff to each
+      // of its targets -- they failed, and its traps did nothing): a copy of
+      // its fields, sent as the engine's own message (a guest's extra fields,
+      // past the base message, are not carried)
+      if (slot == 21 || slot == 24)
+      {
+         uint32_t address, from, to, nameAddress, flags;
+         std::string name;
+         if (!Argument(*state, *memory, 1, &address, error) ||
+             !memory->Read32(address + 12, &from, error) ||
+             !memory->Read32(address + 16, &to, error) ||
+             !memory->Read32(address + 20, &nameAddress, error) ||
+             !memory->Read32(address + 28, &flags, error) ||
+             !ReadGuestString(memory, nameAddress, &name, error))
+            return false;
+         cMultiParm data[3];
+         for (unsigned i = 0; i < 3; ++i)
+            if (!ReadGuestParm(memory, address + 32 + i * 8, &data[i], error))
+               return false;
+         sScrMsg *message = new sScrMsg(static_cast<ObjID>(from), static_cast<ObjID>(to),
+                                        name.c_str(), data[0], data[1], data[2]);
+         message->flags |= static_cast<int>(flags & ~(kSMF_MsgSent | kSMF_MsgBlock));
+         if (slot == 24)
+         {
+            m_scriptManager->PostMessage(message);
+            message->Release();
+            return Return(state, memory, 8, 0, error);
+         }
+         uint32_t replyAddress = 0;
+         if (!Argument(*state, *memory, 2, &replyAddress, error))
+         {
+            message->Release();
+            return false;
+         }
+         cMultiParm reply;
+         const HRESULT result = m_scriptManager->SendMessage(message, &reply);
+         // (the message's block flag back to the guest's: a receiver's veto)
+         if (message->flags & kSMF_MsgBlock)
+            memory->Write32(address + 28, flags | kSMF_MsgBlock, 0);
+         message->Release();
+         if (replyAddress && !WriteGuestParm(memory, replyAddress, reply, error))
+            return false;
+         return Return(state, memory, 12, static_cast<uint32_t>(result), error);
+      }
       if (slot == 22)
       {
          uint32_t timer;

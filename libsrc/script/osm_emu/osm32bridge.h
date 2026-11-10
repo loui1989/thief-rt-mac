@@ -47,11 +47,13 @@ private:
       uint32_t size;
       uint32_t capacity;
       bool free;
+      uint32_t serial;   // allocation order
    };
 
    sBlock *Find(uint32_t address);
    const sBlock *Find(uint32_t address) const;
    void MarkFree(uint32_t address);
+   void Census();
 
    cMemory *m_memory;
    uint32_t m_base;
@@ -60,6 +62,8 @@ private:
    std::map<uint32_t, sBlock> m_blocks;
    std::set<std::pair<uint32_t, uint32_t> > m_free;   // (capacity, address)
    long m_live;   // allocations in use
+   uint32_t m_serial;   // allocations made
+   long m_censusAt;     // allocations in use when the log next gets a census
 };
 
 } // namespace osm32

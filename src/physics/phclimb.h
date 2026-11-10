@@ -34,6 +34,8 @@ EXTERN BOOL CheckMantle(ObjID objID);
 EXTERN BOOL PhysObjIsLadder(ObjID objID);
 // the player mantling passes this object (the one it climbs onto, a ladder)
 EXTERN BOOL PhysMantleIgnores(ObjID mantler, ObjID other);
+// its physics model's parts, where they are and how big (the inspector's)
+EXTERN int PhysDescribeHitboxes(ObjID objID, char *buf, int size);
 
 EXTERN void UpdateMantling(cPhysModel *pModel, mxs_real dt);
 

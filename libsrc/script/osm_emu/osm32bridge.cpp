@@ -64,8 +64,53 @@ cGuestHeap::cGuestHeap()
    m_base(0),
    m_end(0),
    m_next(0),
-   m_live(0)
+   m_live(0),
+   m_serial(0),
+   m_censusAt(15000)
 {
+}
+
+// What the guest's newest allocations still held are (their sizes, and what
+// a few hold), once as many are held as the census mark: the log can then
+// say what grows (Malazar's Tower's scripts held 47 more a second, for good)
+void cGuestHeap::Census()
+{
+   const uint32_t recent = m_serial > 4000 ? m_serial - 4000 : 0;
+   std::map<uint32_t, int> sizes;
+   std::vector<uint32_t> samples;
+   int count = 0;
+   for (std::map<uint32_t, sBlock>::const_iterator it = m_blocks.begin(); it != m_blocks.end(); ++it)
+      if (!it->second.free && it->second.serial >= recent)
+      {
+         ++sizes[it->second.size];
+         ++count;
+         if (samples.size() < 6 && it->second.serial >= recent + 2000)
+            samples.push_back(it->first);
+      }
+   std::vector<std::pair<int, uint32_t> > top;
+   for (std::map<uint32_t, int>::const_iterator it = sizes.begin(); it != sizes.end(); ++it)
+      top.push_back(std::make_pair(it->second, it->first));
+   std::sort(top.rbegin(), top.rend());
+   fprintf(stderr, "OSM32 heap: %ld allocations held; of the last 4000 made, %d still held, by size:", m_live, count);
+   for (size_t i = 0; i < top.size() && i < 8; ++i)
+      fprintf(stderr, " %u bytes x%d", top[i].second, top[i].first);
+   fprintf(stderr, "\n");
+   for (size_t i = 0; i < samples.size(); ++i)
+   {
+      const sBlock &b = m_blocks[samples[i]];
+      char text[100];
+      unsigned n = 0;
+      for (uint32_t j = 0; j < b.size && j < 48; ++j)
+      {
+         uint8_t v = 0;
+         m_memory->Read8(samples[i] + j, &v, 0);
+         n += snprintf(text + n, sizeof(text) - n, "%c", v >= 32 && v < 127 ? v : '.');
+      }
+      uint32_t first = 0, second = 0;
+      m_memory->Read32(samples[i], &first, 0);
+      m_memory->Read32(samples[i] + 4, &second, 0);
+      fprintf(stderr, "OSM32 heap:   0x%08x, %u bytes: \"%s\" (%08x %08x)\n", samples[i], b.size, text, first, second);
+   }
 }
 
 cGuestHeap::~cGuestHeap()
@@ -182,14 +227,21 @@ uint32_t cGuestHeap::Alloc(uint32_t size, std::string *error)
          rest.size = 0;
          rest.capacity = block.capacity - capacity;
          rest.free = true;
+         rest.serial = 0;
          m_blocks[address + capacity] = rest;
          m_free.insert(std::make_pair(rest.capacity, address + capacity));
          block.capacity = capacity;
       }
       block.free = false;
       block.size = size;
+      block.serial = m_serial++;
       ++g_Osm32HeapBlocks;
       ++m_live;
+      if (m_live >= m_censusAt)
+      {
+         m_censusAt *= 2;
+         Census();
+      }
       if (error) error->clear();
       return address;
    }
@@ -203,11 +255,17 @@ uint32_t cGuestHeap::Alloc(uint32_t size, std::string *error)
    block.size = size;
    block.capacity = capacity;
    block.free = false;
+   block.serial = m_serial++;
    const uint32_t address = m_next;
    m_blocks[address] = block;
    m_next += capacity;
    ++g_Osm32HeapBlocks;
    ++m_live;
+   if (m_live >= m_censusAt)
+   {
+      m_censusAt *= 2;
+      Census();
+   }
    if (error) error->clear();
    return address;
 }

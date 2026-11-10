@@ -636,6 +636,32 @@ BOOL PhysMantleIgnores(ObjID mantler, ObjID other)
    return other == g_MantleOnto || PhysObjIsLadder(other);
 }
 
+// An object's physics model, as the ray tracer's inspector shows it: what a
+// sword or an arrow hits (a creature's spheres, set by its type, or by a
+// mission's script: The Black Parade's dogs and snakes)
+int PhysDescribeHitboxes(ObjID objID, char *buf, int size)
+{
+   cPhysModel *pModel = g_PhysModels.Get(objID);
+   if (!pModel || size <= 0)
+      return 0;
+   static const char *kType[] = {"sphere", "bsp", "point", "box", "sphere-hat"};
+   const int n = pModel->NumSubModels();
+   int at = snprintf(buf, size, "%d part%s%s:", n, n == 1 ? "" : "s",
+                     pModel->IsCreature() ? " (a creature's)" : "");
+   for (int i = 0; i < n && at > 0 && at < size - 1; ++i)
+   {
+      const ePhysModelType type = pModel->GetType(i);
+      const mxs_vector &v = pModel->GetLocationVec(i);
+      float r = 0;
+      if (type == kPMT_Sphere || type == kPMT_SphereHat || type == kPMT_Point)
+         r = ((cPhysSphereModel *)pModel)->GetRadius(i);
+      at += snprintf(buf + at, size - at, "%s %s at (%.2f %.2f %.2f) m, radius %.2f m",
+                     i ? ";" : "", (unsigned)type < 5 ? kType[type] : "?", v.x * 0.3048f, v.y * 0.3048f,
+                     v.z * 0.3048f, r * 0.3048f);
+   }
+   return 1;
+}
+
 BOOL PhysObjIsLadder(ObjID objID)
 {
    if (objID == OBJ_NULL)
