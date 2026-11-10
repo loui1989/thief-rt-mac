@@ -43,6 +43,7 @@
 #include <engscrpt.h>
 #include <objquery.h>
 #include <simman.h>
+#include <propbase.h>
 #include <propface.h>
 #include <pfaceiid.h>
 #include <map>
@@ -879,13 +880,13 @@ protected:
    // a string property's text, copied out to the guest (one buffer an
    // object, reused while the text fits)
    struct sGuestText { uint32_t address; uint32_t capacity; };
-   std::map<int32_t, sGuestText> m_guestTexts;
+   std::map<int64_t, sGuestText> m_guestTexts;
 
-   bool GuestText(int32_t obj, const char *text, osm32::cMemory *memory, uint32_t *address,
+   bool GuestText(int64_t key, const char *text, osm32::cMemory *memory, uint32_t *address,
                   std::string *error)
    {
       const uint32_t length = static_cast<uint32_t>(strlen(text ? text : ""));
-      sGuestText &t = m_guestTexts[obj];
+      sGuestText &t = m_guestTexts[key];
       if (t.capacity < length + 1)
       {
          if (t.address)
@@ -903,6 +904,80 @@ protected:
             return false;
       *address = t.address;
       return true;
+   }
+
+   // A property's value through its typed interface (every one has the same
+   // shape: Set, TouchValue, Get, GetSimple at 18-21): an int, a BOOL, a
+   // float -- the value itself; a structure (a vector, any other) -- a
+   // pointer to it, its bytes copied to the guest (Get) or from it (Set),
+   // as large as the property's type says.
+   bool InvokeTypedProperty(IProperty *prop, unsigned slot, ObjID obj, uint32_t value,
+                            osm32::sCpuState *state, osm32::cMemory *memory, std::string *error)
+   {
+      const sPropertyTypeDesc *type = prop->DescribeType();
+      const sPropertyDesc *desc = prop->Describe();
+      const char *name = desc ? desc->name : "?";
+      void **vtable = *reinterpret_cast<void ***>(prop);
+      IUnknown *probe = 0;
+      bool scalar = false;
+      static const GUID *const kScalars[] = {&IID_IIntProperty, &IID_IBoolProperty, &IID_IFloatProperty};
+      for (const GUID *iid : kScalars)
+         if (!scalar && SUCCEEDED(prop->QueryInterface(*iid, reinterpret_cast<void **>(&probe))) && probe)
+         {
+            scalar = true;
+            probe->Release();
+         }
+      const uint32_t size = type ? static_cast<uint32_t>(type->size) : 0;
+      if (!scalar && (!size || size > 0x10000))
+      {
+         char message[160];
+         snprintf(message, sizeof(message), "property %s: its type (%s, %u bytes) is not given to scripts here",
+                  name, type ? type->type : "?", size);
+         if (error) *error = message;
+         return false;
+      }
+      if (slot == 18 || slot == 19)
+      {
+         uint32_t result;
+         if (scalar)
+            result = slot == 18 ? static_cast<uint32_t>(reinterpret_cast<HRESULT (LGAPI *)(void *, ObjID, uint32_t)>(
+                                     vtable[slot])(prop, obj, value))
+                                : (reinterpret_cast<BOOL (LGAPI *)(void *, ObjID, uint32_t)>(vtable[slot])(prop, obj, value) ? 1 : 0);
+         else
+         {
+            std::vector<uint8_t> bytes(size);
+            for (uint32_t i = 0; i < size; ++i)
+               if (!memory->Read8(value + i, &bytes[i], error)) return false;
+            result = slot == 18 ? static_cast<uint32_t>(reinterpret_cast<HRESULT (LGAPI *)(void *, ObjID, void *)>(
+                                     vtable[slot])(prop, obj, bytes.data()))
+                                : (reinterpret_cast<BOOL (LGAPI *)(void *, ObjID, void *)>(vtable[slot])(prop, obj, bytes.data()) ? 1 : 0);
+         }
+         return Return(state, memory, 12, result, error);
+      }
+      // Get, GetSimple
+      if (scalar)
+      {
+         uint32_t got = 0;
+         const BOOL found = reinterpret_cast<BOOL (LGAPI *)(void *, ObjID, uint32_t *)>(vtable[slot])(prop, obj, &got);
+         return (!found || !value || memory->Write32(value, got, error)) &&
+                Return(state, memory, 12, found ? 1 : 0, error);
+      }
+      void *data = 0;
+      const BOOL found = reinterpret_cast<BOOL (LGAPI *)(void *, ObjID, void **)>(vtable[slot])(prop, obj, &data);
+      if (!found || !data || !value)
+         return Return(state, memory, 12, found ? 1 : 0, error);
+      sGuestText &t = m_guestTexts[static_cast<int64_t>(prop->GetID()) << 32 | static_cast<uint32_t>(obj)];
+      if (t.capacity < size)
+      {
+         if (t.address) FreeGuest(t.address, 0);
+         t.address = AllocGuest(size, error);
+         t.capacity = t.address ? size : 0;
+         if (!t.address) return false;
+      }
+      const uint8_t *bytes = static_cast<const uint8_t *>(data);
+      for (uint32_t i = 0; i < size; ++i)
+         if (!memory->Write8(t.address + i, bytes[i], error)) return false;
+      return memory->Write32(value, t.address, error) && Return(state, memory, 12, 1, error);
    }
 
    bool InvokeEngineInterface(uint16_t id, uint32_t guestObject, unsigned slot,
@@ -1001,10 +1076,7 @@ protected:
          {
             IStringProperty *text = 0;
             if (FAILED(prop->QueryInterface(IID_IStringProperty, reinterpret_cast<void **>(&text))) || !text)
-            {
-               if (error) *error = "property is not a string property";
-               return false;
-            }
+               return InvokeTypedProperty(prop, slot, obj, b, state, memory, error);
             uint32_t result = 0;
             bool ok = true;
             if (slot == 18 || slot == 19)
@@ -1022,7 +1094,8 @@ protected:
                result = got ? 1 : 0;
                uint32_t address = 0;
                if (got && b)
-                  ok = GuestText(static_cast<int32_t>(obj), value, memory, &address, error) &&
+                  ok = GuestText(static_cast<int64_t>(prop->GetID()) << 32 | static_cast<uint32_t>(obj),
+                                 value, memory, &address, error) &&
                        memory->Write32(b, address, error);
             }
             text->Release();
