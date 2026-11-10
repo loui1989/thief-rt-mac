@@ -11,6 +11,7 @@
 #include <lg.h>
 #include <lgd3d.h>
 #include <r3d.h>
+#include <skypoly.h>
 #include <filevar.h>
 #include <sdesbase.h>
 #include <sdesc.h>
@@ -462,7 +463,7 @@ void cDistantArt::Render()
          PolyPoints[3]->grp.u = PolyPoints[0]->grp.u;
 
          r3d_do_setup = TRUE;
-         r3_draw_poly(4, PolyPoints);
+         SKY_DRAW_POLY(4, PolyPoints);
       }
    }
 
@@ -515,7 +516,7 @@ void cDistantArt::Render()
             PolyPoints[3]->grp.u = PolyPoints[0]->grp.u;
 
             r3d_do_setup = TRUE;
-            r3_draw_poly(4, PolyPoints);
+            SKY_DRAW_POLY(4, PolyPoints);
          }
       }
    }

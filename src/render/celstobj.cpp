@@ -16,6 +16,7 @@
 #include <lg.h>
 #include <lgd3d.h>
 #include <r3d.h>
+#include <skypoly.h>
 #include <config.h>
 #include <filevar.h>
 #include <sdesbase.h>
@@ -486,7 +487,7 @@ void cCelestialObject::Render()
    r3_set_texture(pBitmap);
    r3_start_block();
    r3_transform_block(4, (r3s_point *)pcorn, Points);
-   r3_draw_poly(4, vlist);
+   SKY_DRAW_POLY(4, vlist);
    r3_end_block();
 
 

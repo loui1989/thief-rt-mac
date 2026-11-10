@@ -1311,8 +1311,16 @@ struct SkyDraw {
    RtTexture *tex = nullptr;
    uint32_t serial = 0;   // the texture's, when drawn (a handle is reused)
    int blend = 0;
+   int layer = 0;         // the sky's part it is of (RenderRTSkyLayer): drawn in that order
+   bool world = false;    // whole polygons, already in 3D (RenderRTSkyPoly)
    std::vector<RgPrimitiveVertex> verts;
 };
+// the polygon the sky is drawing now, whole (RenderRTSkyPoly), and the part
+int g_skyPolyN = 0;
+void **g_skyPolyPts = nullptr;
+bool g_skyPolyDone = false;    // its first piece seen (and it taken whole, or left)
+bool g_skyPolyClipped = false; // a draw it could not be made from: its pieces as clipped
+int g_skyLayer = 0;
 struct SkyCapture {
    int face = -1;
    float ul[3] = {}, right[3] = {}, down[3] = {};
@@ -3948,10 +3956,107 @@ void SetAlphaTest(int enabled) { g_alphaTest = enabled != 0; }
 void SetFog(int, uint32_t) {}
 
 // a sky face's polygons (or points: stars), back in 3D (see g_skyFaces)
+extern "C" int lgd3d_rt_sky_vertex(void *point, sRenderBackendVertex *out);
+
+// The polygon being drawn, whole, in 3D (RenderRTSkyPoly): kept by the one
+// face its middle is in, as the sky made it -- not the piece the face clipped.
+// A polygon on two faces was two pieces, each clipped by its own face, and
+// they did not quite meet: gaps along the cube's edges across the sky,
+// whatever half pixel the faces were nudged by. False: taken as clipped.
+bool sky_capture_whole()
+{
+   SkyCapture &c = g_skyCap;
+   const int n = g_skyPolyN;
+   if (n < 3 || n > 64)
+      return false;
+   // r3's clipping space: the face's view, its edges at x = +-z, y = +-z
+   // (screen (x/z + 1) * S/2 - 0.5): a point at its pyramid's corners' mix
+   float w[64][3];
+   float mid[3] = {0, 0, 0};
+   for (int i = 0; i < n; ++i) {
+      const float *p = static_cast<const float *>(g_skyPolyPts[i]);
+      const float x = p[0], y = p[1], z = p[2];
+      if (!std::isfinite(x) || !std::isfinite(y) || !std::isfinite(z))
+         return false;
+      for (int k = 0; k < 3; ++k) {
+         w[i][k] = c.ul[k] * z + c.right[k] * 0.5f * (x + z) + c.down[k] * 0.5f * (y + z);
+         mid[k] += w[i][k];
+      }
+   }
+   // the face its middle is in (by the face's own axis; the faces are the
+   // cube's, round the map's axes): the others leave it (a polygon on an edge
+   // of the cube to one face only -- a bias, so a middle on the diagonal goes
+   // the same way from every face)
+   float fwd[3];
+   for (int k = 0; k < 3; ++k)
+      fwd[k] = c.ul[k] + 0.5f * c.right[k] + 0.5f * c.down[k];
+   int fAxis = 0, mAxis = 0;
+   float fBest = -1.0f, mBest = -1.0f;
+   for (int k = 0; k < 3; ++k) {
+      if (std::fabs(fwd[k]) > fBest)
+         fBest = std::fabs(fwd[k]), fAxis = k;
+      const float s = std::fabs(mid[k]) * (1.0f + 1e-4f * float(k));
+      if (s > mBest)
+         mBest = s, mAxis = k;
+   }
+   if (mAxis != fAxis || (mid[mAxis] > 0.0f) != (fwd[fAxis] > 0.0f))
+      return true;   // another face's
+   sRenderBackendVertex bv[64];
+   for (int i = 0; i < n; ++i)
+      if (!lgd3d_rt_sky_vertex(g_skyPolyPts[i], &bv[i]))
+         return false;
+   std::vector<SkyDraw> &face = g_skyFaces[c.face];
+   RtTexture *const tex = g_bound[0];
+   if (face.empty() || face.back().tex != tex || face.back().blend != g_blend || !face.back().world ||
+       face.back().layer != g_skyLayer) {
+      face.emplace_back();
+      face.back().tex = tex;
+      face.back().serial = tex ? tex->serial : 0;
+      face.back().blend = g_blend;
+      face.back().layer = g_skyLayer;
+      face.back().world = true;
+   }
+   std::vector<RgPrimitiveVertex> &out = face.back().verts;
+   const bool opaque = g_blend == kRenderBackendBlendOpaque;
+   auto put = [&](int i) {
+      RgPrimitiveVertex d{};
+      for (int k = 0; k < 3; ++k)
+         d.position[k] = w[i][k];
+      d.texCoord[0] = bv[i].u0;
+      d.texCoord[1] = bv[i].v0;
+      d.color = pack_color(bv[i].r, bv[i].g, bv[i].b, opaque ? 1.0f : bv[i].a);
+      out.push_back(d);
+   };
+   for (int i = 2; i < n; ++i) {
+      put(0);
+      put(i - 1);
+      put(i);
+      ++g_skyTris;
+   }
+   if (opaque)
+      for (int i = 0; i < n; ++i) {
+         g_skyBackSum[0] += bv[i].r;
+         g_skyBackSum[1] += bv[i].g;
+         g_skyBackSum[2] += bv[i].b;
+         g_skyBackSum[3] += 1.0;
+      }
+   return true;
+}
+
 void sky_capture(int primitive, const sRenderBackendVertex *v, int count)
 {
    SkyCapture &c = g_skyCap;
    const float S = float(kSkyFaceSize);
+   // a polygon given whole: taken so once (its clipped pieces left), or, a
+   // draw it could not be made from, as clipped
+   if (g_skyPolyN > 0 && !g_skyPolyClipped) {
+      if (g_skyPolyDone)
+         return;
+      g_skyPolyDone = true;
+      if (sky_capture_whole())
+         return;
+      g_skyPolyClipped = true;
+   }
    // (kept as drawn -- the screen point and its depth -- and turned to a
    // direction when the face is done: RenderRTSkyFaceEnd)
    auto at = [&](float x, float y, float rhw, float out[3]) {
@@ -3973,11 +4078,13 @@ void sky_capture(int primitive, const sRenderBackendVertex *v, int count)
    std::vector<SkyDraw> &face = g_skyFaces[c.face];
    // (a point -- an old sky's star -- has no texture, whatever is bound)
    RtTexture *const tex = primitive == kRenderBackendPoints ? nullptr : g_bound[0];
-   if (face.empty() || face.back().tex != tex || face.back().blend != g_blend) {
+   if (face.empty() || face.back().tex != tex || face.back().blend != g_blend || face.back().world ||
+       face.back().layer != g_skyLayer) {
       face.emplace_back();
       face.back().tex = tex;
       face.back().serial = tex ? tex->serial : 0;
       face.back().blend = g_blend;
+      face.back().layer = g_skyLayer;
    }
    std::vector<RgPrimitiveVertex> &out = face.back().verts;
    // As drawn, at the depth it was drawn at; scaled when the face is done
@@ -4536,7 +4643,7 @@ std::string row_value(int row)
       return buf;
    case kRowLights:
       if (g_cfg.maxLights <= 0) return "All";
-      snprintf(buf, sizeof(buf), "nearest %d", g_cfg.maxLights);
+      snprintf(buf, sizeof(buf), "%d strongest", g_cfg.maxLights);
       return buf;
    case kRowLightCull: return g_cfg.lightCull ? "Skipped" : "Traced";
    case kRowLightFade: return g_cfg.lightFade ? "Fade in" : "Appear at once";
@@ -7546,10 +7653,27 @@ int RenderRTSkyFaceWanted(void)
 
 int RenderRTSkyFaceSize(void) { return kSkyFaceSize; }
 
+void RenderRTSkyPoly(int n, void **points)
+{
+   if (g_skyCap.face < 0 || n <= 0 || !points) {
+      g_skyPolyN = 0;
+      g_skyPolyPts = nullptr;
+      return;
+   }
+   g_skyPolyN = n;
+   g_skyPolyPts = points;
+   g_skyPolyDone = false;
+   g_skyPolyClipped = false;
+}
+
+void RenderRTSkyLayer(int layer) { g_skyLayer = layer; }
+
 void RenderRTSkyFaceBegin(int face, const float corners[12])
 {
    if (face < 0 || face > 5)
       return;
+   g_skyLayer = 0;
+   g_skyPolyN = 0;
    SkyCapture &c = g_skyCap;
    for (int k = 0; k < 3; ++k) {
       c.ul[k] = corners[k];
@@ -7597,6 +7721,8 @@ void RenderRTSkyFaceEnd(void)
       const bool side = face < 4 && filled;
       for (SkyDraw &d : g_skyFaces[face])
          for (RgPrimitiveVertex &v : d.verts) {
+            if (d.world)
+               continue;   // (whole polygons: in 3D already)
             if (side) {
                if (v.position[0] >= x1 - 1e-3f)
                   v.position[0] += 0.5f;
@@ -9339,11 +9465,20 @@ void upload_sky()
       }
       return;
    }
+   // The sky's parts in their order (the dome, its stars, the moon, the
+   // clouds), each face's of each: a polygon taken whole reaches into the
+   // faces round it, and a face's dome drawn after its neighbour's clouds
+   // covered them there.
+   int lastLayer = 0;
+   for (int f = 0; f < 6; ++f)
+      for (const SkyDraw &d : g_skyFaces[f])
+         lastLayer = std::max(lastLayer, d.layer);
+   for (int layer = 0; layer <= lastLayer; ++layer)
    for (int f = 0; f < 6; ++f) {
       uint64_t k = 0;
       for (const SkyDraw &d : g_skyFaces[f]) {
          ++k;
-         if (d.verts.empty())
+         if (d.verts.empty() || d.layer != layer)
             continue;
          // a texture since destroyed (its handle reused): not drawn
          if (d.tex && d.tex->serial != d.serial)
@@ -9556,8 +9691,11 @@ void flush_lights()
    }
    g_lightsReaching = uint32_t(g_pendingLights.size());
    const RgFloat3D cam = to_rt(g_camera.pos);
-   const size_t keep = g_cfg.reach > 0 ? size_t(512)
-                       : g_cfg.maxLights > 0 ? size_t(g_cfg.maxLights) : g_pendingLights.size();
+   // (at most so many, the strongest where the camera is -- with a reach too:
+   // a courtyard's 160 lights within 30 m walked cost the graphics card twice
+   // the direct light of a room's 15, most of them a faint touch far off)
+   const size_t keep = g_cfg.maxLights > 0 ? size_t(g_cfg.maxLights)
+                       : g_cfg.reach > 0 ? size_t(512) : g_pendingLights.size();
    static std::unordered_map<uint32_t, uint32_t> s_chosen;   // id -> frame last chosen
    static uint32_t s_frame = 0;
    ++s_frame;

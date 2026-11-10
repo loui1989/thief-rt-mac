@@ -1491,6 +1491,46 @@ int lgd3d_trifan(int n, r3s_point **ppl)
 
 int (*lgd3d_draw_poly_func)(int n, r3s_phandle *pl);
 
+#ifdef DARK_RT
+// The path tracer's sky (rtgl1.cpp sky_capture): a point of the polygon being
+// drawn, unclipped, made into the backend's vertex as the current draw
+// function makes its points (colour, alpha, texture scale). FALSE: a draw
+// function it does not know (the polygon is then taken as clipped).
+int lgd3d_rt_sky_vertex(void *point, sRenderBackendVertex *out)
+{
+   r3s_point *p = (r3s_point *)point;
+   g2s_point *g2p = (g2s_point *)&p->grp;
+   sLgd3dVertex v;
+   memset(&v, 0, sizeof(v));
+   v.tu = p->grp.u;
+   v.tv = p->grp.v;
+   v.specular = fog_specular;
+   if (lgd3d_draw_poly_func == lgd3d_rgblit_trifan) {
+      int r, g, b;
+      r = (int)(255*g2p->i); if (r>255) r = 255; else if (r<0) r = 0;
+      g = (int)(255*g2p->h); if (g>255) g = 255; else if (g<0) g = 0;
+      b = (int)(255*g2p->d); if (b>255) b = 255; else if (b<0) b = 0;
+      v.color = PackColor(r, g, b, get_vertex_alpha(g2p));
+   } else if (lgd3d_draw_poly_func == lgd3d_rgb_poly) {
+      uint32 c0 = get_color();
+      int r, g, b;
+      r = (int)(((c0 >> 16) & 255)*g2p->i); if (r>255) r = 255; else if (r<0) r = 0;
+      g = (int)(((c0 >>  8) & 255)*g2p->h); if (g>255) g = 255; else if (g<0) g = 0;
+      b = (int)(((c0 >>  0) & 255)*g2p->d); if (b>255) b = 255; else if (b<0) b = 0;
+      v.color = PackColor(r, g, b, get_vertex_alpha(g2p));
+   } else if (lgd3d_draw_poly_func == lgd3d_lit_trifan) {
+      float i = p->grp.i;
+      if (i > 1.0) i = 1.0;
+      make_scolor(&v.color, (lgd3d_alpha << 24) + 0xffffff, i);
+   } else if (lgd3d_draw_poly_func == lgd3d_trifan) {
+      v.color = (lgd3d_alpha << 24) + 0xffffff;
+   } else
+      return FALSE;
+   ModernConvertVertex(out, &v);
+   return TRUE;
+}
+#endif
+
 void lgd3d_lit_tmap_setup(grs_bitmap *bm)
 {
    g_tmgr->set_texture(bm);

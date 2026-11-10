@@ -11,6 +11,7 @@
 #include <lg.h>
 #include <lgd3d.h>
 #include <r3d.h>
+#include <skypoly.h>
 #include <filevar.h>
 #include <sdesbase.h>
 #include <sdesc.h>
@@ -1427,7 +1428,7 @@ static inline void RenderTJointConfig(int nSubTileX, int nSubTileY, int nConfig,
       }
 
       r3d_do_setup = TRUE;
-      r3_draw_poly(3, Points);
+      SKY_DRAW_POLY(3, Points);
    }
 }
 
@@ -1566,7 +1567,7 @@ void cCloudDeck::Render()
                   Points[3]->grp.v += fVOffset;
 
                   r3d_do_setup = TRUE;
-                  r3_draw_poly(4, Points);
+                  SKY_DRAW_POLY(4, Points);
                }
          }
          else
@@ -1629,7 +1630,7 @@ void cCloudDeck::Render()
             ((goddamn_stupid_r3s_point *)(Points[3]))->grp.a = pAlphas[PointIxs[3]];
 
             r3d_do_setup = TRUE;
-            r3_draw_poly(4, Points);
+            SKY_DRAW_POLY(4, Points);
          }
       }
    }

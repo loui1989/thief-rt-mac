@@ -6,6 +6,9 @@
 // $Header: r:/t2repos/thief2/src/render/skyrend.cpp,v 1.11 2000/02/19 12:35:46 toml Exp $
 
 #include <skyrend.h>
+#ifdef DARK_RT
+#include <render_rt.h>
+#endif
 #include <skyint.h>
 #include <skyobj.h>
 #include <starobj.h>
@@ -128,6 +131,10 @@ void SkyRendererRender()
 
    while (RenderedComponents[i])
    {
+#ifdef DARK_RT
+      // (the path tracer's sky keeps the parts in this order: RenderRTSkyLayer)
+      RenderRTSkyLayer(i);
+#endif
       RenderedComponents[i]->Render();
       i++;
    }

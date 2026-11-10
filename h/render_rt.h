@@ -197,6 +197,14 @@ int RenderRTSkyFaceWanted(void);
 int RenderRTSkyFaceSize(void);
 void RenderRTSkyFaceBegin(int face, const float corners[12]);
 void RenderRTSkyFaceEnd(void);
+// While a face is drawn: the polygon the sky is drawing now (src/render/
+// skypoly.h), its points as the sky made them (r3s_point, in r3's clipping
+// space), before the face clipped them -- taken whole, in 3D, by the one
+// face its middle is in (n 0: done). And which of the sky's parts is being
+// drawn (skyrend.cpp's components, in their order), for the path tracer's
+// sky to draw them in that order whichever face kept each polygon.
+void RenderRTSkyPoly(int n, void **points);
+void RenderRTSkyLayer(int layer);
 // (The old star sky is drawn the same way: its stars.) The old textured sky,
 // every frame while the mission has it (portal.c): a face of the background
 // cube round the viewer (0 top, 1 bottom, 2-5 round), its corners (Dark
