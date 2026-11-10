@@ -3457,6 +3457,29 @@ void stand_in_water(WorldGroup &g)
 // unchanged, given again as it was then without its data -- the path tracer
 // keeps its vertices and all it found from them. (Null: a library without it.)
 using RepeatPrimitivesFn = uint32_t (*)(const uint64_t *ids, uint32_t count, uint8_t *repeated);
+// The tracing layout test (RTGL1 0032, rgThiefTracingTest): how the scene is
+// laid out for the rays, to find what makes them slow outdoors -- see
+// kTraceTestNames. Not saved; in each performance log entry.
+int g_traceTest = 0;
+const char *const kTraceTestNames[] = {
+   "Off", "See-through traced solid", "The map in one piece", "The map in 48 m pieces",
+   "Still objects in the map's pieces", "Both: 48 m pieces with the objects",
+};
+void set_trace_test(int test)
+{
+   using Fn = void (*)(int);
+   static Fn fn = nullptr;
+   static bool looked = false;
+   if (!looked && g_lib) {
+      fn = reinterpret_cast<Fn>(dlsym(g_lib, "rgThiefTracingTest"));
+      looked = true;
+   }
+   g_traceTest = test;
+   if (fn)
+      fn(test);
+   fprintf(stderr, "RT: tracing layout test: %s%s\n", kTraceTestNames[test], fn ? "" : " (not in this library)");
+}
+
 RepeatPrimitivesFn repeat_primitives_fn()
 {
    static int s = -1;
@@ -4695,7 +4718,7 @@ const char *kUpscaleNames[] = {"Off",
 enum UiRow {
    kRowUpscale, kRowScale, kRowOutput, kRowDynres, kRowBounces, kRowReach, kRowLights, kRowLightFade, kRowCandidates, kRowNeighbours, kRowLightCull, kRowResponse, kRowFlicker, kRowVolumetric, kRowShafts, kRowFog, kRowFogLit, kRowFogQuality, kRowSmoke, kRowPlayerBody, kRowPlayerLegs, kRowShadowAlert, kRowTestMirror, kRowBloom, kRowVsync, kRowFrameCap,
    kRowFps, kRowDetection, kRowGemScale, kRowGemMatch, kRowGemEase, kRowLight, kRowExposure, kRowDarkAdapt, kRowAmbient, kRowAmbientFollow, kRowShadowCool, kRowSkySeen, kRowSky, kRowMoon, kRowMoonDir, kRowMoonHeight, kRowSun, kRowSunHalf, kRowLightSize, kRowRough, kRowSmooth, kRowSteady, kRowReuseModels, kRowFixtures, kRowFixtureLight, kRowSmallLamps, kRowLightFix, kRowGlow, kRowFlameGlow, kRowMaterials, kRowBump, kRowCrevice, kRowTexDetail, kRowParallax, kRowPolish, kRowWater, kRowUnderwater, kRowTracedSound, kRowHrtf,
-   kRowDebug, kRowFreeze, kRowBackFaces, kRowReuse, kRowBlink, kRowPerf, kRowInspect, kRowSkipMission, kRowReset, kRowCount
+   kRowDebug, kRowFreeze, kRowTraceTest, kRowBackFaces, kRowReuse, kRowBlink, kRowPerf, kRowInspect, kRowSkipMission, kRowReset, kRowCount
 };
 
 const char *kRowLabels[kRowCount] = {
@@ -4703,7 +4726,7 @@ const char *kRowLabels[kRowCount] = {
    "Lights coming into range", "Lights tried per pixel", "  Lights shared with neighbours", "Lights behind walls", "Light changes", "Light flicker",
    "God rays (volumetric)", "  God ray strength", "Mission fog", "  Fog lit by the lamps", "  Lit fog quality", "Smoke and steam", "Garrett's shadow and reflection", "  His legs seen looking down", "  Guards notice his shadow", "  Test mirror", "Bloom", "VSync", "Frame rate limit", "FPS counter", "Light gem and guards", "  Light gem brightness", "  Light gem falloff", "  Light gem response", "Light brightness", "Darkest exposure", "  Eyes adjust to the dark", "Ambient light", "  Follows the game's light", "  Shadow colour", "Sky brightness (as seen)", "Sky light (on the level)", "Moonlight", "  Moon direction", "  Moon height", "Sunlight (Thief 2 missions)", "  Its shadows",
    "Light size (soft shadows)", "Surface roughness", "Model shading", "Model faces", "  Still models drawn once", "Torches and lamps", "Lamp and torch light", "Lamp reach", "Lights in walls", "Lamp glow", "Flame glow", "Materials", "Bumps", "Crevices", "Texture detail", "Parallax depth", "Polished reflections", "Water", "  Under water: brighter", "Traced sound (Steam Audio)", "  Headphone 3D sound (HRTF)",
-   "Debug view", "Freeze scene (test)", "Back faces (test)", "Light sampling (test)", "Blink nearest light (test)", "Performance log", "Inspect centre of view", "Skip to next mission (test)", "Reset to defaults",
+   "Debug view", "Freeze scene (test)", "Tracing layout (test)", "Back faces (test)", "Light sampling (test)", "Blink nearest light (test)", "Performance log", "Inspect centre of view", "Skip to next mission (test)", "Reset to defaults",
 };
 
 // rows that do something when chosen rather than having a value
@@ -4864,6 +4887,7 @@ std::string row_value(int row)
       static const char *kModes[] = {"Off", "Models and lights", "Models only", "Lights only"};
       return kModes[std::clamp(g_freezeMode, 0, 3)];
    }
+   case kRowTraceTest: return kTraceTestNames[std::clamp(g_traceTest, 0, 5)];
    case kRowBackFaces: return g_dropBackFaces ? "Dropped" : "Shadows only";
    case kRowBlink: return g_blinkTest ? "On" : "Off";
    case kRowFrameCap:
@@ -5122,6 +5146,9 @@ void change_row(int row, int dir)
       g_cfg.frameCap = kCaps[((i < 3 ? i : 0) + dir + 3) % 3];
       break;
    }
+   case kRowTraceTest:
+      set_trace_test((g_traceTest + dir + 6) % 6);
+      return;   // not saved
    case kRowFreeze: {
       g_freezeMode = (g_freezeMode + dir + 4) % 4;
       g_freeze = g_freezeMode == 1 || g_freezeMode == 2;
@@ -5354,10 +5381,11 @@ void perf_frame(double t)
       int rw, rh;
       render_size(rw, rh);
       static const char *kGi[] = {"2 half rate", "1", "2", "1 half rate"};
-      fprintf(f, "[%7.1f s] camera (%.1f %.1f %.1f) m  traced %dx%d -> output %dx%d  %s%s  bounces %s  reach %d m  lights tried %d  bloom %d  vsync %d  limit %d fps\n",
+      fprintf(f, "[%7.1f s] camera (%.1f %.1f %.1f) m  traced %dx%d -> output %dx%d  %s%s  bounces %s  reach %d m  lights tried %d  bloom %d  vsync %d  limit %d fps%s%s\n",
               t - g_perf.start, cam.data[0], cam.data[1], cam.data[2], rw, rh, g_drawableW, g_drawableH,
               kUpscaleNames[std::clamp(g_cfg.upscale, 0, 5)], g_cfg.dynres > 0 ? " (dynamic)" : "",
-              kGi[std::clamp(g_cfg.gi, 0, 3)], g_cfg.reach, g_cfg.candidates, int(g_cfg.bloom), int(g_vsync), g_cfg.frameCap);
+              kGi[std::clamp(g_cfg.gi, 0, 3)], g_cfg.reach, g_cfg.candidates, int(g_cfg.bloom), int(g_vsync), g_cfg.frameCap,
+              g_traceTest ? "  TRACING TEST: " : "", g_traceTest ? kTraceTestNames[std::clamp(g_traceTest, 0, 5)] : "");
       fprintf(f, "  %.1f fps  frame avg %.1f ms  median %.1f  95%% %.1f  worst %.1f\n", n / (t - g_perf.windowStart),
               avg, pct(0.5), pct(0.95), sorted.back());
       fprintf(f, "  per frame: game %.1f ms (of it: rt capture+upload %.1f, rt prep %.1f)  rt submit %.1f  gpu wait %.1f\n",
