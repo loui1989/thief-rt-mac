@@ -2731,6 +2731,27 @@ static void portal_rt_begin(float zoom, int cell)
 
 extern void DetailAttachmentsUpdate(void);
 
+#ifdef DARK_RT
+#include <time.h>
+// Where the game's view spends its frame, for the performance log
+// (rtgl1.cpp): seconds summed, until the log takes them -- 0 finding the
+// cells in view, 1 sorting them and finding their objects, 2 their light
+// maps, 3 drawing them (their objects: the walls and floors are not drawn),
+// 4 after them (see-through objects, particles, overlays), 5 the objects
+// out of view drawn for their shadows
+double g_PortalPartSeconds[6];
+static double portal_part_clock(void)
+{
+   struct timespec ts;
+   clock_gettime(CLOCK_MONOTONIC, &ts);
+   return (double)ts.tv_sec + (double)ts.tv_nsec * 1e-9;
+}
+#define PORTAL_PART(i) do { const double now_ = portal_part_clock(); \
+   g_PortalPartSeconds[i] += now_ - portal_part_last; portal_part_last = now_; } while (0)
+#else
+#define PORTAL_PART(i) ((void)0)
+#endif
+
 void portal_render_scene(Position *pos, float zoom)
 {  PROF
    Location *loc;
@@ -2761,6 +2782,7 @@ void portal_render_scene(Position *pos, float zoom)
    r3_set_zoom (zoom);
 #ifdef DARK_RT
    portal_rt_begin(zoom, cell);
+   double portal_part_last = portal_part_clock();
 #endif
 
      // tell the scene clipper to clear its clipinfo
@@ -2801,6 +2823,7 @@ void portal_render_scene(Position *pos, float zoom)
 
    // do the traversal of all visible cells
    portal_traverse_scene(cell);
+   PORTAL_PART(0);
 
    if (portal_pre_draw_callback != NULL)
       portal_pre_draw_callback();
@@ -2870,6 +2893,7 @@ void portal_render_scene(Position *pos, float zoom)
    // opposite--this is a useful debugging tool to show you how much
    // stuff is being processed.
 
+   PORTAL_PART(1);
    portal_mip_setup(zoom);
 
    if ((g_lgd3d)&&(!punt_hardware_lighting)) {
@@ -2877,6 +2901,7 @@ void portal_render_scene(Position *pos, float zoom)
          portal_preload_lightmaps(active_regions[i]);
       porthw_end_frame();
    }
+   PORTAL_PART(2);
 
    // the frame's fog (a fog zone's, eased): a frame without any leaves the
    // setting alone -- it was switched off for good here, so one fogless
@@ -2963,6 +2988,7 @@ void portal_render_scene(Position *pos, float zoom)
 #ifdef STATS_ON
    stat_num_render_ms = portal_get_time() - stat_num_render_ms;
 #endif
+   PORTAL_PART(3);
 
 cleanup:
    if (ptsky_type == PTSKY_SPAN)
@@ -3001,6 +3027,8 @@ cleanup:
 #endif
 
 #ifdef DARK_RT
+   if (cell != CELL_INVALID)
+      PORTAL_PART(4);
    {
       // nearby objects out of view: their shadows and the light they block
       const int rt_suppressed = RenderRTSuppressCapture(0);
@@ -3010,6 +3038,8 @@ cleanup:
       RenderRTPrepEnd();
       RenderRTSuppressCapture(rt_suppressed);
    }
+   if (cell != CELL_INVALID)
+      PORTAL_PART(5);
    RenderRTSceneEnd();
 #endif
    portal_fog_on = fog_was_on;

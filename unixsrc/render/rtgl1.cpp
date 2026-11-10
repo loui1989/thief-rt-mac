@@ -2946,10 +2946,22 @@ void upload_objects()
             // standing in it looked wrong): the faces below his waist given
             // again, seen by the camera only (as his arm is: the whole of him,
             // unseen, still casts his shadow and is him in mirrors). The
-            // waist: 85 cm over his soles, and at least 55 cm under his eyes
-            // (crouched, his chest is lower).
+            // waist: 80 cm over his soles, and at least 60 cm under his eyes
+            // (crouched, his chest is lower). Not his hands, hanging at his
+            // sides (cut off at the wrist they floated beside him). And set
+            // back 25 cm: right under the eyes, looking down, the camera saw
+            // into them where they were cut.
             const RgFloat3D cam = to_rt(g_camera.pos);
-            const float cut = std::min(c.bmin[2] + 0.85f, cam.data[2] - 0.55f);
+            const float cut = std::min(c.bmin[2] + 0.80f, cam.data[2] - 0.60f);
+            // (his left, level; his facing, level, from it: the view's
+            // forward is straight down as he looks down)
+            float lx = g_camera.left[0], ly = g_camera.left[1];
+            const float ll = std::sqrt(lx * lx + ly * ly);
+            const bool level = ll > 1e-4f;
+            if (level)
+               lx /= ll, ly /= ll;
+            const float fx = ly, fy = -lx;   // forward: left turned a quarter clockwise
+            const float back = 0.25f;
             g_uploadViewer = false;
             for (size_t i = 0; i < c.prims.size(); ++i) {
                const CapturedPrim &p = c.prims[i];
@@ -2957,11 +2969,25 @@ void upload_objects()
                   continue;
                CapturedPrim lo = p;
                lo.verts.clear();
-               for (size_t v = 0; v + 2 < p.verts.size(); v += 3)
-                  if (p.verts[v].position[2] + p.verts[v + 1].position[2] + p.verts[v + 2].position[2] < 3.0f * cut)
-                     lo.verts.insert(lo.verts.end(), p.verts.begin() + v, p.verts.begin() + v + 3);
-               if (lo.verts.empty())
+               for (size_t v = 0; v + 2 < p.verts.size(); v += 3) {
+                  float m[3] = {0, 0, 0};
+                  for (int j = 0; j < 3; ++j)
+                     for (int k = 0; k < 3; ++k)
+                        m[k] += p.verts[v + j].position[k] / 3.0f;
+                  if (m[2] >= cut)
+                     continue;
+                  // (a hand: out to his side, over his knees)
+                  const float side = (m[0] - c.center[0]) * lx + (m[1] - c.center[1]) * ly;
+                  if (level && std::fabs(side) > 0.22f && m[2] > c.bmin[2] + 0.45f)
+                     continue;
+                  lo.verts.insert(lo.verts.end(), p.verts.begin() + v, p.verts.begin() + v + 3);
+               }
+               if (lo.verts.empty() || !level)
                   continue;
+               for (RgPrimitiveVertex &q : lo.verts) {
+                  q.position[0] -= fx * back;
+                  q.position[1] -= fy * back;
+               }
                lo.flags &= ~RgMeshPrimitiveFlags(RG_MESH_PRIMITIVE_SHADOW_ONLY);
                lo.firstPerson = true;
                upload_captured(ids[i] ^ 0x4000000000000000ull, lo, false, false, glowScale);
@@ -3773,6 +3799,19 @@ void sky_capture(int primitive, const sRenderBackendVertex *v, int count)
          const float cx = (q[0]->x + q[1]->x + q[2]->x) / 3.0f, cy = (q[0]->y + q[1]->y + q[2]->y) / 3.0f;
          for (int j = 0; j < 3; ++j) {
             float x = q[j]->x, y = q[j]->y;
+            // A point on the face's edge, put exactly on it: each face clips
+            // the sky's layers at its edge itself, its points there a hair
+            // off its neighbour's -- the clouds of two faces did not meet,
+            // and the cube's edges showed across the sky as dotted dark lines
+            // (Reflections in Red's opening vista).
+            auto snap = [S](float &u) {
+               if (std::fabs(u) < 1.0f)
+                  u = 0.0f;
+               else if (std::fabs(u - S) < 1.0f)
+                  u = S;
+            };
+            snap(x);
+            snap(y);
             if (grow) {
                const float dx = x - cx, dy = y - cy, l = std::sqrt(dx * dx + dy * dy);
                if (l > 1e-3f)
@@ -4764,6 +4803,8 @@ extern "C" double g_SoundSlowStartMs;
 // (the 32-bit script modules' emulation: time in their code, calls into it,
 // and what they hold -- weak, for builds without it)
 extern "C" __attribute__((weak)) double g_Osm32Seconds;
+// (the game's view, portal.c: where its frame goes)
+extern "C" double g_PortalPartSeconds[6];
 extern "C" __attribute__((weak)) unsigned long g_Osm32Calls;
 extern "C" __attribute__((weak)) long g_Osm32HeapBlocks;
 extern "C" __attribute__((weak)) long g_Osm32LinkQueries;
@@ -4956,6 +4997,11 @@ void perf_frame(double t)
             all += e.first;
          fprintf(f, "; %zu models, %.2f in all\n", top.size(), all * ms);
       }
+      fprintf(f, "  the game's view (ms per frame): finding the cells in view %.2f, sorting them and finding their objects %.2f, "
+                 "their light maps %.2f, their objects drawn %.2f, after them (see-through objects, particles, overlays) %.2f, "
+                 "objects out of view drawn for their shadows %.2f\n",
+              g_PortalPartSeconds[0] * ms, g_PortalPartSeconds[1] * ms, g_PortalPartSeconds[2] * ms,
+              g_PortalPartSeconds[3] * ms, g_PortalPartSeconds[4] * ms, g_PortalPartSeconds[5] * ms);
       if (&g_Osm32Seconds && scriptCallsWindow)
          fprintf(f, "  script modules (32-bit, emulated): their code %.2f ms per frame, %.0f calls into them per frame; "
                     "they hold %ld allocations, %ld link queries, %ld interfaces\n",
@@ -4965,6 +5011,8 @@ void perf_frame(double t)
    }
    scriptSecsWindow = 0;
    scriptCallsWindow = 0;
+   for (double &s : g_PortalPartSeconds)
+      s = 0;
    g_perf.frames.clear();
    g_perf.clients.clear();
    g_perf.wait = g_perf.draw = g_perf.capture = g_perf.prep = 0;
