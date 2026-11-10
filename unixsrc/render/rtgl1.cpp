@@ -1345,8 +1345,51 @@ double now_seconds()
    return duration<double>(steady_clock::now().time_since_epoch()).count();
 }
 
+// The graphics card's time a frame, by pass, as the library measures it with
+// the performance log on (RTGL1_METAL_PROFILE: a frame's GPU timeline every 2
+// seconds, each pass its own encoder): gathered here for perf.log's "graphics
+// card" line, not each line of it in thief.log. (Its handler may run on the
+// library's own thread: a completed command buffer's.)
+struct GpuPasses {
+   std::mutex lock;
+   std::map<std::string, double> ms;   // summed over the sampled frames
+   double total = 0, busy = 0;
+   int frames = 0;
+   std::string resolution;
+} g_gpuPasses;
+
 void print(const char *message, RgMessageSeverityFlags, void *)
 {
+   static const char kTimeline[] = "Metal GPU timeline: ";
+   if (strncmp(message, kTimeline, sizeof(kTimeline) - 1) == 0) {
+      const char *m = message + sizeof(kTimeline) - 1;
+      double a = 0, b = 0;
+      int n = 0;
+      std::lock_guard<std::mutex> hold(g_gpuPasses.lock);
+      if (sscanf(m, "%lf ms from the first encoder's start to the last one's end, %lf ms with any encoder running, %d",
+                 &a, &b, &n) == 3) {
+         g_gpuPasses.total += a;
+         g_gpuPasses.busy += b;
+         ++g_gpuPasses.frames;
+         return;
+      }
+      double start = 0, len = 0;
+      int used = 0;
+      if (sscanf(m, "+ %lf %lf ms %n", &start, &len, &used) >= 2 && used > 0) {
+         std::string name = m + used;
+         if (name.rfind("(no encoder", 0) == 0)
+            name = "MetalFX upscaling, or waiting";
+         g_gpuPasses.ms[name] += len;
+         return;
+      }
+   }
+   static const char kDynres[] = "Metal profile: dynamic resolution ";
+   if (strncmp(message, kDynres, sizeof(kDynres) - 1) == 0) {
+      std::lock_guard<std::mutex> hold(g_gpuPasses.lock);
+      const char *m = message + sizeof(kDynres) - 1;
+      const char *end = strchr(m, ' ');
+      g_gpuPasses.resolution.assign(m, end ? size_t(end - m) : strlen(m));
+   }
    fprintf(stderr, "RTGL1: %s\n", message);
 }
 
@@ -5095,6 +5138,31 @@ void perf_frame(double t)
          for (const auto &e : top)
             all += e.first;
          fprintf(f, "; %zu models, %.2f in all\n", top.size(), all * ms);
+      }
+      {
+         // the graphics card's passes (one frame sampled every 2 s, averaged)
+         std::lock_guard<std::mutex> hold(g_gpuPasses.lock);
+         if (g_gpuPasses.frames > 0) {
+            const double k = 1.0 / g_gpuPasses.frames;
+            std::vector<std::pair<double, std::string>> passes;
+            for (const auto &e : g_gpuPasses.ms)
+               passes.push_back({e.second * k, e.first});
+            std::sort(passes.rbegin(), passes.rend());
+            fprintf(f, "  graphics card (ms in a frame, %d sampled%s%s): %.2f from start to end, %.2f busy;",
+                    g_gpuPasses.frames, g_gpuPasses.resolution.empty() ? "" : ", traced at ",
+                    g_gpuPasses.resolution.c_str(), g_gpuPasses.total * k, g_gpuPasses.busy * k);
+            int shown = 0;
+            for (const auto &e : passes) {
+               if (e.first < 0.05 || shown >= 18)
+                  break;
+               fprintf(f, "%s %s %.2f", shown ? "," : "", e.second.c_str(), e.first);
+               ++shown;
+            }
+            fprintf(f, "\n");
+         }
+         g_gpuPasses.ms.clear();
+         g_gpuPasses.total = g_gpuPasses.busy = 0;
+         g_gpuPasses.frames = 0;
       }
       fprintf(f, "  the game's view (ms per frame): finding the cells in view %.2f, sorting them and finding their objects %.2f, "
                  "their light maps %.2f, their objects drawn %.2f, after them (see-through objects, particles, overlays) %.2f, "
