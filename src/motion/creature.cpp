@@ -674,7 +674,10 @@ static tCreaturePoseHook g_CrPoseHook = NULL;
 // reshaping went on top of the last)
 static quat g_CrPoseRelWas[65];
 static BOOL g_CrPoseRelSaved = FALSE;
-// (its joints as the hook left them: one reshaped already is not again)
+// (its joints as the hook left them -- in its own frame, about its butt:
+// moved or turned since (each frame, put where Garrett is), the same pose --
+// one reshaped already is not again: twice, it crouched twice as deep for a
+// frame each time its walk came round)
 static mxs_vector g_CrPoseOut[64];
 static quat g_CrPoseRelOut[65];
 static int g_CrPoseOutN = 0;
@@ -686,13 +689,39 @@ int CreaturePoseApplied()
    return g_CrPoseApplied;
 }
 
+static void CrPoseBodyFrame(const multiped *mp, mxs_vector *out)
+{
+   for (int j = 0; j < mp->num_joints; ++j)
+   {
+      mxs_vector d;
+      mx_sub_vec(&d, &mp->joints[j], &mp->global_pos);
+      mx_mat_tmul_vec(&out[j], &mp->global_orient, &d);
+   }
+}
+
+static BOOL CrPoseIsOut(const multiped *mp)
+{
+   if (g_CrPoseOutN != mp->num_joints)
+      return FALSE;
+   mxs_vector now[64];
+   CrPoseBodyFrame(mp, now);
+   for (int j = 0; j < mp->num_joints; ++j)
+   {
+      mxs_vector d;
+      mx_sub_vec(&d, &now[j], &g_CrPoseOut[j]);
+      if (mx_mag2_vec(&d) > 0.01f * 0.01f)
+         return FALSE;
+   }
+   return TRUE;
+}
+
 static void CrPoseApply(ObjID obj, multiped *mp, const int *parents)
 {
    ++g_CrPoseApplied;
    memcpy(g_CrPoseRelWas, mp->rel_orients, sizeof(quat) * (mp->num_joints + 1));
    g_CrPoseRelSaved = TRUE;
    g_CrPoseHook(obj, mp->num_joints, mp->joints, mp->orients, mp->rel_orients, parents);
-   memcpy(g_CrPoseOut, mp->joints, sizeof(mxs_vector) * mp->num_joints);
+   CrPoseBodyFrame(mp, g_CrPoseOut);
    memcpy(g_CrPoseRelOut, mp->rel_orients, sizeof(quat) * (mp->num_joints + 1));
    g_CrPoseOutN = mp->num_joints;
 }
@@ -705,7 +734,7 @@ void CreaturePoseReapply(ObjID obj)
    multiped *mp = pCreature ? (multiped *)pCreature->GetMultiped() : NULL;
    if (!mp || !mp->joints || !mp->orients || !mp->rel_orients || mp->num_joints >= 64)
       return;
-   if (g_CrPoseOutN == mp->num_joints && memcmp(g_CrPoseOut, mp->joints, sizeof(mxs_vector) * mp->num_joints) == 0)
+   if (CrPoseIsOut(mp))
    {
       // (its joints as reshaped: its relative orientations, put back for
       // the new maneuver, as reshaped too -- the mesh's stretchy parts)
@@ -4388,7 +4417,7 @@ void cCreature::Update(const ulong timeDelta)
    moved = SubFrameUpdate(timeDelta);
    SunkCheck();
 
-   if (moved && poseHooked)
+   if (moved && poseHooked && !CrPoseIsOut(&m_sMultiped))
       CrPoseApply(m_ObjID, &m_sMultiped, g_pCreatureDescPtr[m_CreatureType]->pJointParents);
 
    if(moved)
