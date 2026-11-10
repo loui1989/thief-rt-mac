@@ -7502,8 +7502,19 @@ void RenderRTSkyFaceEnd(void)
          fprintf(stderr, "RT: sky face %d reaches %.2f to %.2f across, %.2f to %.2f down (of %d)%s\n", face, c.x0, c.x1,
                  c.y0, c.y1, kSkyFaceSize, filled ? "" : " -- not filled: its edges taken as r3's");
       }
+      // A face round the side reaches half a pixel on past its right edge and
+      // its top (each edge of the cube so overlapped by one face, once): the
+      // faces meeting exactly, the clouds still showed a line along every
+      // edge, the rasterizer covering neither side's pixels there.
+      const bool side = face < 4 && filled;
       for (SkyDraw &d : g_skyFaces[face])
          for (RgPrimitiveVertex &v : d.verts) {
+            if (side) {
+               if (v.position[0] >= x1 - 1e-3f)
+                  v.position[0] += 0.5f;
+               if (v.position[1] <= y0 + 1e-3f)
+                  v.position[1] -= 0.5f;
+            }
             const float a = (v.position[0] - x0) / (x1 - x0), b = (v.position[1] - y0) / (y1 - y0);
             const float z = v.position[2];
             for (int k = 0; k < 3; ++k)
