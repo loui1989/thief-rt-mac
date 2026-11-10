@@ -623,9 +623,29 @@ bool cEnvironment::InvokeScriptService(unsigned slot, sCpuState *state,
       return QueryAggregate(state, memory, error);
    if (slot == 0)
    {
-      uint32_t output;
-      if (!ReadStackArgument(*state, *memory, 2, &output, error) ||
-          !memory->Write32(output, proxy->object, error))
+      // itself, as IUnknown or as its own interface (or, an engine object,
+      // as whatever it is asked to be: an IProperty as IStringProperty);
+      // not as another -- NVScript asks the Link Tools service for an
+      // interface only another game has, and stops if it is there
+      uint32_t guidAddress, output;
+      uint32_t guid[4];
+      if (!ReadStackArgument(*state, *memory, 1, &guidAddress, error) ||
+          !ReadStackArgument(*state, *memory, 2, &output, error))
+         return false;
+      for (unsigned i = 0; i < 4; ++i)
+         if (!memory->Read32(guidAddress + i * 4, &guid[i], error))
+            return false;
+      const bool unknown = !guid[0] && !guid[1] && guid[2] == 0xc0u && guid[3] == 0x46000000u;
+      const uint32_t n = guid[1] & 0xffffu;
+      const bool lg = n >= 0x7a80u && guid[3] == 0x512ba800u;
+      const bool itself = unknown || (proxy->id & kEngineInterface) ||
+                          (lg && n - 0x7a80u == proxy->id);
+      if (!itself)
+      {
+         if (output && !memory->Write32(output, 0, error)) return false;
+         return ReturnStdcall(state, memory, 12, 0x80004002u, error);
+      }
+      if (!memory->Write32(output, proxy->object, error))
          return false;
       ++proxy->references;
       return ReturnStdcall(state, memory, 12, 0, error);
@@ -668,7 +688,18 @@ bool cEnvironment::Invoke(uint32_t address, sCpuState *state, cMemory *memory,
    if (address == kInitializerTrap)
       return ContinueInitializers(state, memory, error);
    if (address == kPrintTrap)
-      return Fail(error, "guest variadic print call requires marshalling");
+   {
+      // the script manager's printf (the engine's monolog): its format and
+      // arguments read off the guest's stack (cdecl)
+      uint32_t formatAddress;
+      std::string format, text;
+      if (!ReadStackArgument(*state, *memory, 0, &formatAddress, error) ||
+          !ReadCString(*memory, formatAddress, &format, error) ||
+          !FormatGuest(*memory, format, state->reg[kEsp] + 8, &text, error))
+         return false;
+      DebugOutput(text);
+      return ReturnStdcall(state, memory, 0, static_cast<uint32_t>(text.size()), error);
+   }
    if (address >= kScriptManTrap && address < kAllocatorTrap)
       return InvokeScriptManager((address - kScriptManTrap) / kTrapStride,
                                  state, memory, error);
