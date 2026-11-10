@@ -80,6 +80,8 @@ sCpuState::sCpuState()
 {
    memset(reg, 0, sizeof(reg));
    memset(x87, 0, sizeof(x87));
+   memset(xmm, 0, sizeof(xmm));
+   mxcsr = 0x1f80;
 }
 
 const cMemory::sRegion *cMemory::Find(uint32_t address, size_t size,
@@ -738,6 +740,43 @@ bool cCpu::Step(std::string *error)
          operand16 = true;
       if (!Fetch8(&opcode, error))
          return false;
+   }
+
+   if (opcode == 0x0f)
+   {
+      bool handled = false;
+      const unsigned prefix = operand16 ? 0x66u : repeat ? (repeatNotEqual ? 0xf2u : 0xf3u) : 0u;
+      if (!ExecuteSse(prefix, instructionAddress, &handled, error))
+         return false;
+      if (handled)
+         return true;
+   }
+   if (opcode == 0x8c)
+   {
+      // MOV r/m16, Sreg: the C runtime's crash reporting saves the selectors
+      // (flat 32-bit Windows values)
+      static const uint16_t kSelectors[8] = { 0x2b, 0x23, 0x2b, 0x2b, 0x53, 0x2b, 0, 0 };
+      uint8_t modrm;
+      sDecodedRM operand;
+      unsigned segment;
+      if (!Fetch8(&modrm, error) || !DecodeRM(modrm, &operand, &segment, error))
+         return false;
+      if (segment > 5)
+         return FailAddress(error, "invalid segment register at", instructionAddress);
+      if (!operand.isRegister)
+         return m_memory.Write16(operand.address, kSelectors[segment], error);
+      m_state.reg[operand.reg] = operand16 ?
+         (m_state.reg[operand.reg] & 0xffff0000u) | kSelectors[segment] :
+         kSelectors[segment];
+      return true;
+   }
+   if (opcode >= 0xd8 && opcode <= 0xdf)
+   {
+      bool handled = false;
+      if (!ExecuteX87(opcode, instructionAddress, &handled, error))
+         return false;
+      if (handled)
+         return true;
    }
 
    if (opcode == 0xa4 || opcode == 0xa5 ||
@@ -1670,6 +1709,16 @@ bool cCpu::Step(std::string *error)
          if (!Pop32(&m_state.eflags, error))
             return false;
          m_state.eflags |= 0x00000002u;
+         return true;
+
+      case 0x9e: // SAHF: SF ZF AF PF CF from AH
+         m_state.eflags = (m_state.eflags & ~0xd5u) |
+                          ((m_state.reg[kEax] >> 8) & 0xd5u) | 0x2u;
+         return true;
+
+      case 0x9f: // LAHF: AH = SF ZF 0 AF 0 PF 1 CF
+         m_state.reg[kEax] = (m_state.reg[kEax] & 0xffff00ffu) |
+                             (((m_state.eflags & 0xd5u) | 0x2u) << 8);
          return true;
 
       case 0xa9:
@@ -2960,6 +3009,1175 @@ cCpu::eRunResult cCpu::Run(uint32_t stopAddress, uint64_t instructionLimit,
    if (error)
       *error = "guest instruction limit exceeded";
    return kRunLimit;
+}
+
+} // namespace osm32
+
+// ---------------------------------------------------------------------------
+// SSE and SSE2. A newer Visual C++ (NVScript's later builds: Reflections in
+// Red's) compiles for SSE2 whatever CPUID says: its floating point is scalar
+// SSE, its copies of 16 bytes MOVUPS. Its runtime's own SIMD paths (string
+// functions, maths) are chosen by CPUID, which still says none: those stay
+// the scalar ones. Floats are worked in double and rounded to float (exact
+// for + - * / and the square root); a conversion out of range or of a NaN
+// gives the integer indefinite, as the processor does.
+
+namespace
+{
+inline float XmmF(const uint8_t *x, int i) { float f; memcpy(&f, x + 4 * i, 4); return f; }
+inline void SetXmmF(uint8_t *x, int i, float f) { memcpy(x + 4 * i, &f, 4); }
+inline double XmmD(const uint8_t *x, int i) { double d; memcpy(&d, x + 8 * i, 8); return d; }
+inline void SetXmmD(uint8_t *x, int i, double d) { memcpy(x + 8 * i, &d, 8); }
+inline uint16_t XmmU16(const uint8_t *x, int i) { uint16_t v; memcpy(&v, x + 2 * i, 2); return v; }
+inline void SetXmmU16(uint8_t *x, int i, uint16_t v) { memcpy(x + 2 * i, &v, 2); }
+inline uint32_t XmmU32(const uint8_t *x, int i) { uint32_t v; memcpy(&v, x + 4 * i, 4); return v; }
+inline void SetXmmU32(uint8_t *x, int i, uint32_t v) { memcpy(x + 4 * i, &v, 4); }
+inline uint64_t XmmU64(const uint8_t *x, int i) { uint64_t v; memcpy(&v, x + 8 * i, 8); return v; }
+inline void SetXmmU64(uint8_t *x, int i, uint64_t v) { memcpy(x + 8 * i, &v, 8); }
+
+int32_t SseToInt32(double value, bool truncate, uint32_t mxcsr)
+{
+   if (value != value)
+      return std::numeric_limits<int32_t>::min();
+   double rounded;
+   if (truncate)
+      rounded = std::trunc(value);
+   else
+      switch ((mxcsr >> 13) & 3)
+      {
+         case 0: rounded = std::nearbyint(value); break;   // (the host's: to nearest, even)
+         case 1: rounded = std::floor(value); break;
+         case 2: rounded = std::ceil(value); break;
+         default: rounded = std::trunc(value); break;
+      }
+   if (rounded < -2147483648.0 || rounded > 2147483647.0)
+      return std::numeric_limits<int32_t>::min();
+   return static_cast<int32_t>(rounded);
+}
+
+double SseArith(uint8_t op, double a, double b)
+{
+   switch (op)
+   {
+      case 0x51: return std::sqrt(b);
+      case 0x58: return a + b;
+      case 0x59: return a * b;
+      case 0x5c: return a - b;
+      case 0x5d: return a < b ? a : b;   // (MIN: the second unless the first is less)
+      case 0x5e: return a / b;
+      default:   return a > b ? a : b;   // 0x5f MAX
+   }
+}
+
+bool SseCompare(unsigned predicate, double a, double b)
+{
+   const bool unordered = a != a || b != b;
+   switch (predicate & 7)
+   {
+      case 0: return !unordered && a == b;
+      case 1: return !unordered && a < b;
+      case 2: return !unordered && a <= b;
+      case 3: return unordered;
+      case 4: return unordered || a != b;
+      case 5: return unordered || !(a < b);
+      case 6: return unordered || !(a <= b);
+      default: return !unordered;
+   }
+}
+} // namespace
+
+namespace osm32
+{
+
+bool cCpu::ExecuteSse(unsigned prefix, uint32_t instructionAddress, bool *handled,
+                      std::string *error)
+{
+   const uint32_t start = m_state.eip;   // after the 0F
+   uint8_t op;
+   if (!Fetch8(&op, error))
+      return false;
+   *handled = true;
+   uint8_t (*X)[16] = m_state.xmm;
+
+   auto read = [&](uint32_t address, uint8_t *out, unsigned bytes) -> bool {
+      for (unsigned i = 0; i < bytes; i += 4)
+      {
+         uint32_t v;
+         if (bytes - i >= 4)
+         {
+            if (!m_memory.Read32(address + i, &v, error)) return false;
+            memcpy(out + i, &v, 4);
+         }
+         else
+         {
+            uint16_t w;
+            if (!m_memory.Read16(address + i, &w, error)) return false;
+            memcpy(out + i, &w, 2);
+         }
+      }
+      return true;
+   };
+   auto write = [&](uint32_t address, const uint8_t *in, unsigned bytes) -> bool {
+      for (unsigned i = 0; i < bytes; i += 4)
+      {
+         uint32_t v;
+         memcpy(&v, in + i, 4);
+         if (!m_memory.Write32(address + i, v, error)) return false;
+      }
+      return true;
+   };
+   // the source operand: an XMM register (all of it), or 'bytes' from memory
+   // (the rest zero)
+   auto source = [&](const sDecodedRM &o, uint8_t *out, unsigned bytes) -> bool {
+      if (o.isRegister)
+      {
+         memcpy(out, X[o.reg], 16);
+         return true;
+      }
+      memset(out, 0, 16);
+      return read(o.address, out, bytes);
+   };
+   auto modrm = [&](sDecodedRM *o, unsigned *r) -> bool {
+      uint8_t m;
+      return Fetch8(&m, error) && DecodeRM(m, o, r, error);
+   };
+   auto notMine = [&]() -> bool {
+      m_state.eip = start;
+      *handled = false;
+      return true;
+   };
+   auto fail = [&]() -> bool {
+      return FailOpcode(error, prefix == 0x66 ? "unsupported SSE opcode (66 0F)" :
+                               prefix == 0xf3 ? "unsupported SSE opcode (F3 0F)" :
+                               prefix == 0xf2 ? "unsupported SSE opcode (F2 0F)" :
+                                                "unsupported SSE opcode (0F)",
+                        instructionAddress, op);
+   };
+
+   sDecodedRM o;
+   unsigned r;
+   uint8_t s[16];
+
+   // (not SSE, but in the same code: a multi-byte NOP, prefetches, CMOVcc,
+   // SHLD/SHRD)
+   if (op == 0x1f || op == 0x18)
+      return modrm(&o, &r);
+   if (op >= 0x40 && op <= 0x4f)
+   {
+      if (prefix) return notMine();
+      uint32_t value;
+      if (!modrm(&o, &r) || !ReadRM32(o, &value, error)) return false;
+      if (Condition(op - 0x40)) m_state.reg[r] = value;
+      return true;
+   }
+   if (op == 0xa4 || op == 0xa5 || op == 0xac || op == 0xad)
+   {
+      if (prefix) return notMine();
+      uint32_t value;
+      if (!modrm(&o, &r) || !ReadRM32(o, &value, error)) return false;
+      uint8_t count8 = 0;
+      if ((op == 0xa4 || op == 0xac) && !Fetch8(&count8, error)) return false;
+      if (op == 0xa5 || op == 0xad) count8 = ReadReg8(1);
+      const unsigned count = count8 & 31;
+      if (!count) return true;
+      const uint32_t other = m_state.reg[r];
+      uint32_t result;
+      bool carry;
+      if (op == 0xa4 || op == 0xa5)
+      {
+         result = (value << count) | (other >> (32 - count));
+         carry = ((value >> (32 - count)) & 1) != 0;
+      }
+      else
+      {
+         result = (value >> count) | (other << (32 - count));
+         carry = ((value >> (count - 1)) & 1) != 0;
+      }
+      SetLogicFlags(result);
+      if (carry) m_state.eflags |= kFlagCarry;
+      return WriteRM32(o, result, error);
+   }
+
+   switch (op)
+   {
+      case 0x10: case 0x11:   // MOVUPS/MOVUPD; MOVSS; MOVSD
+      {
+         if (!modrm(&o, &r)) return false;
+         const unsigned bytes = prefix == 0xf3 ? 4 : prefix == 0xf2 ? 8 : 16;
+         if (op == 0x10)
+         {
+            if (!source(o, s, bytes)) return false;
+            if (bytes == 16 || !o.isRegister)
+               memcpy(X[r], s, 16);   // (from memory, a scalar zeroes the rest)
+            else
+               memcpy(X[r], s, bytes);
+            return true;
+         }
+         if (o.isRegister)
+         {
+            memcpy(X[o.reg], X[r], bytes);
+            return true;
+         }
+         return write(o.address, X[r], bytes);
+      }
+      case 0x12: case 0x13: case 0x16: case 0x17:
+      {
+         // MOVLPS/MOVLPD (12, 13), MOVHPS/MOVHPD (16, 17); MOVHLPS, MOVLHPS
+         // (12, 16 from a register)
+         if (prefix != 0 && prefix != 0x66) return fail();
+         if (!modrm(&o, &r)) return false;
+         const int half = (op == 0x12 || op == 0x13) ? 0 : 1;
+         if (op == 0x12 || op == 0x16)
+         {
+            if (o.isRegister)
+            {
+               SetXmmU64(X[r], half, XmmU64(X[o.reg], 1 - half));
+               return true;
+            }
+            uint8_t q[8];
+            if (!read(o.address, q, 8)) return false;
+            memcpy(X[r] + 8 * half, q, 8);
+            return true;
+         }
+         if (o.isRegister) return fail();
+         return write(o.address, X[r] + 8 * half, 8);
+      }
+      case 0x14: case 0x15:   // UNPCKLPS/UNPCKHPS, UNPCKLPD/UNPCKHPD
+      {
+         if (!modrm(&o, &r) || !source(o, s, 16)) return false;
+         uint8_t d[16];
+         memcpy(d, X[r], 16);
+         const int h = op == 0x15;
+         if (prefix == 0x66)
+         {
+            SetXmmU64(X[r], 0, XmmU64(d, h));
+            SetXmmU64(X[r], 1, XmmU64(s, h));
+         }
+         else
+         {
+            SetXmmU32(X[r], 0, XmmU32(d, 2 * h));
+            SetXmmU32(X[r], 1, XmmU32(s, 2 * h));
+            SetXmmU32(X[r], 2, XmmU32(d, 2 * h + 1));
+            SetXmmU32(X[r], 3, XmmU32(s, 2 * h + 1));
+         }
+         return true;
+      }
+      case 0x28: case 0x29: case 0x2b:   // MOVAPS/MOVAPD, MOVNTPS/MOVNTPD
+      {
+         if (!modrm(&o, &r)) return false;
+         if (op == 0x28)
+         {
+            if (!source(o, s, 16)) return false;
+            memcpy(X[r], s, 16);
+            return true;
+         }
+         if (o.isRegister)
+         {
+            memcpy(X[o.reg], X[r], 16);
+            return true;
+         }
+         return write(o.address, X[r], 16);
+      }
+      case 0x2a:   // CVTSI2SS, CVTSI2SD
+      {
+         if (prefix != 0xf3 && prefix != 0xf2) return fail();
+         uint32_t value;
+         if (!modrm(&o, &r) || !ReadRM32(o, &value, error)) return false;
+         const int32_t v = static_cast<int32_t>(value);
+         if (prefix == 0xf3) SetXmmF(X[r], 0, static_cast<float>(v));
+         else SetXmmD(X[r], 0, static_cast<double>(v));
+         return true;
+      }
+      case 0x2c: case 0x2d:   // CVTTSS2SI, CVTSS2SI, CVTTSD2SI, CVTSD2SI
+      {
+         if (prefix != 0xf3 && prefix != 0xf2) return fail();
+         if (!modrm(&o, &r) || !source(o, s, prefix == 0xf3 ? 4 : 8)) return false;
+         const double v = prefix == 0xf3 ? static_cast<double>(XmmF(s, 0)) : XmmD(s, 0);
+         m_state.reg[r] = static_cast<uint32_t>(SseToInt32(v, op == 0x2c, m_state.mxcsr));
+         return true;
+      }
+      case 0x2e: case 0x2f:   // UCOMISS/COMISS, UCOMISD/COMISD
+      {
+         if (prefix != 0 && prefix != 0x66) return fail();
+         if (!modrm(&o, &r) || !source(o, s, prefix == 0x66 ? 8 : 4)) return false;
+         const double a = prefix == 0x66 ? XmmD(X[r], 0) : static_cast<double>(XmmF(X[r], 0));
+         const double b = prefix == 0x66 ? XmmD(s, 0) : static_cast<double>(XmmF(s, 0));
+         m_state.eflags &= ~(kFlagZero | kFlagParity | kFlagCarry | kFlagOverflow | kFlagSign | kFlagAdjust);
+         if (a != a || b != b)
+            m_state.eflags |= kFlagZero | kFlagParity | kFlagCarry;
+         else if (a < b)
+            m_state.eflags |= kFlagCarry;
+         else if (a == b)
+            m_state.eflags |= kFlagZero;
+         return true;
+      }
+      case 0x50:   // MOVMSKPS, MOVMSKPD
+      {
+         if (!modrm(&o, &r)) return false;
+         if (!o.isRegister) return fail();
+         uint32_t mask = 0;
+         if (prefix == 0x66)
+            for (int i = 0; i < 2; ++i) mask |= ((X[o.reg][8 * i + 7] >> 7) & 1u) << i;
+         else
+            for (int i = 0; i < 4; ++i) mask |= ((X[o.reg][4 * i + 3] >> 7) & 1u) << i;
+         m_state.reg[r] = mask;
+         return true;
+      }
+      case 0x51: case 0x58: case 0x59: case 0x5c: case 0x5d: case 0x5e: case 0x5f:
+      {
+         const unsigned bytes = prefix == 0xf3 ? 4 : prefix == 0xf2 ? 8 : 16;
+         if (!modrm(&o, &r) || !source(o, s, bytes)) return false;
+         uint8_t *d = X[r];
+         if (prefix == 0xf3)
+            SetXmmF(d, 0, static_cast<float>(SseArith(op, XmmF(d, 0), XmmF(s, 0))));
+         else if (prefix == 0xf2)
+            SetXmmD(d, 0, SseArith(op, XmmD(d, 0), XmmD(s, 0)));
+         else if (prefix == 0x66)
+            for (int i = 0; i < 2; ++i) SetXmmD(d, i, SseArith(op, XmmD(d, i), XmmD(s, i)));
+         else
+            for (int i = 0; i < 4; ++i)
+               SetXmmF(d, i, static_cast<float>(SseArith(op, XmmF(d, i), XmmF(s, i))));
+         return true;
+      }
+      case 0x54: case 0x55: case 0x56: case 0x57:   // AND, ANDN, OR, XOR (PS/PD)
+      {
+         if (prefix != 0 && prefix != 0x66) return fail();
+         if (!modrm(&o, &r) || !source(o, s, 16)) return false;
+         for (int i = 0; i < 16; ++i)
+         {
+            uint8_t &d = X[r][i];
+            d = op == 0x54 ? (d & s[i]) : op == 0x55 ? static_cast<uint8_t>(~d & s[i]) :
+                op == 0x56 ? (d | s[i]) : (d ^ s[i]);
+         }
+         return true;
+      }
+      case 0x5a:   // CVTPS2PD, CVTPD2PS, CVTSS2SD, CVTSD2SS
+      {
+         const unsigned bytes = prefix == 0xf3 ? 4 : prefix == 0xf2 || prefix == 0 ? 8 : 16;
+         if (!modrm(&o, &r) || !source(o, s, bytes)) return false;
+         uint8_t *d = X[r];
+         if (prefix == 0)
+         {
+            const float a = XmmF(s, 0), b = XmmF(s, 1);
+            SetXmmD(d, 0, a);
+            SetXmmD(d, 1, b);
+         }
+         else if (prefix == 0x66)
+         {
+            const double a = XmmD(s, 0), b = XmmD(s, 1);
+            SetXmmF(d, 0, static_cast<float>(a));
+            SetXmmF(d, 1, static_cast<float>(b));
+            SetXmmU64(d, 1, 0);
+         }
+         else if (prefix == 0xf3)
+            SetXmmD(d, 0, static_cast<double>(XmmF(s, 0)));
+         else
+            SetXmmF(d, 0, static_cast<float>(XmmD(s, 0)));
+         return true;
+      }
+      case 0x5b:   // CVTDQ2PS, CVTPS2DQ (66), CVTTPS2DQ (F3)
+      {
+         if (!modrm(&o, &r) || !source(o, s, 16)) return false;
+         for (int i = 0; i < 4; ++i)
+         {
+            if (prefix == 0)
+               SetXmmF(X[r], i, static_cast<float>(static_cast<int32_t>(XmmU32(s, i))));
+            else
+               SetXmmU32(X[r], i, static_cast<uint32_t>(SseToInt32(XmmF(s, i), prefix == 0xf3, m_state.mxcsr)));
+         }
+         return true;
+      }
+      case 0xe6:   // CVTDQ2PD (F3), CVTTPD2DQ (66), CVTPD2DQ (F2)
+      {
+         if (prefix == 0) return fail();
+         if (!modrm(&o, &r) || !source(o, s, prefix == 0xf3 ? 8 : 16)) return false;
+         if (prefix == 0xf3)
+         {
+            const int32_t a = static_cast<int32_t>(XmmU32(s, 0)), b = static_cast<int32_t>(XmmU32(s, 1));
+            SetXmmD(X[r], 0, a);
+            SetXmmD(X[r], 1, b);
+         }
+         else
+         {
+            for (int i = 0; i < 2; ++i)
+               SetXmmU32(X[r], i, static_cast<uint32_t>(SseToInt32(XmmD(s, i), prefix == 0x66, m_state.mxcsr)));
+            SetXmmU64(X[r], 1, 0);
+         }
+         return true;
+      }
+      case 0x6e:   // MOVD xmm, r/m32
+      {
+         if (prefix != 0x66) return fail();
+         uint32_t value;
+         if (!modrm(&o, &r) || !ReadRM32(o, &value, error)) return false;
+         memset(X[r], 0, 16);
+         SetXmmU32(X[r], 0, value);
+         return true;
+      }
+      case 0x7e:   // MOVD r/m32, xmm (66); MOVQ xmm, xmm/m64 (F3)
+      {
+         if (!modrm(&o, &r)) return false;
+         if (prefix == 0x66)
+            return WriteRM32(o, XmmU32(X[r], 0), error);
+         if (prefix == 0xf3)
+         {
+            if (!source(o, s, 8)) return false;
+            SetXmmU64(X[r], 0, XmmU64(s, 0));
+            SetXmmU64(X[r], 1, 0);
+            return true;
+         }
+         return fail();
+      }
+      case 0xd6:   // MOVQ xmm/m64, xmm
+      {
+         if (prefix != 0x66) return fail();
+         if (!modrm(&o, &r)) return false;
+         if (o.isRegister)
+         {
+            SetXmmU64(X[o.reg], 0, XmmU64(X[r], 0));
+            SetXmmU64(X[o.reg], 1, 0);
+            return true;
+         }
+         return write(o.address, X[r], 8);
+      }
+      case 0x6f: case 0x7f:   // MOVDQA (66), MOVDQU (F3)
+      {
+         if (prefix != 0x66 && prefix != 0xf3) return fail();
+         if (!modrm(&o, &r)) return false;
+         if (op == 0x6f)
+         {
+            if (!source(o, s, 16)) return false;
+            memcpy(X[r], s, 16);
+            return true;
+         }
+         if (o.isRegister)
+         {
+            memcpy(X[o.reg], X[r], 16);
+            return true;
+         }
+         return write(o.address, X[r], 16);
+      }
+      case 0x70:   // PSHUFD (66), PSHUFLW (F2), PSHUFHW (F3)
+      {
+         if (prefix == 0) return fail();
+         uint8_t imm;
+         if (!modrm(&o, &r) || !source(o, s, 16) || !Fetch8(&imm, error)) return false;
+         uint8_t d[16];
+         memcpy(d, s, 16);
+         if (prefix == 0x66)
+            for (int i = 0; i < 4; ++i) SetXmmU32(d, i, XmmU32(s, (imm >> (2 * i)) & 3));
+         else
+         {
+            const int base = prefix == 0xf2 ? 0 : 4;
+            for (int i = 0; i < 4; ++i) SetXmmU16(d, base + i, XmmU16(s, base + ((imm >> (2 * i)) & 3)));
+         }
+         memcpy(X[r], d, 16);
+         return true;
+      }
+      case 0x71: case 0x72: case 0x73:   // shifts by an immediate
+      {
+         if (prefix != 0x66) return fail();
+         uint8_t imm;
+         if (!modrm(&o, &r)) return false;
+         if (!o.isRegister) return fail();
+         if (!Fetch8(&imm, error)) return false;
+         uint8_t *d = X[o.reg];
+         const unsigned n = imm;
+         if (op == 0x73 && (r == 3 || r == 7))
+         {
+            // PSRLDQ, PSLLDQ: bytes
+            uint8_t t[16] = {};
+            for (int i = 0; i < 16; ++i)
+            {
+               const int from = r == 3 ? i + static_cast<int>(n) : i - static_cast<int>(n);
+               if (from >= 0 && from < 16) t[i] = d[from];
+            }
+            memcpy(d, t, 16);
+            return true;
+         }
+         const int width = op == 0x71 ? 16 : op == 0x72 ? 32 : 64;
+         for (int i = 0; i < 128 / width; ++i)
+         {
+            uint64_t v = width == 16 ? XmmU16(d, i) : width == 32 ? XmmU32(d, i) : XmmU64(d, i);
+            uint64_t result;
+            if (r == 2)
+               result = n >= static_cast<unsigned>(width) ? 0 : v >> n;
+            else if (r == 6)
+               result = n >= static_cast<unsigned>(width) ? 0 : v << n;
+            else if (r == 4 && width != 64)
+            {
+               const int64_t signedValue = width == 16 ? static_cast<int16_t>(v) : static_cast<int32_t>(v);
+               result = static_cast<uint64_t>(signedValue >> (n >= static_cast<unsigned>(width) ? width - 1 : n));
+            }
+            else
+               return fail();
+            if (width == 16) SetXmmU16(d, i, static_cast<uint16_t>(result));
+            else if (width == 32) SetXmmU32(d, i, static_cast<uint32_t>(result));
+            else SetXmmU64(d, i, result);
+         }
+         return true;
+      }
+      case 0xd1: case 0xd2: case 0xd3: case 0xe1: case 0xe2: case 0xf1: case 0xf2: case 0xf3:
+      {
+         // shifts by a register's count
+         if (prefix != 0x66) return fail();
+         if (!modrm(&o, &r) || !source(o, s, 16)) return false;
+         const uint64_t n = XmmU64(s, 0);
+         const int width = (op & 3) == 1 ? 16 : (op & 3) == 2 ? 32 : 64;
+         uint8_t *d = X[r];
+         for (int i = 0; i < 128 / width; ++i)
+         {
+            uint64_t v = width == 16 ? XmmU16(d, i) : width == 32 ? XmmU32(d, i) : XmmU64(d, i);
+            uint64_t result;
+            if ((op & 0xf0) == 0xd0)
+               result = n >= static_cast<uint64_t>(width) ? 0 : v >> n;
+            else if ((op & 0xf0) == 0xf0)
+               result = n >= static_cast<uint64_t>(width) ? 0 : v << n;
+            else
+            {
+               const int64_t signedValue = width == 16 ? static_cast<int16_t>(v) : static_cast<int32_t>(v);
+               result = static_cast<uint64_t>(signedValue >> (n >= static_cast<uint64_t>(width) ? width - 1 : n));
+            }
+            if (width == 16) SetXmmU16(d, i, static_cast<uint16_t>(result));
+            else if (width == 32) SetXmmU32(d, i, static_cast<uint32_t>(result));
+            else SetXmmU64(d, i, result);
+         }
+         return true;
+      }
+      case 0x60: case 0x61: case 0x62: case 0x6c: case 0x68: case 0x69: case 0x6a: case 0x6d:
+      {
+         // PUNPCKL/H BW, WD, DQ, QDQ
+         if (prefix != 0x66) return fail();
+         if (!modrm(&o, &r) || !source(o, s, 16)) return false;
+         const int size = (op == 0x60 || op == 0x68) ? 1 : (op == 0x61 || op == 0x69) ? 2 :
+                          (op == 0x62 || op == 0x6a) ? 4 : 8;
+         const int high = op >= 0x68 && op != 0x6c;
+         uint8_t d[16];
+         const uint8_t *a = X[r];
+         for (int i = 0; i < 16 / (2 * size); ++i)
+         {
+            memcpy(d + (2 * i) * size, a + (high * 8) + i * size, size);
+            memcpy(d + (2 * i + 1) * size, s + (high * 8) + i * size, size);
+         }
+         memcpy(X[r], d, 16);
+         return true;
+      }
+      case 0x64: case 0x65: case 0x66: case 0x74: case 0x75: case 0x76:
+      {
+         // PCMPGT B/W/D, PCMPEQ B/W/D
+         if (prefix != 0x66) return fail();
+         if (!modrm(&o, &r) || !source(o, s, 16)) return false;
+         const int size = 1 << ((op & 3) == 0 ? 0 : (op & 3) == 1 ? 1 : 2);
+         const bool equal = op >= 0x74;
+         uint8_t *d = X[r];
+         for (int i = 0; i < 16 / size; ++i)
+         {
+            int64_t a = 0, b = 0;
+            if (size == 1) a = static_cast<int8_t>(d[i]), b = static_cast<int8_t>(s[i]);
+            else if (size == 2) a = static_cast<int16_t>(XmmU16(d, i)), b = static_cast<int16_t>(XmmU16(s, i));
+            else a = static_cast<int32_t>(XmmU32(d, i)), b = static_cast<int32_t>(XmmU32(s, i));
+            const bool yes = equal ? a == b : a > b;
+            memset(d + i * size, yes ? 0xff : 0, size);
+         }
+         return true;
+      }
+      case 0xc2:   // CMPPS, CMPPD, CMPSS, CMPSD
+      {
+         const unsigned bytes = prefix == 0xf3 ? 4 : prefix == 0xf2 ? 8 : 16;
+         uint8_t predicate;
+         if (!modrm(&o, &r) || !source(o, s, bytes) || !Fetch8(&predicate, error)) return false;
+         uint8_t *d = X[r];
+         if (prefix == 0xf3)
+            SetXmmU32(d, 0, SseCompare(predicate, XmmF(d, 0), XmmF(s, 0)) ? 0xffffffffu : 0);
+         else if (prefix == 0xf2)
+            SetXmmU64(d, 0, SseCompare(predicate, XmmD(d, 0), XmmD(s, 0)) ? ~0ull : 0);
+         else if (prefix == 0x66)
+            for (int i = 0; i < 2; ++i) SetXmmU64(d, i, SseCompare(predicate, XmmD(d, i), XmmD(s, i)) ? ~0ull : 0);
+         else
+            for (int i = 0; i < 4; ++i) SetXmmU32(d, i, SseCompare(predicate, XmmF(d, i), XmmF(s, i)) ? 0xffffffffu : 0);
+         return true;
+      }
+      case 0xc4:   // PINSRW xmm, r32/m16, imm8
+      {
+         if (prefix != 0x66) return fail();
+         if (!modrm(&o, &r)) return false;
+         uint16_t value;
+         if (o.isRegister) value = static_cast<uint16_t>(m_state.reg[o.reg]);
+         else if (!m_memory.Read16(o.address, &value, error)) return false;
+         uint8_t imm;
+         if (!Fetch8(&imm, error)) return false;
+         SetXmmU16(X[r], imm & 7, value);
+         return true;
+      }
+      case 0xc5:   // PEXTRW r32, xmm, imm8
+      {
+         if (prefix != 0x66) return fail();
+         uint8_t imm;
+         if (!modrm(&o, &r)) return false;
+         if (!o.isRegister) return fail();
+         if (!Fetch8(&imm, error)) return false;
+         m_state.reg[r] = XmmU16(X[o.reg], imm & 7);
+         return true;
+      }
+      case 0xc6:   // SHUFPS, SHUFPD
+      {
+         uint8_t imm;
+         if (!modrm(&o, &r) || !source(o, s, 16) || !Fetch8(&imm, error)) return false;
+         uint8_t d[16];
+         const uint8_t *a = X[r];
+         if (prefix == 0x66)
+         {
+            SetXmmU64(d, 0, XmmU64(a, imm & 1));
+            SetXmmU64(d, 1, XmmU64(s, (imm >> 1) & 1));
+         }
+         else
+         {
+            SetXmmU32(d, 0, XmmU32(a, imm & 3));
+            SetXmmU32(d, 1, XmmU32(a, (imm >> 2) & 3));
+            SetXmmU32(d, 2, XmmU32(s, (imm >> 4) & 3));
+            SetXmmU32(d, 3, XmmU32(s, (imm >> 6) & 3));
+         }
+         memcpy(X[r], d, 16);
+         return true;
+      }
+      case 0xd7:   // PMOVMSKB r32, xmm
+      {
+         if (prefix != 0x66) return fail();
+         if (!modrm(&o, &r)) return false;
+         if (!o.isRegister) return fail();
+         uint32_t mask = 0;
+         for (int i = 0; i < 16; ++i) mask |= ((X[o.reg][i] >> 7) & 1u) << i;
+         m_state.reg[r] = mask;
+         return true;
+      }
+      case 0xdb: case 0xdf: case 0xeb: case 0xef:   // PAND, PANDN, POR, PXOR
+      case 0xd4: case 0xfb: case 0xfe: case 0xfa: case 0xfc: case 0xfd: case 0xf8: case 0xf9:
+      case 0xea: case 0xee: case 0xda: case 0xde:
+      {
+         if (prefix != 0x66) return fail();
+         if (!modrm(&o, &r) || !source(o, s, 16)) return false;
+         uint8_t *d = X[r];
+         switch (op)
+         {
+            case 0xdb: for (int i = 0; i < 16; ++i) d[i] &= s[i]; break;
+            case 0xdf: for (int i = 0; i < 16; ++i) d[i] = static_cast<uint8_t>(~d[i] & s[i]); break;
+            case 0xeb: for (int i = 0; i < 16; ++i) d[i] |= s[i]; break;
+            case 0xef: for (int i = 0; i < 16; ++i) d[i] ^= s[i]; break;
+            case 0xd4: for (int i = 0; i < 2; ++i) SetXmmU64(d, i, XmmU64(d, i) + XmmU64(s, i)); break;
+            case 0xfb: for (int i = 0; i < 2; ++i) SetXmmU64(d, i, XmmU64(d, i) - XmmU64(s, i)); break;
+            case 0xfe: for (int i = 0; i < 4; ++i) SetXmmU32(d, i, XmmU32(d, i) + XmmU32(s, i)); break;
+            case 0xfa: for (int i = 0; i < 4; ++i) SetXmmU32(d, i, XmmU32(d, i) - XmmU32(s, i)); break;
+            case 0xfd: for (int i = 0; i < 8; ++i) SetXmmU16(d, i, static_cast<uint16_t>(XmmU16(d, i) + XmmU16(s, i))); break;
+            case 0xf9: for (int i = 0; i < 8; ++i) SetXmmU16(d, i, static_cast<uint16_t>(XmmU16(d, i) - XmmU16(s, i))); break;
+            case 0xfc: for (int i = 0; i < 16; ++i) d[i] = static_cast<uint8_t>(d[i] + s[i]); break;
+            case 0xf8: for (int i = 0; i < 16; ++i) d[i] = static_cast<uint8_t>(d[i] - s[i]); break;
+            case 0xea: case 0xee:
+               for (int i = 0; i < 8; ++i)
+               {
+                  const int16_t a = static_cast<int16_t>(XmmU16(d, i)), b = static_cast<int16_t>(XmmU16(s, i));
+                  SetXmmU16(d, i, static_cast<uint16_t>(op == 0xea ? std::min(a, b) : std::max(a, b)));
+               }
+               break;
+            default:   // 0xda PMINUB, 0xde PMAXUB
+               for (int i = 0; i < 16; ++i) d[i] = op == 0xda ? std::min(d[i], s[i]) : std::max(d[i], s[i]);
+               break;
+         }
+         return true;
+      }
+      case 0xae:   // LDMXCSR, STMXCSR; the fences
+      {
+         if (prefix) return notMine();
+         if (!modrm(&o, &r)) return false;
+         if (o.isRegister)
+            return r >= 5 ? true : fail();
+         if (r == 2)
+            return m_memory.Read32(o.address, &m_state.mxcsr, error);
+         if (r == 3)
+            return m_memory.Write32(o.address, m_state.mxcsr, error);
+         return fail();
+      }
+      default:
+         return notMine();
+   }
+}
+
+} // namespace osm32
+
+namespace
+{
+// 80-bit extended <-> double (FLD/FSTP m80, FSAVE/FRSTOR)
+void DoubleToExtended(double value, uint8_t out[10])
+{
+   uint64_t bits;
+   memcpy(&bits, &value, 8);
+   const unsigned sign = static_cast<unsigned>(bits >> 63);
+   const unsigned exponent = static_cast<unsigned>((bits >> 52) & 0x7ff);
+   uint64_t fraction = bits & 0x000fffffffffffffULL;
+   uint64_t mantissa = 0;
+   unsigned e = 0;
+   if (exponent == 0x7ff)
+   {
+      e = 0x7fff;
+      mantissa = 0x8000000000000000ULL | (fraction << 11);
+   }
+   else if (exponent == 0 && fraction == 0)
+      ;
+   else if (exponent == 0)   // subnormal double: normal as extended
+   {
+      int shift = 0;
+      mantissa = fraction << 11;
+      while (!(mantissa & 0x8000000000000000ULL))
+      {
+         mantissa <<= 1;
+         ++shift;
+      }
+      e = static_cast<unsigned>(16383 - 1022 - shift);
+   }
+   else
+   {
+      e = exponent - 1023 + 16383;
+      mantissa = 0x8000000000000000ULL | (fraction << 11);
+   }
+   memcpy(out, &mantissa, 8);
+   const uint16_t top = static_cast<uint16_t>(e | (sign << 15));
+   memcpy(out + 8, &top, 2);
+}
+
+double ExtendedToDouble(const uint8_t in[10])
+{
+   uint64_t mantissa;
+   uint16_t top;
+   memcpy(&mantissa, in, 8);
+   memcpy(&top, in + 8, 2);
+   const bool negative = (top & 0x8000) != 0;
+   const int e = top & 0x7fff;
+   double value;
+   if (e == 0x7fff)
+      value = (mantissa << 1) ? std::numeric_limits<double>::quiet_NaN() :
+                                std::numeric_limits<double>::infinity();
+   else
+      value = std::ldexp(static_cast<double>(mantissa), e - 16383 - 63);
+   return negative ? -value : value;
+}
+
+double X87Round(double value, uint16_t control)
+{
+   switch ((control >> 10) & 3)
+   {
+      case 1: return std::floor(value);
+      case 2: return std::ceil(value);
+      case 3: return std::trunc(value);
+      default: return std::nearbyint(value);
+   }
+}
+} // namespace
+
+namespace osm32
+{
+
+bool cCpu::ExecuteX87(uint8_t opcode, uint32_t instructionAddress, bool *handled,
+                      std::string *error)
+{
+   const uint32_t start = m_state.eip;   // after the D8-DF byte
+   uint8_t second;
+   if (!Fetch8(&second, error))
+      return false;
+   *handled = true;
+   double *st = m_state.x87;
+   unsigned &depth = m_state.x87Depth;
+
+   auto notMine = [&]() -> bool {
+      m_state.eip = start;
+      *handled = false;
+      return true;
+   };
+   auto need = [&](unsigned count) -> bool {
+      if (depth < count)
+      {
+         FailAddress(error, "x87 stack underflow at", instructionAddress);
+         return false;
+      }
+      return true;
+   };
+   auto push = [&](double value) -> bool {
+      if (depth == 8)
+      {
+         FailAddress(error, "x87 stack overflow at", instructionAddress);
+         return false;
+      }
+      for (unsigned i = depth; i != 0; --i)
+         st[i] = st[i - 1];
+      st[0] = value;
+      ++depth;
+      return true;
+   };
+   auto pop = [&]() {
+      for (unsigned i = 1; i < depth; ++i)
+         st[i - 1] = st[i];
+      --depth;
+   };
+   // FCOM-style condition codes in the status word
+   auto compareStatus = [&](double a, double b) {
+      m_state.x87Status &= ~0x4700u;
+      if (std::isnan(a) || std::isnan(b))
+         m_state.x87Status |= 0x4500u;
+      else if (a < b)
+         m_state.x87Status |= 0x0100u;
+      else if (a == b)
+         m_state.x87Status |= 0x4000u;
+   };
+   // FCOMI-style: ZF PF CF in EFLAGS
+   auto compareFlags = [&](double a, double b) {
+      m_state.eflags &= ~(kFlagZero | kFlagParity | kFlagCarry |
+                          kFlagOverflow | kFlagSign | kFlagAdjust);
+      if (std::isnan(a) || std::isnan(b))
+         m_state.eflags |= kFlagZero | kFlagParity | kFlagCarry;
+      else if (a < b)
+         m_state.eflags |= kFlagCarry;
+      else if (a == b)
+         m_state.eflags |= kFlagZero;
+   };
+   auto clearC2 = [&]() { m_state.x87Status &= ~0x0400u; };
+   // FISTTP: truncate whatever the control word says
+   auto fisttp = [&](uint32_t address, unsigned bytes) -> bool {
+      if (!need(1)) return false;
+      const double t = std::trunc(st[0]);
+      bool ok;
+      if (bytes == 2)
+      {
+         const uint16_t v = std::isnan(t) || t < -32768.0 || t > 32767.0 ?
+            0x8000u : static_cast<uint16_t>(static_cast<int16_t>(t));
+         ok = m_memory.Write16(address, v, error);
+      }
+      else if (bytes == 4)
+      {
+         const uint32_t v = std::isnan(t) || t < -2147483648.0 || t > 2147483647.0 ?
+            0x80000000u : static_cast<uint32_t>(static_cast<int32_t>(t));
+         ok = m_memory.Write32(address, v, error);
+      }
+      else
+      {
+         const uint64_t v = std::isnan(t) || t < -9223372036854775808.0 ||
+                            t >= 9223372036854775808.0 ? 0x8000000000000000ULL :
+            static_cast<uint64_t>(static_cast<int64_t>(t));
+         ok = m_memory.Write64(address, v, error);
+      }
+      if (!ok) return false;
+      pop();
+      return true;
+   };
+   // the 28-byte protected-mode environment: control, status (with TOP),
+   // tag word; the instruction and operand pointers are zero
+   auto storeEnvironment = [&](uint32_t address) -> bool {
+      const unsigned top = (8 - depth) & 7;
+      uint16_t tags = 0;
+      for (unsigned physical = 0; physical < 8; ++physical)
+      {
+         const unsigned i = (physical - top) & 7;   // its ST(i)
+         if (i >= depth)
+            tags |= static_cast<uint16_t>(3u << (physical * 2));
+      }
+      const uint32_t words[7] = {
+         0xffff0000u | m_state.x87Control,
+         0xffff0000u | static_cast<uint32_t>((m_state.x87Status & ~0x3800u) | (top << 11)),
+         0xffff0000u | tags, 0, 0, 0, 0 };
+      for (unsigned i = 0; i < 7; ++i)
+         if (!m_memory.Write32(address + i * 4, words[i], error))
+            return false;
+      return true;
+   };
+   auto loadEnvironment = [&](uint32_t address, bool takeDepth) -> bool {
+      uint32_t control, status, tags;
+      if (!m_memory.Read32(address, &control, error) ||
+          !m_memory.Read32(address + 4, &status, error) ||
+          !m_memory.Read32(address + 8, &tags, error))
+         return false;
+      m_state.x87Control = static_cast<uint16_t>(control);
+      m_state.x87Status = static_cast<uint16_t>(status & ~0x3800u);
+      if (takeDepth)
+      {
+         const unsigned top = (status >> 11) & 7;
+         unsigned count = 0;
+         while (count < 8 &&
+                ((tags >> (((top + count) & 7) * 2)) & 3) != 3)
+            ++count;
+         depth = count;
+      }
+      return true;
+   };
+
+   if (second >= 0xc0)
+   {
+      const unsigned i = second & 7u;
+      switch (opcode)
+      {
+         case 0xd9:
+         {
+            static const double kLog2Of10 = 3.321928094887362347870;
+            static const double kLog2OfE = 1.442695040888963407360;
+            static const double kPi = 3.141592653589793238463;
+            static const double kLog10Of2 = 0.301029995663981195214;
+            static const double kLnOf2 = 0.693147180559945309417;
+            switch (second)
+            {
+               case 0xd0: return true;                               // FNOP
+               case 0xe9: return push(kLog2Of10);                    // FLDL2T
+               case 0xea: return push(kLog2OfE);                     // FLDL2E
+               case 0xeb: return push(kPi);                          // FLDPI
+               case 0xec: return push(kLog10Of2);                    // FLDLG2
+               case 0xed: return push(kLnOf2);                       // FLDLN2
+               case 0xf0:                                            // F2XM1
+                  if (!need(1)) return false;
+                  st[0] = std::expm1(st[0] * kLnOf2);
+                  return true;
+               case 0xf1:                                            // FYL2X
+                  if (!need(2)) return false;
+                  st[1] = st[1] * std::log2(st[0]);
+                  pop();
+                  return true;
+               case 0xf2:                                            // FPTAN
+                  if (!need(1)) return false;
+                  st[0] = std::tan(st[0]);
+                  clearC2();
+                  return push(1.0);
+               case 0xf3:                                            // FPATAN
+                  if (!need(2)) return false;
+                  st[1] = std::atan2(st[1], st[0]);
+                  pop();
+                  return true;
+               case 0xf4:                                            // FXTRACT
+               {
+                  if (!need(1)) return false;
+                  int e = 0;
+                  const double m = std::frexp(st[0], &e);
+                  if (st[0] == 0.0)
+                  {
+                     const double z = st[0];
+                     st[0] = -std::numeric_limits<double>::infinity();
+                     return push(z);
+                  }
+                  st[0] = static_cast<double>(e - 1);
+                  return push(m * 2.0);
+               }
+               case 0xf5:                                            // FPREM1
+               case 0xf8:                                            // FPREM
+               {
+                  if (!need(2)) return false;
+                  const double a = st[0], b = st[1];
+                  const double q = second == 0xf8 ? std::trunc(a / b) :
+                                                    std::nearbyint(a / b);
+                  st[0] = second == 0xf8 ? std::fmod(a, b) :
+                                           std::remainder(a, b);
+                  const uint64_t qi = std::isfinite(q) ?
+                     static_cast<uint64_t>(std::fabs(std::fmod(q, 8.0))) : 0;
+                  m_state.x87Status &= ~0x4700u;
+                  if (qi & 1) m_state.x87Status |= 0x0200u;   // C1 = Q0
+                  if (qi & 2) m_state.x87Status |= 0x4000u;   // C3 = Q1
+                  if (qi & 4) m_state.x87Status |= 0x0100u;   // C0 = Q2
+                  return true;
+               }
+               case 0xf9:                                            // FYL2XP1
+                  if (!need(2)) return false;
+                  st[1] = st[1] * std::log1p(st[0]) / kLnOf2;
+                  pop();
+                  return true;
+               case 0xfb:                                            // FSINCOS
+               {
+                  if (!need(1)) return false;
+                  const double x = st[0];
+                  st[0] = std::sin(x);
+                  clearC2();
+                  return push(std::cos(x));
+               }
+               case 0xfc:                                            // FRNDINT
+                  if (!need(1)) return false;
+                  st[0] = X87Round(st[0], m_state.x87Control);
+                  return true;
+               case 0xfd:                                            // FSCALE
+               {
+                  if (!need(2)) return false;
+                  const double s = std::trunc(st[1]);
+                  if (std::isnan(s))
+                     st[0] = s;
+                  else
+                     st[0] = std::ldexp(st[0], static_cast<int>(
+                        std::max(-100000.0, std::min(100000.0, s))));
+                  return true;
+               }
+               case 0xfe:                                            // FSIN
+                  if (!need(1)) return false;
+                  st[0] = std::sin(st[0]);
+                  clearC2();
+                  return true;
+               case 0xff:                                            // FCOS
+                  if (!need(1)) return false;
+                  st[0] = std::cos(st[0]);
+                  clearC2();
+                  return true;
+            }
+            return notMine();
+         }
+         case 0xda:
+         case 0xdb:
+         {
+            if (opcode == 0xda && second == 0xe9)                    // FUCOMPP
+            {
+               if (!need(2)) return false;
+               compareStatus(st[0], st[1]);
+               pop();
+               pop();
+               return true;
+            }
+            if (second < 0xe0)                                       // FCMOVcc
+            {
+               const uint32_t f = m_state.eflags;
+               bool condition;
+               switch ((second >> 3) & 3)
+               {
+                  case 0: condition = (f & kFlagCarry) != 0; break;
+                  case 1: condition = (f & kFlagZero) != 0; break;
+                  case 2: condition = (f & (kFlagCarry | kFlagZero)) != 0; break;
+                  default: condition = (f & kFlagParity) != 0; break;
+               }
+               if (opcode == 0xdb)
+                  condition = !condition;
+               if (!need(i + 1)) return false;
+               if (condition)
+                  st[0] = st[i];
+               return true;
+            }
+            if (opcode == 0xdb && second >= 0xe8 && second < 0xf8)   // FUCOMI/FCOMI
+            {
+               if (!need(i + 1)) return false;
+               compareFlags(st[0], st[i]);
+               return true;
+            }
+            return notMine();
+         }
+         case 0xdd:
+         {
+            const unsigned group = (second >> 3) & 7;
+            if (group == 2 || group == 3)                            // FST/FSTP ST(i)
+            {
+               if (!need(1)) return false;
+               if (i >= depth)
+                  return FailAddress(error, "x87 store to an empty register at",
+                                     instructionAddress);
+               st[i] = st[0];
+               if (group == 3)
+                  pop();
+               return true;
+            }
+            if (group == 4 || group == 5)                            // FUCOM/FUCOMP ST(i)
+            {
+               if (!need(i + 1)) return false;
+               compareStatus(st[0], st[i]);
+               if (group == 5)
+                  pop();
+               return true;
+            }
+            return notMine();
+         }
+         case 0xdf:
+            if (second >= 0xe8 && second < 0xf8)                     // FUCOMIP/FCOMIP
+            {
+               if (!need(i + 1)) return false;
+               compareFlags(st[0], st[i]);
+               pop();
+               return true;
+            }
+            return notMine();
+         case 0xdc:
+            if (second >= 0xd0 && second < 0xe0)                     // FCOM/FCOMP (DC alias)
+            {
+               if (!need(i + 1)) return false;
+               compareStatus(st[0], st[i]);
+               if (second >= 0xd8)
+                  pop();
+               return true;
+            }
+            return notMine();
+      }
+      return notMine();
+   }
+
+   sDecodedRM operand;
+   unsigned operation;
+   if (!DecodeRM(second, &operand, &operation, error))
+      return false;
+   const uint32_t address = operand.address;
+   switch (opcode)
+   {
+      case 0xd9:
+         if (operation == 4)                                         // FLDENV
+            return loadEnvironment(address, false);
+         if (operation == 6)                                         // FNSTENV
+         {
+            if (!storeEnvironment(address)) return false;
+            m_state.x87Control |= 0x3f;   // and masks every exception
+            return true;
+         }
+         break;
+      case 0xdb:
+         if (operation == 1)                                         // FISTTP m32
+            return fisttp(address, 4);
+         if (operation == 5)                                         // FLD m80
+         {
+            uint8_t bytes[10];
+            for (unsigned b = 0; b < 10; ++b)
+               if (!m_memory.Read8(address + b, &bytes[b], error)) return false;
+            return push(ExtendedToDouble(bytes));
+         }
+         if (operation == 7)                                         // FSTP m80
+         {
+            if (!need(1)) return false;
+            uint8_t bytes[10];
+            DoubleToExtended(st[0], bytes);
+            for (unsigned b = 0; b < 10; ++b)
+               if (!m_memory.Write8(address + b, bytes[b], error)) return false;
+            pop();
+            return true;
+         }
+         break;
+      case 0xdd:
+         if (operation == 1)                                         // FISTTP m64
+            return fisttp(address, 8);
+         if (operation == 4)                                         // FRSTOR
+         {
+            if (!loadEnvironment(address, true)) return false;
+            for (unsigned r = 0; r < 8; ++r)
+            {
+               uint8_t bytes[10];
+               for (unsigned b = 0; b < 10; ++b)
+                  if (!m_memory.Read8(address + 28 + r * 10 + b, &bytes[b], error))
+                     return false;
+               st[r] = ExtendedToDouble(bytes);
+            }
+            return true;
+         }
+         if (operation == 6)                                         // FNSAVE
+         {
+            if (!storeEnvironment(address)) return false;
+            for (unsigned r = 0; r < 8; ++r)
+            {
+               uint8_t bytes[10];
+               DoubleToExtended(r < depth ? st[r] : 0.0, bytes);
+               for (unsigned b = 0; b < 10; ++b)
+                  if (!m_memory.Write8(address + 28 + r * 10 + b, bytes[b], error))
+                     return false;
+            }
+            depth = 0;   // and FNINIT
+            m_state.x87Status = 0;
+            m_state.x87Control = 0x037f;
+            return true;
+         }
+         break;
+      case 0xdf:
+         if (operation == 1)                                         // FISTTP m16
+            return fisttp(address, 2);
+         break;
+   }
+   return notMine();
 }
 
 } // namespace osm32

@@ -41,6 +41,10 @@ struct sCpuState
    unsigned x87Depth;
    uint16_t x87Status;
    uint16_t x87Control;
+   // SSE/SSE2 (a newer Visual C++'s code uses them whatever CPUID says):
+   // the eight XMM registers, little-endian bytes, and MXCSR
+   uint8_t xmm[8][16];
+   uint32_t mxcsr;
 
    sCpuState();
 };
@@ -156,6 +160,15 @@ private:
    void SetIncFlags(uint32_t before, uint32_t result);
    void SetDecFlags(uint32_t before, uint32_t result);
    bool Condition(unsigned condition) const;
+   // an 0F instruction it knows (SSE/SSE2, CMOVcc, SHLD/SHRD, multi-byte
+   // NOP): done, *handled set; else nothing fetched (osm32cpu.cpp)
+   bool ExecuteSse(unsigned prefix, uint32_t instructionAddress, bool *handled,
+                   std::string *error);
+   // the x87 forms the main decoder lacks (transcendentals, FCOMI, FCMOV,
+   // FISTTP, register FST/FSTP/FUCOM, m80, FNSTENV/FLDENV, FNSAVE/FRSTOR):
+   // done, *handled set; else nothing fetched past the D8-DF byte
+   bool ExecuteX87(uint8_t opcode, uint32_t instructionAddress, bool *handled,
+                   std::string *error);
 
    cMemory m_memory;
    sCpuState m_state;
