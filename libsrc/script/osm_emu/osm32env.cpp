@@ -12,6 +12,9 @@
 #include <string.h>
 #pragma pack(pop)
 
+// (live interface proxies handed to script modules, across all: for perf.log)
+extern "C" { long g_Osm32Proxies = 0; }
+
 namespace
 {
 
@@ -261,6 +264,11 @@ bool EqualAsciiNoCase(const std::string &left, const std::string &right)
 namespace osm32
 {
 
+cEnvironment::~cEnvironment()
+{
+   g_Osm32Proxies -= static_cast<long>(m_services.size());
+}
+
 cEnvironment::cEnvironment()
  : m_imports(0),
    m_memory(0),
@@ -324,6 +332,7 @@ bool cEnvironment::Prepare(cImage *image, cMemory *memory,
       Write32(proxies + (kAllocatorVtable - kProxyBase) + i * 4,
               kAllocatorTrap + i * kTrapStride);
    m_atoms.clear();
+   g_Osm32Proxies -= static_cast<long>(m_services.size());
    m_services.clear();
    m_initializers.clear();
 
@@ -495,6 +504,7 @@ bool cEnvironment::InvokeScriptManager(unsigned slot, sCpuState *state,
                               kServiceTrap + i * kTrapStride, error))
             return false;
       m_services.push_back(proxy);
+      ++g_Osm32Proxies;
       return ReturnStdcall(state, memory, 8, proxy.object, error);
    }
    if (slot == 0)
@@ -581,6 +591,7 @@ for (unsigned i = 0; i < kSlots; ++i)
    if (!m_memory->Write32(proxy.vtable + i * 4, kServiceTrap + i * kTrapStride, error))
       return 0;
 m_services.push_back(proxy);
+++g_Osm32Proxies;
 return proxy.object;
 }
 
@@ -662,6 +673,7 @@ bool cEnvironment::InvokeScriptService(unsigned slot, sCpuState *state,
          // (an object an engine interface returned: let go of, and its proxy)
          const sServiceProxy gone = *proxy;
          m_services.erase(m_services.begin() + (proxy - &m_services[0]));
+         --g_Osm32Proxies;
          ReleaseProxyNative(gone.id, gone.native);
          m_heap.Free(gone.vtable, 0);
          m_heap.Free(gone.object, 0);

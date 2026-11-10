@@ -6,6 +6,9 @@
 #include <algorithm>
 #include <stdio.h>
 #include <vector>
+
+// (live guest allocations, across every script module: for perf.log)
+extern "C" { long g_Osm32HeapBlocks = 0; }
 #pragma pack(pop)
 
 namespace
@@ -60,8 +63,14 @@ cGuestHeap::cGuestHeap()
  : m_memory(0),
    m_base(0),
    m_end(0),
-   m_next(0)
+   m_next(0),
+   m_live(0)
 {
+}
+
+cGuestHeap::~cGuestHeap()
+{
+   g_Osm32HeapBlocks -= m_live;
 }
 
 bool cGuestHeap::Initialize(cMemory *memory, uint32_t base, uint32_t size,
@@ -78,24 +87,72 @@ bool cGuestHeap::Initialize(cMemory *memory, uint32_t base, uint32_t size,
    m_base = base;
    m_end = end;
    m_next = base;
+   g_Osm32HeapBlocks -= m_live;
+   m_live = 0;
    m_blocks.clear();
+   m_free.clear();
    return true;
 }
 
 cGuestHeap::sBlock *cGuestHeap::Find(uint32_t address)
 {
-   for (size_t i = 0; i < m_blocks.size(); ++i)
-      if (m_blocks[i].address == address)
-         return &m_blocks[i];
-   return 0;
+   std::map<uint32_t, sBlock>::iterator it = m_blocks.find(address);
+   return it == m_blocks.end() ? 0 : &it->second;
 }
 
 const cGuestHeap::sBlock *cGuestHeap::Find(uint32_t address) const
 {
-   for (size_t i = 0; i < m_blocks.size(); ++i)
-      if (m_blocks[i].address == address)
-         return &m_blocks[i];
-   return 0;
+   std::map<uint32_t, sBlock>::const_iterator it = m_blocks.find(address);
+   return it == m_blocks.end() ? 0 : &it->second;
+}
+
+namespace
+{
+void EraseFree(std::set<std::pair<uint32_t, uint32_t> > &free, uint32_t capacity, uint32_t address)
+{
+   free.erase(std::make_pair(capacity, address));
+}
+}
+
+// a block freed: merged with free neighbours, the run at the top given back
+void cGuestHeap::MarkFree(uint32_t address)
+{
+   std::map<uint32_t, sBlock>::iterator it = m_blocks.find(address);
+   if (it == m_blocks.end())
+      return;
+   if (!it->second.free)
+   {
+      --g_Osm32HeapBlocks;
+      --m_live;
+   }
+   it->second.free = true;
+   std::map<uint32_t, sBlock>::iterator next = it;
+   ++next;
+   if (next != m_blocks.end() && next->second.free && next->first == address + it->second.capacity)
+   {
+      EraseFree(m_free, next->second.capacity, next->first);
+      it->second.capacity += next->second.capacity;
+      m_blocks.erase(next);
+   }
+   if (it != m_blocks.begin())
+   {
+      std::map<uint32_t, sBlock>::iterator prev = it;
+      --prev;
+      if (prev->second.free && prev->first + prev->second.capacity == it->first)
+      {
+         EraseFree(m_free, prev->second.capacity, prev->first);
+         prev->second.capacity += it->second.capacity;
+         m_blocks.erase(it);
+         it = prev;
+      }
+   }
+   if (it->first + it->second.capacity == m_next)
+   {
+      m_next = it->first;
+      m_blocks.erase(it);
+      return;
+   }
+   m_free.insert(std::make_pair(it->second.capacity, it->first));
 }
 
 uint32_t cGuestHeap::Alloc(uint32_t size, std::string *error)
@@ -110,17 +167,31 @@ uint32_t cGuestHeap::Alloc(uint32_t size, std::string *error)
       Fail(error, "guest allocation is too large");
       return 0;
    }
-   const uint32_t capacity = Align16(size);
-   for (size_t i = 0; i < m_blocks.size(); ++i)
+   const uint32_t capacity = Align16(size ? size : 1);
+   // the smallest free block it fits in, split if much larger
+   std::set<std::pair<uint32_t, uint32_t> >::iterator fit =
+      m_free.lower_bound(std::make_pair(capacity, 0u));
+   if (fit != m_free.end())
    {
-      sBlock &block = m_blocks[i];
-      if (block.free && block.capacity >= capacity)
+      const uint32_t address = fit->second;
+      m_free.erase(fit);
+      sBlock &block = m_blocks[address];
+      if (block.capacity >= capacity + 64)
       {
-         block.free = false;
-         block.size = size;
-         if (error) error->clear();
-         return block.address;
+         sBlock rest;
+         rest.size = 0;
+         rest.capacity = block.capacity - capacity;
+         rest.free = true;
+         m_blocks[address + capacity] = rest;
+         m_free.insert(std::make_pair(rest.capacity, address + capacity));
+         block.capacity = capacity;
       }
+      block.free = false;
+      block.size = size;
+      ++g_Osm32HeapBlocks;
+      ++m_live;
+      if (error) error->clear();
+      return address;
    }
 
    if (static_cast<uint64_t>(m_next) + capacity > m_end)
@@ -129,14 +200,16 @@ uint32_t cGuestHeap::Alloc(uint32_t size, std::string *error)
       return 0;
    }
    sBlock block;
-   block.address = m_next;
    block.size = size;
    block.capacity = capacity;
    block.free = false;
-   m_blocks.push_back(block);
+   const uint32_t address = m_next;
+   m_blocks[address] = block;
    m_next += capacity;
+   ++g_Osm32HeapBlocks;
+   ++m_live;
    if (error) error->clear();
-   return block.address;
+   return address;
 }
 
 uint32_t cGuestHeap::Realloc(uint32_t address, uint32_t size,
@@ -173,8 +246,7 @@ uint32_t cGuestHeap::Realloc(uint32_t address, uint32_t size,
          return 0;
    if (!copy.empty() && !m_memory->Load(replacement, &copy[0], copy.size(), error))
       return 0;
-   old = Find(address);
-   old->free = true;
+   MarkFree(address);
    if (error) error->clear();
    return replacement;
 }
@@ -195,7 +267,7 @@ bool cGuestHeap::Free(uint32_t address, std::string *error)
       }
       return false;
    }
-   block->free = true;
+   MarkFree(address);
    if (error) error->clear();
    return true;
 }

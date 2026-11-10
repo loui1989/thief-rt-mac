@@ -7,6 +7,8 @@
 
 #pragma pack(push, 8)
 #include <stdint.h>
+#include <map>
+#include <set>
 #include <string>
 #include <vector>
 #pragma pack(pop)
@@ -26,6 +28,7 @@ public:
 
    bool Initialize(cMemory *memory, uint32_t base, uint32_t size,
                    std::string *error);
+   ~cGuestHeap();
    uint32_t Alloc(uint32_t size, std::string *error);
    uint32_t Realloc(uint32_t address, uint32_t size, std::string *error);
    bool Free(uint32_t address, std::string *error);
@@ -33,9 +36,14 @@ public:
    int DidAlloc(uint32_t address) const;
 
 private:
+   // Blocks by address (each a run of the heap, used or free, touching the
+   // next), and the free ones by size: found, split and merged in log time.
+   // (A list scanned from the start, its free blocks never split or merged,
+   // grew all session with the script libraries' many small allocations --
+   // NVScript, tnhScript -- and every allocation and free scanned it: the
+   // game slowed as it was played.)
    struct sBlock
    {
-      uint32_t address;
       uint32_t size;
       uint32_t capacity;
       bool free;
@@ -43,12 +51,15 @@ private:
 
    sBlock *Find(uint32_t address);
    const sBlock *Find(uint32_t address) const;
+   void MarkFree(uint32_t address);
 
    cMemory *m_memory;
    uint32_t m_base;
    uint64_t m_end;
    uint32_t m_next;
-   std::vector<sBlock> m_blocks;
+   std::map<uint32_t, sBlock> m_blocks;
+   std::set<std::pair<uint32_t, uint32_t> > m_free;   // (capacity, address)
+   long m_live;   // allocations in use
 };
 
 } // namespace osm32

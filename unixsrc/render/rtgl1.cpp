@@ -4713,6 +4713,13 @@ extern "C" double g_ResImageReadSeconds;   // (namedres: reading PNG and DDS ima
 extern "C" double g_SoundPartMs[6];   // (sound: where the sound client's time went this frame)
 extern "C" char g_SoundSlowStart[64];
 extern "C" double g_SoundSlowStartMs;
+// (the 32-bit script modules' emulation: time in their code, calls into it,
+// and what they hold -- weak, for builds without it)
+extern "C" __attribute__((weak)) double g_Osm32Seconds;
+extern "C" __attribute__((weak)) unsigned long g_Osm32Calls;
+extern "C" __attribute__((weak)) long g_Osm32HeapBlocks;
+extern "C" __attribute__((weak)) long g_Osm32LinkQueries;
+extern "C" __attribute__((weak)) long g_Osm32Proxies;
 namespace {
 
 void perf_frame(double t)
@@ -4752,6 +4759,16 @@ void perf_frame(double t)
    const double frameMs = (t - g_perf.last) * 1000.0;
    g_perf.frames.push_back(frameMs);
    g_perf.last = t;
+   static double scriptSecsLast = 0, scriptSecsWindow = 0;
+   static unsigned long scriptCallsLast = 0, scriptCallsWindow = 0;
+   double scriptFrameSecs = 0;
+   if (&g_Osm32Seconds && &g_Osm32Calls) {
+      scriptFrameSecs = g_Osm32Seconds - scriptSecsLast;
+      scriptSecsWindow += scriptFrameSecs;
+      scriptCallsWindow += g_Osm32Calls - scriptCallsLast;
+      scriptSecsLast = g_Osm32Seconds;
+      scriptCallsLast = g_Osm32Calls;
+   }
    // a hitch: where its time went (in play, not loading: under 2 s)
    if (frameMs > 35.0 && frameMs < 2000.0)
       if (FILE *f = fopen((logs_dir() + "/perf.log").c_str(), "a")) {
@@ -4762,6 +4779,8 @@ void perf_frame(double t)
                    [](const auto &a, const auto &b) { return a.second > b.second; });
          for (size_t i = 0; i < g_frameClients.size() && i < 4; ++i)
             fprintf(f, " %s %.1f", g_frameClients[i].first, g_frameClients[i].second * 1000.0);
+         if (scriptFrameSecs > 0.0005)
+            fprintf(f, "; script modules' code %.1f", scriptFrameSecs * 1000.0);
          double sound = 0;
          for (double ms : g_SoundPartMs)
             sound += ms;
@@ -4889,8 +4908,15 @@ void perf_frame(double t)
             all += e.first;
          fprintf(f, "; %zu models, %.2f in all\n", top.size(), all * ms);
       }
+      if (&g_Osm32Seconds && scriptCallsWindow)
+         fprintf(f, "  script modules (32-bit, emulated): their code %.2f ms per frame, %.0f calls into them per frame; "
+                    "they hold %ld allocations, %ld link queries, %ld interfaces\n",
+                 scriptSecsWindow * ms, scriptCallsWindow / n, &g_Osm32HeapBlocks ? g_Osm32HeapBlocks : 0L,
+                 &g_Osm32LinkQueries ? g_Osm32LinkQueries : 0L, &g_Osm32Proxies ? g_Osm32Proxies : 0L);
       fclose(f);
    }
+   scriptSecsWindow = 0;
+   scriptCallsWindow = 0;
    g_perf.frames.clear();
    g_perf.clients.clear();
    g_perf.wait = g_perf.draw = g_perf.capture = g_perf.prep = 0;
@@ -5466,6 +5492,12 @@ void draw_frame(bool sceneDrawn)
    // the haze lit throughout by every lamp: the mission's fog, or the
    // volumetric option's "every light"
    const bool lampHaze = (fogOn && !flatFog) || g_cfg.volumetric;
+   // ...its cells given three samples of the lamps a frame, not one: the
+   // lit fog's grain, seen as the view moves, a good deal finer (the
+   // volume's lighting pass about twice its cost). The shaders read the
+   // count as 8 x (fog samples - 1) + smoke samples.
+   if (lampHaze)
+      smoke.samplesPerCell += 8u * 2u;
    auto volumetric = RgDrawFrameVolumetricParams{
       .sType = RG_STRUCTURE_TYPE_DRAW_FRAME_VOLUMETRIC_PARAMS,
       .pNext = &smoke,

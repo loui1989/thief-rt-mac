@@ -21,6 +21,7 @@ class cEnvironment : public iEnvironment
 {
 public:
    cEnvironment();
+   virtual ~cEnvironment();
 
    virtual bool Prepare(cImage *image, cMemory *memory,
                         std::string *error);

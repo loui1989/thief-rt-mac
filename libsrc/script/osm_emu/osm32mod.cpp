@@ -52,6 +52,9 @@
 #include <map>
 #include <drkuiscrapi.h>
 
+// (live guest link queries, across every script module: for perf.log)
+extern "C" { long g_Osm32LinkQueries = 0; }
+
 namespace
 {
 
@@ -685,6 +688,7 @@ public:
     : m_scriptManager(scriptManager),
       m_guestAbi(guestAbi),
       m_linkQueryVtable(0),
+      m_linkQuerySerial(0),
       m_runtime(0)
    {
    }
@@ -692,9 +696,13 @@ public:
    virtual ~cOsm32Environment()
    {
       DropListeners();
-      for (size_t i = 0; i < m_linkQueries.size(); ++i)
-         if (m_linkQueries[i].query)
-            m_linkQueries[i].query->Release();
+      for (std::map<uint32_t, sLinkQueryProxy>::iterator i =
+              m_linkQueries.begin(); i != m_linkQueries.end(); ++i)
+         while (i->second.references)
+         {
+            --i->second.references;
+            i->second.query->Release();
+         }
    }
 
    void SetRuntime(osm32::cModule *runtime) { m_runtime = runtime; }
@@ -853,22 +861,40 @@ public:
 
    osm32::eGuestAbi GuestAbi() const { return m_guestAbi; }
 
-   size_t LinkQueryCheckpoint() const
+   uint64_t LinkQueryCheckpoint() const
    {
-      return m_linkQueries.size();
+      return m_linkQuerySerial;
    }
 
-   void ReleaseLinkQueriesCreatedSince(size_t checkpoint)
+   // Released queries are dropped from the table (and their guest memory
+   // freed) so that lookups don't slow down over a long session.
+   void DropLinkQuery(uint32_t object)
    {
-      for (size_t i = checkpoint; i < m_linkQueries.size(); ++i)
+      std::map<uint32_t, sLinkQueryProxy>::iterator i =
+         m_linkQueries.find(object);
+      if (i == m_linkQueries.end())
+         return;
+      while (i->second.references)
       {
-         sLinkQueryProxy &proxy = m_linkQueries[i];
-         while (proxy.query && proxy.references)
-         {
-            --proxy.references;
-            proxy.query->Release();
-         }
-         proxy.query = 0;
+         --i->second.references;
+         i->second.query->Release();
+      }
+      if (i->second.data) FreeGuest(i->second.data, 0);
+      FreeGuest(i->first, 0);
+      m_linkQueries.erase(i);
+      --g_Osm32LinkQueries;
+   }
+
+   void ReleaseLinkQueriesCreatedSince(uint64_t checkpoint)
+   {
+      for (std::map<uint32_t, sLinkQueryProxy>::iterator i =
+              m_linkQueries.begin(); i != m_linkQueries.end();)
+      {
+         std::map<uint32_t, sLinkQueryProxy>::iterator next = i;
+         ++next;
+         if (i->second.serial >= checkpoint)
+            DropLinkQuery(i->first);
+         i = next;
       }
    }
 
@@ -1873,6 +1899,7 @@ private:
 
       sLinkQueryProxy proxy;
       proxy.object = AllocGuest(4, error);
+      proxy.serial = m_linkQuerySerial++;
       proxy.query = query;
       proxy.references = 1;
       proxy.data = 0;
@@ -1881,7 +1908,8 @@ private:
           !memory->Write32(proxy.object, m_linkQueryVtable, error))
          return 0;
       query->AddRef();
-      m_linkQueries.push_back(proxy);
+      m_linkQueries[proxy.object] = proxy;
+      ++g_Osm32LinkQueries;
       return proxy.object;
    }
 
@@ -1890,13 +1918,10 @@ private:
    {
       uint32_t object;
       if (!Argument(*state, *memory, 0, &object, error)) return false;
-      sLinkQueryProxy *proxy = 0;
-      for (size_t i = 0; i < m_linkQueries.size(); ++i)
-         if (m_linkQueries[i].object == object && m_linkQueries[i].query)
-         {
-            proxy = &m_linkQueries[i];
-            break;
-         }
+      std::map<uint32_t, sLinkQueryProxy>::iterator found =
+         m_linkQueries.find(object);
+      sLinkQueryProxy *proxy =
+         found != m_linkQueries.end() ? &found->second : 0;
       if (!proxy)
       {
          if (error) *error = "invalid or released guest link query";
@@ -1922,12 +1947,7 @@ private:
          const uint32_t references = --proxy->references;
          proxy->query->Release();
          if (!references)
-         {
-            proxy->query = 0;
-            if (proxy->data) FreeGuest(proxy->data, 0);
-            proxy->data = 0;
-            proxy->dataCapacity = 0;
-         }
+            DropLinkQuery(object);
          return Return(state, memory, 4, references, error);
       }
       if (slot == 3)
@@ -4373,6 +4393,7 @@ private:
    struct sLinkQueryProxy
    {
       uint32_t object;
+      uint64_t serial;         // creation order, for message checkpoints
       ILinkQuery *query;
       uint32_t references;
       uint32_t data;           // the current link's data, copied out (Data)
@@ -4383,7 +4404,8 @@ private:
    const osm32::eGuestAbi m_guestAbi;
    uint32_t m_linkQueryVtable;
    osm32::cModule *m_runtime;   // the guest, to call its listeners
-   std::vector<sLinkQueryProxy> m_linkQueries;
+   uint64_t m_linkQuerySerial;
+   std::map<uint32_t, sLinkQueryProxy> m_linkQueries;   // by guest object
 };
 
 class cOsm32Module;
@@ -4568,7 +4590,7 @@ public:
          return E_INVALIDARG;
       uint32_t result;
       std::string error;
-      const size_t linkQueryCheckpoint = m_environment.LinkQueryCheckpoint();
+      const uint64_t linkQueryCheckpoint = m_environment.LinkQueryCheckpoint();
       const bool received = m_runtime.ReceiveMessage(
          guest, guestMessage, reply ? &guestReply : 0,
          static_cast<uint32_t>(debugAction), &result, &error);

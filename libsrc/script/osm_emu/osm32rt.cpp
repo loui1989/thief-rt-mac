@@ -3,6 +3,10 @@
 #include <osm_emu/osm32rt.h>
 
 #include <string.h>
+#include <chrono>
+
+// (time spent running script modules' code, and how many calls: for perf.log)
+extern "C" { double g_Osm32Seconds = 0; unsigned long g_Osm32Calls = 0; }
 
 namespace
 {
@@ -54,6 +58,12 @@ bool cModule::Call(uint32_t function, const uint32_t *arguments,
       return Fail(error, "guest call nesting exhausted the interpreter stack");
 
    const bool nested = m_callDepth != 0;
+   std::chrono::steady_clock::time_point started;
+   if (!nested)
+   {
+      started = std::chrono::steady_clock::now();
+      ++g_Osm32Calls;
+   }
    const sCpuState savedState = m_cpu.State();
    ++m_callDepth;
    m_cpu.State() = sCpuState();
@@ -75,6 +85,9 @@ bool cModule::Call(uint32_t function, const uint32_t *arguments,
    --m_callDepth;
    if (nested)
       m_cpu.State() = savedState;
+   else
+      g_Osm32Seconds += std::chrono::duration<double>(
+         std::chrono::steady_clock::now() - started).count();
    if (succeeded && result)
       *result = returnValue;
    return succeeded;
