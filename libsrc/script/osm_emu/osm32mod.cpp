@@ -866,7 +866,8 @@ protected:
    {
       return lgNumber == 0x8f ||    // ITraitManager
              lgNumber == 0x149 ||   // ISimManager
-             lgNumber == 0x78;      // IPropertyManager
+             lgNumber == 0x78 ||    // IPropertyManager
+             lgNumber == 0x82;      // ILinkManager
    }
 
    virtual void ReleaseProxyNative(uint16_t id, void *native)
@@ -875,6 +876,227 @@ protected:
          static_cast<IObjectQuery *>(native)->Release();
       if (id == (kEngineObject | 2) && native)
          static_cast<IProperty *>(native)->Release();
+      if (id == (kEngineObject | 3) && native)
+         static_cast<IRelation *>(native)->Release();
+   }
+
+   // a guest copy of native bytes (a link's data, a description), kept per
+   // key and reused while it fits
+   bool GuestBytes(int64_t key, const void *bytes, uint32_t size, osm32::cMemory *memory,
+                   uint32_t *address, std::string *error)
+   {
+      sGuestText &t = m_guestTexts[key];
+      if (t.capacity < size)
+      {
+         if (t.address) FreeGuest(t.address, 0);
+         t.address = AllocGuest(size, error);
+         t.capacity = t.address ? size : 0;
+         if (!t.address) return false;
+      }
+      for (uint32_t i = 0; i < size; ++i)
+         if (!memory->Write8(t.address + i, static_cast<const uint8_t *>(bytes)[i], error)) return false;
+      *address = t.address;
+      return true;
+   }
+
+   static uint32_t RelationDataSize(IRelation *rel)
+   {
+      const sRelationDataDesc *desc = rel ? rel->DescribeData() : 0;
+      return desc && desc->size <= 0x10000 ? static_cast<uint32_t>(desc->size) : 0;
+   }
+
+   bool ReadGuestBytes(osm32::cMemory *memory, uint32_t address, uint32_t size,
+                       std::vector<uint8_t> *bytes, std::string *error)
+   {
+      bytes->assign(size, 0);
+      for (uint32_t i = 0; i < size; ++i)
+         if (!memory->Read8(address + i, &(*bytes)[i], error)) return false;
+      return true;
+   }
+
+   bool WriteGuestLink(osm32::cMemory *memory, uint32_t address, const sLink &link, std::string *error)
+   {
+      return memory->Write32(address, static_cast<uint32_t>(link.source), error) &&
+             memory->Write32(address + 4, static_cast<uint32_t>(link.dest), error) &&
+             memory->Write32(address + 8, static_cast<uint32_t>(static_cast<int32_t>(link.flavor)), error);
+   }
+
+   // ILinkManager and IRelation (tnhScript: relations by name, their links,
+   // their data)
+   bool InvokeLinkInterface(bool manager, IUnknown *native, unsigned slot, osm32::sCpuState *state,
+                            osm32::cMemory *memory, std::string *error)
+   {
+      uint32_t arg[5] = {0, 0, 0, 0, 0};
+      for (unsigned i = 0; i < 5; ++i)
+         Argument(*state, *memory, i + 1, &arg[i], 0);
+      auto obj = [](uint32_t v) { return static_cast<ObjID>(static_cast<int32_t>(v)); };
+      ILinkManager *links = manager ? static_cast<ILinkManager *>(native) : 0;
+      IRelation *rel = manager ? 0 : static_cast<IRelation *>(native);
+      // (the manager's methods take a relation where the relation's do not:
+      // its arguments from the relation's on, one later)
+      const unsigned shift = manager ? 1 : 0;
+      auto relationOf = [&](LinkID id) -> IRelation * {
+         if (rel) { rel->AddRef(); return rel; }
+         return links->GetRelation(LINKID_RELATION(id));
+      };
+      if (manager && (slot == 3 || slot == 4))
+      {
+         IRelation *found = 0;
+         if (slot == 3)
+            found = links->GetRelation(static_cast<RelationID>(static_cast<int32_t>(arg[0])));
+         else
+         {
+            std::string name;
+            if (!ReadGuestString(memory, arg[0], &name, error)) return false;
+            found = links->GetRelationNamed(name.c_str());
+         }
+         uint32_t result = 0;
+         if (found && !(result = CreateInterfaceProxy(kEngineObject | 3, found, error)))
+         {
+            found->Release();
+            return false;
+         }
+         return Return(state, memory, 8, result, error);
+      }
+      if (!manager)
+      {
+         if (slot == 3 || slot == 6)
+         {
+            // Describe, DescribeData: copied out (32-bit fields; no data ops)
+            uint8_t bytes[48] = {};
+            uint32_t size = 0;
+            if (slot == 3)
+            {
+               const sRelationDesc *d = rel->Describe();
+               if (d)
+               {
+                  memcpy(bytes, d->name, 32);
+                  const uint32_t f[4] = {static_cast<uint32_t>(d->flags), static_cast<uint32_t>(d->version),
+                                         static_cast<uint32_t>(d->oldest), static_cast<uint32_t>(d->read_version)};
+                  memcpy(bytes + 32, f, 16);
+                  size = 48;
+               }
+            }
+            else if (const sRelationDataDesc *d = rel->DescribeData())
+            {
+               memcpy(bytes, d->type, 32);
+               const uint32_t f[3] = {static_cast<uint32_t>(d->size), static_cast<uint32_t>(d->flags), 0};
+               memcpy(bytes + 32, f, 12);
+               size = 44;
+            }
+            uint32_t address = 0;
+            if (size && !GuestBytes((static_cast<int64_t>(0x7e000000 + slot) << 32) | static_cast<uint16_t>(rel->GetID()),
+                                    bytes, size, memory, &address, error))
+               return false;
+            return Return(state, memory, 4, address, error);
+         }
+         if (slot == 4) return Return(state, memory, 4, static_cast<uint32_t>(static_cast<int32_t>(rel->GetID())), error);
+         if (slot == 7)
+         {
+            IRelation *inverse = rel->Inverse();
+            uint32_t result = 0;
+            if (inverse && !(result = CreateInterfaceProxy(kEngineObject | 3, inverse, error)))
+            {
+               inverse->Release();
+               return false;
+            }
+            return Return(state, memory, 4, result, error);
+         }
+      }
+      // the shared ones: Add, AddFull, Remove, Get, SetData, GetData, Query,
+      // GetSingleLink, AnyLinks
+      const unsigned base = slot;   // (the same slot numbers, as it happens, but for the offset arguments)
+      const RelationID relId = manager ? static_cast<RelationID>(static_cast<int32_t>(arg[2])) : 0;
+      if ((manager && base == 9) || (!manager && base == 8))
+      {
+         const LinkID id = manager ? links->Add(obj(arg[0]), obj(arg[1]), relId) : rel->Add(obj(arg[0]), obj(arg[1]));
+         return Return(state, memory, manager ? 16 : 12, static_cast<uint32_t>(id), error);
+      }
+      if ((manager && base == 10) || (!manager && base == 9))
+      {
+         IRelation *r = manager ? links->GetRelation(relId) : (rel->AddRef(), rel);
+         const uint32_t size = RelationDataSize(r);
+         std::vector<uint8_t> data;
+         const uint32_t dataAddress = arg[2 + shift];
+         if (dataAddress && size && !ReadGuestBytes(memory, dataAddress, size, &data, error))
+         {
+            if (r) r->Release();
+            return false;
+         }
+         void *pdata = data.empty() ? 0 : data.data();
+         const LinkID id = manager ? links->AddFull(obj(arg[0]), obj(arg[1]), relId, pdata)
+                                   : rel->AddFull(obj(arg[0]), obj(arg[1]), pdata);
+         if (r) r->Release();
+         return Return(state, memory, manager ? 20 : 16, static_cast<uint32_t>(id), error);
+      }
+      if ((manager && base == 11) || (!manager && base == 10))
+         return Return(state, memory, 8,
+                       static_cast<uint32_t>(manager ? links->Remove(static_cast<LinkID>(arg[0]))
+                                                     : rel->Remove(static_cast<LinkID>(arg[0]))), error);
+      if ((manager && base == 12) || (!manager && base == 11))
+      {
+         sLink link = {};
+         const BOOL got = manager ? links->Get(static_cast<LinkID>(arg[0]), &link)
+                                  : rel->Get(static_cast<LinkID>(arg[0]), &link);
+         return (!got || !arg[1] || WriteGuestLink(memory, arg[1], link, error)) &&
+                Return(state, memory, 12, got ? 1 : 0, error);
+      }
+      if ((manager && base == 13) || (!manager && base == 12))
+      {
+         IRelation *r = relationOf(static_cast<LinkID>(arg[0]));
+         const uint32_t size = RelationDataSize(r);
+         if (r) r->Release();
+         std::vector<uint8_t> data;
+         if (arg[1] && size && !ReadGuestBytes(memory, arg[1], size, &data, error)) return false;
+         void *pdata = data.empty() ? 0 : data.data();
+         return Return(state, memory, 12,
+                       static_cast<uint32_t>(manager ? links->SetData(static_cast<LinkID>(arg[0]), pdata)
+                                                     : rel->SetData(static_cast<LinkID>(arg[0]), pdata)), error);
+      }
+      if ((manager && base == 14) || (!manager && base == 13))
+      {
+         const LinkID id = static_cast<LinkID>(arg[0]);
+         void *data = manager ? links->GetData(id) : rel->GetData(id);
+         IRelation *r = relationOf(id);
+         const uint32_t size = RelationDataSize(r);
+         if (r) r->Release();
+         uint32_t address = 0;
+         if (data && size && !GuestBytes((static_cast<int64_t>(0x7f000000) << 32) | static_cast<uint32_t>(id),
+                                         data, size, memory, &address, error))
+            return false;
+         return Return(state, memory, 8, address, error);
+      }
+      if ((manager && base == 15) || (!manager && base == 14))
+      {
+         ILinkQuery *query = manager ? links->Query(obj(arg[0]), obj(arg[1]), relId)
+                                     : rel->Query(obj(arg[0]), obj(arg[1]));
+         uint32_t result = 0;
+         if (query)
+         {
+            result = CreateLinkQuery(query, memory, error);
+            query->Release();
+            if (!result) return false;
+         }
+         return Return(state, memory, manager ? 16 : 12, result, error);
+      }
+      if ((manager && base == 17) || (!manager && base == 15 + 2))
+      {
+         const LinkID id = manager ? links->GetSingleLink(static_cast<RelationID>(static_cast<int32_t>(arg[0])),
+                                                          obj(arg[1]), obj(arg[2]))
+                                   : rel->GetSingleLink(obj(arg[0]), obj(arg[1]));
+         return Return(state, memory, manager ? 16 : 12, static_cast<uint32_t>(id), error);
+      }
+      if ((manager && base == 18) || (!manager && base == 18))
+      {
+         const BOOL any = manager ? links->AnyLinks(static_cast<RelationID>(static_cast<int32_t>(arg[0])),
+                                                    obj(arg[1]), obj(arg[2]))
+                                  : rel->AnyLinks(obj(arg[0]), obj(arg[1]));
+         return Return(state, memory, manager ? 16 : 12, any ? 1 : 0, error);
+      }
+      char message[96];
+      snprintf(message, sizeof(message), "unsupported %s method %u", manager ? "link manager" : "relation", slot);
+      if (error) *error = message;
+      return false;
    }
 
    // a string property's text, copied out to the guest (one buffer an
@@ -1000,6 +1222,28 @@ protected:
          if (slot == 3) return Return(state, memory, 4, query->Done() ? 1 : 0, error);
          if (slot == 4) return Return(state, memory, 4, static_cast<uint32_t>(query->Object()), error);
          if (slot == 5) return Return(state, memory, 4, static_cast<uint32_t>(query->Next()), error);
+      }
+      else if (id == (kEngineInterface | 0x82))
+      {
+         ILinkManager *links = AppGetObj(ILinkManager);
+         if (!links)
+         {
+            if (error) *error = "native link manager is unavailable";
+            return false;
+         }
+         const bool ok = InvokeLinkInterface(true, links, slot, state, memory, error);
+         links->Release();
+         return ok;
+      }
+      else if (id == (kEngineObject | 3))
+      {
+         IRelation *rel = static_cast<IRelation *>(GetProxyNative(guestObject));
+         if (!rel)
+         {
+            if (error) *error = "relation proxy without its relation";
+            return false;
+         }
+         return InvokeLinkInterface(false, rel, slot, state, memory, error);
       }
       else if (id == (kEngineInterface | 0x149))
       {
