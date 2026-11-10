@@ -12,6 +12,7 @@
 
 #include <command.h>
 #include <string.h>
+#include <stdio.h>
 #include <ctype.h>
 
 #include <dev2d.h>
@@ -243,6 +244,30 @@ static sPanelModeDesc movie_desc =
    NULL,
 }; 
 
+// A movie in the movie path, by the name the game asks for (B20.avi, a
+// mission's briefing), or the same name with a newer container: fan missions
+// made for NewDark ship theirs as .mp4 (Reflections in Red's b20.mp4), and
+// the game, finding no .avi, showed no briefing at all.
+static BOOL find_movie_file(char* filename, const char* fn)
+{
+   if (find_file_in_config_path(filename,(char*)fn,"movie_path"))
+      return TRUE;
+   static const char* const alts[] = { ".mp4", ".mkv", ".webm" };
+   const char* dot = strrchr(fn,'.');
+   const size_t base = dot ? (size_t)(dot - fn) : strlen(fn);
+   for (int i = 0; i < (int)(sizeof(alts)/sizeof(alts[0])); i++)
+   {
+      char alt[256];
+      if (base + strlen(alts[i]) + 1 > sizeof(alt))
+         break;
+      memcpy(alt,fn,base);
+      strcpy(alt+base,alts[i]);
+      if (find_file_in_config_path(filename,alt,"movie_path"))
+         return TRUE;
+   }
+   return FALSE;
+}
+
 BOOL MoviePanel(const char* fn) 
 {
    if (config_is_defined("no_movies"))
@@ -250,8 +275,11 @@ BOOL MoviePanel(const char* fn)
 
    // Look in the movie path
    char filename[256];
-   if (!find_file_in_config_path(filename,(char*)fn,"movie_path"))
+   if (!find_movie_file(filename,fn))
+   {
+      fprintf(stderr, "Movie %s: not found in the movie path (nor as .mp4, .mkv or .webm)\n", fn);
       return FALSE;
+   }
 
    sLoopModeInitParm parms[] = { { &LOOPID_MovieClient, (tLoopClientData)(const char*)filename }, { NULL } }; 
 
