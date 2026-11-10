@@ -5441,13 +5441,18 @@ void draw_frame(bool sceneDrawn)
       g_smokeSlice = reach / 64.0f;
       g_smokeReach = 0.85f * reach;
    }
+   // the haze lit throughout by every lamp: the mission's fog, or the
+   // volumetric option's "every light"
+   const bool lampHaze = fogOn || g_cfg.volumetric;
    auto volumetric = RgDrawFrameVolumetricParams{
       .sType = RG_STRUCTURE_TYPE_DRAW_FRAME_VOLUMETRIC_PARAMS,
       .pNext = &smoke,
       // RTGL1's default is on, with a bright ambient haze: costly, and it
       // greyed Thief's darkness. Optional, lit by the lamps when on.
       .enable = otherVolume || smokeOnly,
-      .maxHistoryLength = 8.0f,
+      // (lit by the lamps: a longer memory -- its light changes slowly, and
+      // one sample a cell a frame is grain)
+      .maxHistoryLength = lampHaze ? 16.0f : 8.0f,
       .useSimpleDepthBased = waterHaze,
       .volumetricFar = volFar,
       .ambientColor = volAmbient,
@@ -5467,10 +5472,17 @@ void draw_frame(bool sceneDrawn)
       .farScattering = volFarDens,
       .densityCurve = 1.0f,
       .occludeEmission = false,
-      .ditherRadius = 5.0f,   // (Raze RT's: with the depth gate)
+      // Each pixel reads the volume a random way off (Raze RT's 5 cells, for
+      // its smoke and moon shafts): in a haze lit throughout by every lamp
+      // that drew a white grain of the cells' differing light, swarming as
+      // the view moved (Malazar's Tower's fog) -- 1.5 cells there, the grid's
+      // steps still broken, the grain gone
+      .ditherRadius = lampHaze ? 1.5f : 5.0f,
       .ditherRadiusZ = 1.0f,
       .spatialBlur = 1.0f,
-      .lightNearFade = 0.3f,
+      // (and the haze's cells right by a lamp, lit by inverse square, the
+      // grain's brightest specks: faded out within a metre of it)
+      .lightNearFade = lampHaze ? 1.0f : 0.3f,
       // Raze RT's: each light's haze skips the cells behind what is seen
       // (shader 0015 runs only with the gate on), the saving that made
       // volumetric light affordable there
