@@ -156,6 +156,7 @@ struct Settings {
    float shadowCool = 0.5f;   // how cool and grey the glow is where the game has it dark (0..1)
    float windowLight = 1.0f; // lit windows' own light (0 off)
    int candidates = 12;       // lights tried per pixel and per bounce (RTGL1: no rays, ALU only)
+   int neighbours = 5;        // the lamps chosen by this many pixels round each one weighed again (ReSTIR's spatial reuse)
    int evMin = 3;             // eye adaptation's darkest exposure (EV; Blood RT 5, RTGL1 0)
    int darkAdapt = 2;         // the eyes getting used to the dark: up to this many stops brighter (0 off)
    int response = 0;          // how fast lighting changes show: 0 calm (Blood RT), 1 quick, 2 instant
@@ -266,6 +267,7 @@ void load_settings()
       else if (k == "flicker") g_cfg.flicker = std::clamp(int(value), 0, 2);
       else if (k == "smooth_models") g_cfg.smoothModels = value != 0;
       else if (k == "light_candidates") g_cfg.candidates = std::clamp(int(value), 4, 32);
+      else if (k == "light_neighbours") g_cfg.neighbours = std::clamp(int(value), 0, 8);
       else if (k == "window_light") g_cfg.windowLight = std::clamp(float(value), 0.0f, 4.0f);
       else if (k == "ev_min") g_cfg.evMin = std::clamp(int(value), 0, 7);
       else if (k == "dark_adapt") g_cfg.darkAdapt = std::clamp(int(value), 0, 3);
@@ -353,6 +355,7 @@ void save_settings()
    fprintf(f, "shadow_alert = %d\n", g_cfg.shadowAlert);
    fprintf(f, "fog_lamps = %d\n", int(g_cfg.fogLit));
    fprintf(f, "fog_quality = %d\n", g_cfg.fogQuality);
+   fprintf(f, "light_neighbours = %d\n", g_cfg.neighbours);
    fprintf(f, "reuse_models = %d\n", int(g_cfg.reuseModels));
    fclose(f);
 }
@@ -1594,6 +1597,7 @@ struct CaptureParts {
    double drawCalls = 0, fresh = 0;
    double hashes = 0;   // models' ends hashing what was drawn
    double reused = 0;   // models the game did not draw again: as they were (RenderRTObjectReuse)
+   double halfRate = 0;   // of them, far moving ones given as last frame's (every other frame)
    double nearSame = 0;  // captures taken as unchanged to within 2 mm (same_within)
    double prep[5] = {};              // RenderRTPrepMark's parts
 } g_capParts;
@@ -4415,14 +4419,14 @@ const char *kUpscaleNames[] = {"Off",
                                "MetalFX Custom"};
 
 enum UiRow {
-   kRowUpscale, kRowScale, kRowOutput, kRowDynres, kRowBounces, kRowReach, kRowLights, kRowLightFade, kRowCandidates, kRowLightCull, kRowResponse, kRowFlicker, kRowVolumetric, kRowShafts, kRowFog, kRowFogLit, kRowFogQuality, kRowSmoke, kRowPlayerBody, kRowPlayerLegs, kRowShadowAlert, kRowTestMirror, kRowBloom, kRowVsync, kRowFrameCap,
+   kRowUpscale, kRowScale, kRowOutput, kRowDynres, kRowBounces, kRowReach, kRowLights, kRowLightFade, kRowCandidates, kRowNeighbours, kRowLightCull, kRowResponse, kRowFlicker, kRowVolumetric, kRowShafts, kRowFog, kRowFogLit, kRowFogQuality, kRowSmoke, kRowPlayerBody, kRowPlayerLegs, kRowShadowAlert, kRowTestMirror, kRowBloom, kRowVsync, kRowFrameCap,
    kRowFps, kRowDetection, kRowGemScale, kRowGemMatch, kRowGemEase, kRowLight, kRowExposure, kRowDarkAdapt, kRowAmbient, kRowAmbientFollow, kRowShadowCool, kRowSkySeen, kRowSky, kRowMoon, kRowMoonDir, kRowMoonHeight, kRowSun, kRowLightSize, kRowRough, kRowSmooth, kRowSteady, kRowReuseModels, kRowFixtures, kRowFixtureLight, kRowSmallLamps, kRowLightFix, kRowGlow, kRowFlameGlow, kRowMaterials, kRowBump, kRowCrevice, kRowTexDetail, kRowParallax, kRowPolish, kRowWater, kRowUnderwater, kRowTracedSound, kRowHrtf,
    kRowDebug, kRowFreeze, kRowBackFaces, kRowReuse, kRowBlink, kRowPerf, kRowInspect, kRowSkipMission, kRowReset, kRowCount
 };
 
 const char *kRowLabels[kRowCount] = {
    "Upscaler", "Render resolution", "Output resolution", "Dynamic resolution", "Bounce light", "Light reach", "Lights traced",
-   "Lights coming into range", "Lights tried per pixel", "Lights behind walls", "Light changes", "Light flicker",
+   "Lights coming into range", "Lights tried per pixel", "  Lights shared with neighbours", "Lights behind walls", "Light changes", "Light flicker",
    "God rays (volumetric)", "  God ray strength", "Mission fog", "  Fog lit by the lamps", "  Lit fog quality", "Smoke and steam", "Garrett's shadow and reflection", "  His legs seen looking down", "  Guards notice his shadow", "  Test mirror", "Bloom", "VSync", "Frame rate limit", "FPS counter", "Light gem and guards", "  Light gem brightness", "  Light gem falloff", "  Light gem response", "Light brightness", "Darkest exposure", "  Eyes adjust to the dark", "Ambient light", "  Follows the game's light", "  Shadow colour", "Sky brightness (as seen)", "Sky light (on the level)", "Moonlight", "  Moon direction", "  Moon height", "Sunlight (Thief 2 missions)",
    "Light size (soft shadows)", "Surface roughness", "Model shading", "Model faces", "  Still models drawn once", "Torches and lamps", "Lamp and torch light", "Lamp reach", "Lights in walls", "Lamp glow", "Flame glow", "Materials", "Bumps", "Crevices", "Texture detail", "Parallax depth", "Polished reflections", "Water", "  Under water: brighter", "Traced sound (Steam Audio)", "  Headphone 3D sound (HRTF)",
    "Debug view", "Freeze scene (test)", "Back faces (test)", "Light sampling (test)", "Blink nearest light (test)", "Performance log", "Inspect centre of view", "Skip to next mission (test)", "Reset to defaults",
@@ -4468,6 +4472,10 @@ std::string row_value(int row)
    case kRowLightCull: return g_cfg.lightCull ? "Skipped" : "Traced";
    case kRowLightFade: return g_cfg.lightFade ? "Fade in" : "Appear at once";
    case kRowCandidates: snprintf(buf, sizeof(buf), "%d", g_cfg.candidates); return buf;
+   case kRowNeighbours:
+      snprintf(buf, sizeof(buf), "%d pixels round each%s", g_cfg.neighbours,
+               g_cfg.neighbours >= 8 ? " (least noise, slowest)" : g_cfg.neighbours <= 3 ? " (fastest, more noise)" : "");
+      return buf;
    case kRowResponse: return g_cfg.response == 0 ? "As Blood RT" : g_cfg.response == 2 ? "Instant (noisier)" : "Quick";
    case kRowFlicker: return g_cfg.flicker == 1 ? "As the game" : g_cfg.flicker == 2 ? "Nearly steady" : "Smoothed";
    case kRowVolumetric:
@@ -4729,6 +4737,14 @@ void change_row(int row, int dir)
    case kRowReuseModels: g_cfg.reuseModels = !g_cfg.reuseModels; break;
    case kRowLightFix: g_cfg.lightFix = !g_cfg.lightFix; g_lightFixes.clear(); break;
    case kRowLightFade: g_cfg.lightFade = !g_cfg.lightFade; break;
+   case kRowNeighbours: {
+      static const int kSteps[] = {3, 5, 8};
+      int i = 0;
+      while (i < 2 && kSteps[i] < g_cfg.neighbours)
+         ++i;
+      g_cfg.neighbours = kSteps[std::clamp(i + dir, 0, 2)];
+      break;
+   }
    case kRowCandidates: {
       static const int kSteps[] = {8, 12, 16, 24, 32};
       int i = 0;
@@ -5111,9 +5127,9 @@ void perf_frame(double t)
       }
       const CaptureParts &cp = g_capParts;
       fprintf(f, "  capture parts (ms per frame): draws %.2f (%.0f calls), models' ends %.2f, given to the path tracer: lights %.2f, world %.2f, models %.2f; "
-                 "of these, faces made steady %.2f, matched to last frame %.2f (%.0f models captured anew; %.1f taken as unchanged to within 2 mm; %.0f not drawn again, as they were)\n",
+                 "of these, faces made steady %.2f, matched to last frame %.2f (%.0f models captured anew; %.1f taken as unchanged to within 2 mm; %.0f not drawn again, as they were, %.0f of them far moving ones every other frame)\n",
               cp.draws * ms, cp.drawCalls / n, cp.ends * ms, cp.lights * ms, cp.world * ms, cp.models * ms,
-              cp.faces * ms, cp.match * ms, cp.fresh / n, cp.nearSame / n, cp.reused / n);
+              cp.faces * ms, cp.match * ms, cp.fresh / n, cp.nearSame / n, cp.reused / n, cp.halfRate / n);
       fprintf(f, "  more parts (ms per frame): inside the path tracer's library %.2f; models' ends hashing %.2f; "
                  "rt prep: world %.2f, lights found %.2f, their reach %.2f, objects' lights %.2f, models out of view %.2f\n",
               g_uploadLibrarySecs * 1000.0 / n, cp.hashes * ms, cp.prep[0] * ms, cp.prep[1] * ms, cp.prep[2] * ms,
@@ -5861,7 +5877,10 @@ void draw_frame(bool sceneDrawn)
       .indirectSamples = (g_cfg.gi == 0 || g_cfg.gi == 3) ? 0u : 1u,
       // more candidate lights per pixel (no extra rays): Thief has many small lights
       .restirInitialSamples = uint32_t(g_cfg.candidates),
-      .restirSpatialSamples = (g_reuseTest == 1 || g_reuseTest == 2) ? 0u : 8u,
+      // (8, RTGL1's: most of the GPU's direct light pass -- 8 ms at a fan
+      // mission's castle vista -- is each pixel weighing again what its
+      // neighbours chose; 5 by default, with the frame before's reuse)
+      .restirSpatialSamples = (g_reuseTest == 1 || g_reuseTest == 2) ? 0u : uint32_t(std::clamp(g_cfg.neighbours, 0, 8)),
       // in pixels: 30 at ~1150 wide (Blood RT's), wider at higher resolutions so
       // neighbours are taken from as far across the surface as there
       .restirSpatialRadius = 30.0f,   // (as Blood RT)
@@ -8016,6 +8035,22 @@ int RenderRTObjectReuse(uint32_t obj)
    if (it == g_objects.end())
       return 0;
    CachedObject &c = it->second;
+   // A model far off that moves or changes (a guard 40 m away, a chimney's
+   // smoke): given as it was every other frame, drawn and captured on the
+   // others -- each one captured, made ready and its ray-tracing structure
+   // refitted every frame, the castle's guards, flags and smoke. A frame's
+   // lag 25 m off is not seen. (Drawn the frame before, so never two in a row.)
+   if (g_cfg.reuseModels && g_cfg.steadyFaces && c.whole && !c.prims.empty() && c.frame + 1 == g_frameNumber &&
+       ((g_frameNumber + obj) & 1u) != 0) {
+      const RgFloat3D cam = to_rt(g_camera.pos);
+      const float dx = c.center[0] - cam.data[0], dy = c.center[1] - cam.data[1], dz = c.center[2] - cam.data[2];
+      if (dx * dx + dy * dy + dz * dz > 25.0f * 25.0f) {
+         c.frame = g_frameNumber;
+         g_capParts.halfRate += 1;
+         g_capParts.reused += 1;
+         return 1;
+      }
+   }
    if (!c.settled || !c.whole || !c.posed || c.unchanged < 12 || c.prims.empty())
       return 0;
    // (one still a long while -- 60 captures -- every eighth frame)
