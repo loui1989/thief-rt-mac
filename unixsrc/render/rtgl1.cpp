@@ -5079,11 +5079,13 @@ void update_dark_adapt(bool sceneDrawn)
    // exposure allowed, so a view darker than that read as just that dark,
    // however black (the "Eyes:" log: the view's average pinned at 4.0, the
    // floor, standing in the pitch black). Seven tenths of the view under
-   // 0.08 (the light gem's scale: a hidden thief is under about 0.10) for
-   // 1.5 seconds: the eyes get used to the dark, at up to 0.6 stops a
-   // second, the darker the quicker; seven tenths over 0.16 (a lit corner
-   // in sight, a lamp's pool), back, at a stop a second. A small shadow in a
-   // lit room: the room around it is in view, lit.
+   // 0.14 (the light gem's scale: a hidden thief is under about 0.10) for a
+   // second: the eyes get used to the dark, at up to 0.8 stops a second,
+   // the darker the quicker; seven tenths over 0.24 (a lit corner in sight,
+   // a lamp's pool), back, at a stop a second. A small shadow in a lit
+   // room: the room around it is in view, lit. (Under 0.08 for 1.5 s it
+   // was: most dim views, 0.05 to 0.2 -- nearly too dark to see in, the gem
+   // not quite black -- never set it going.)
    static float s_view = 1.0f;   // the 70th of the view's lights, lowest first
    static uint32_t s_viewAt = 0;
    if (g_frameNumber - s_viewAt >= 8 || s_viewAt > g_frameNumber) {
@@ -5094,17 +5096,17 @@ void update_dark_adapt(bool sceneDrawn)
    }
    {
       static float s_darkFor = 0.0f;
-      s_darkFor = s_view < 0.08f ? s_darkFor + dt : 0.0f;
+      s_darkFor = s_view < 0.14f ? s_darkFor + dt : 0.0f;
       float rate = 0.0f;   // stops a second
-      if (s_darkFor > 1.5f)
-         rate = 0.6f * std::clamp(0.4f + (0.08f - s_view) / 0.08f, 0.0f, 1.0f);
-      else if (s_view > 0.16f)
+      if (s_darkFor > 1.0f)
+         rate = 0.8f * std::clamp(0.4f + (0.14f - s_view) / 0.14f, 0.0f, 1.0f);
+      else if (s_view > 0.24f)
          rate = -1.0f;
       g_darkAdapted = std::clamp(g_darkAdapted + rate * dt, 0.0f, most);
       static uint32_t s_logged = 0;
       if (g_frameNumber - s_logged >= 600 || s_logged > g_frameNumber) {
          s_logged = g_frameNumber;
-         fprintf(stderr, "Eyes: the view lit %.2f (seven tenths of it under that; dark under 0.08, lit over 0.16); used to the dark by %.1f stops (up to %.0f)\n",
+         fprintf(stderr, "Eyes: the view lit %.2f (seven tenths of it under that; dark under 0.14, lit over 0.24); used to the dark by %.1f stops (up to %.0f)\n",
                  s_view, g_darkAdapted, most);
       }
    }
