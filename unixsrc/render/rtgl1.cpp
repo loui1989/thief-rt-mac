@@ -166,6 +166,7 @@ struct Settings {
    float heatHaze = 1.0f;     // the air over torches and fires shimmers (0 off)
    float smoke = 1.0f;        // smoke and steam particles as volumetric smoke, at this density (0: flat sprites)
    int playerBody = 1;        // Garrett's own model: his shadow, and him in mirrors and water (unseen by the camera)
+   bool playerLegs = true;    // ...his legs and feet seen by the camera too, looking down
    int shadowAlert = 0;       // the guards notice his shadow (g_PlayerShadowAlert, objlight.c)
    int testMirror = 0;        // inspecting a wall makes its texture a mirror (to see Garrett whole)
    bool fogLit = true;        // the mission's fog lit by the lamps in it, or flat as the game's (smooth, no glow)
@@ -282,6 +283,7 @@ void load_settings()
       else if (k == "volumetric_smoke") g_cfg.smoke = std::clamp(value, 0.0f, 4.0f);
       // (the test, the double shown ahead of you, is never kept: on)
       else if (k == "player_body") g_cfg.playerBody = std::clamp(int(value), 0, 1);
+      else if (k == "player_legs") g_cfg.playerLegs = value != 0;
       else if (k == "shadow_alert") g_cfg.shadowAlert = std::clamp(int(value), 0, 1);
       else if (k == "light_soft") g_cfg.lightSoft = std::clamp(value, 0.0f, 4.0f);
       else if (k == "light_fix") g_cfg.lightFix = value != 0;
@@ -346,6 +348,7 @@ void save_settings()
    fprintf(f, "gem_ease_s = %.2f\n", g_cfg.gemEase);
    fprintf(f, "volumetric_smoke = %.2f\n", g_cfg.smoke);
    fprintf(f, "player_body = %d\n", g_cfg.playerBody == 2 ? 1 : g_cfg.playerBody);
+   fprintf(f, "player_legs = %d\n", int(g_cfg.playerLegs));
    fprintf(f, "shadow_alert = %d\n", g_cfg.shadowAlert);
    fprintf(f, "fog_lamps = %d\n", int(g_cfg.fogLit));
    fprintf(f, "fog_quality = %d\n", g_cfg.fogQuality);
@@ -2938,6 +2941,33 @@ void upload_objects()
          for (size_t i = 0; i < c.prims.size(); ++i)
             upload_captured(ids[i], c.prims[i], c.passLight, same, glowScale,
                             i < lampGlow.size() ? lampGlow[i] : 0.0f);
+         if (g_uploadViewer && obj == g_viewerObj && g_cfg.playerLegs) {
+            // His legs and feet, seen as he looks down (a shadow with no one
+            // standing in it looked wrong): the faces below his waist given
+            // again, seen by the camera only (as his arm is: the whole of him,
+            // unseen, still casts his shadow and is him in mirrors). The
+            // waist: 85 cm over his soles, and at least 55 cm under his eyes
+            // (crouched, his chest is lower).
+            const RgFloat3D cam = to_rt(g_camera.pos);
+            const float cut = std::min(c.bmin[2] + 0.85f, cam.data[2] - 0.55f);
+            g_uploadViewer = false;
+            for (size_t i = 0; i < c.prims.size(); ++i) {
+               const CapturedPrim &p = c.prims[i];
+               if (p.sprite)
+                  continue;
+               CapturedPrim lo = p;
+               lo.verts.clear();
+               for (size_t v = 0; v + 2 < p.verts.size(); v += 3)
+                  if (p.verts[v].position[2] + p.verts[v + 1].position[2] + p.verts[v + 2].position[2] < 3.0f * cut)
+                     lo.verts.insert(lo.verts.end(), p.verts.begin() + v, p.verts.begin() + v + 3);
+               if (lo.verts.empty())
+                  continue;
+               lo.flags &= ~RgMeshPrimitiveFlags(RG_MESH_PRIMITIVE_SHADOW_ONLY);
+               lo.firstPerson = true;
+               upload_captured(ids[i] ^ 0x4000000000000000ull, lo, false, false, glowScale);
+            }
+            g_uploadViewer = true;
+         }
          c.passGiven = c.passLight;
          c.splitGiven = false;
       }
@@ -4204,7 +4234,7 @@ const char *kUpscaleNames[] = {"Off",
                                "MetalFX Custom"};
 
 enum UiRow {
-   kRowUpscale, kRowScale, kRowOutput, kRowDynres, kRowBounces, kRowReach, kRowLights, kRowLightFade, kRowCandidates, kRowLightCull, kRowResponse, kRowFlicker, kRowVolumetric, kRowShafts, kRowFog, kRowFogLit, kRowFogQuality, kRowSmoke, kRowPlayerBody, kRowShadowAlert, kRowTestMirror, kRowBloom, kRowVsync, kRowFrameCap,
+   kRowUpscale, kRowScale, kRowOutput, kRowDynres, kRowBounces, kRowReach, kRowLights, kRowLightFade, kRowCandidates, kRowLightCull, kRowResponse, kRowFlicker, kRowVolumetric, kRowShafts, kRowFog, kRowFogLit, kRowFogQuality, kRowSmoke, kRowPlayerBody, kRowPlayerLegs, kRowShadowAlert, kRowTestMirror, kRowBloom, kRowVsync, kRowFrameCap,
    kRowFps, kRowDetection, kRowGemScale, kRowGemMatch, kRowGemEase, kRowLight, kRowExposure, kRowDarkAdapt, kRowAmbient, kRowAmbientFollow, kRowShadowCool, kRowSkySeen, kRowSky, kRowMoon, kRowMoonDir, kRowMoonHeight, kRowSun, kRowLightSize, kRowRough, kRowSmooth, kRowSteady, kRowReuseModels, kRowFixtures, kRowFixtureLight, kRowSmallLamps, kRowLightFix, kRowGlow, kRowFlameGlow, kRowMaterials, kRowBump, kRowCrevice, kRowTexDetail, kRowParallax, kRowPolish, kRowWater, kRowUnderwater, kRowTracedSound, kRowHrtf,
    kRowDebug, kRowFreeze, kRowBackFaces, kRowReuse, kRowBlink, kRowPerf, kRowInspect, kRowSkipMission, kRowReset, kRowCount
 };
@@ -4212,7 +4242,7 @@ enum UiRow {
 const char *kRowLabels[kRowCount] = {
    "Upscaler", "Render resolution", "Output resolution", "Dynamic resolution", "Bounce light", "Light reach", "Lights traced",
    "Lights coming into range", "Lights tried per pixel", "Lights behind walls", "Light changes", "Light flicker",
-   "God rays (volumetric)", "  God ray strength", "Mission fog", "  Fog lit by the lamps", "  Lit fog quality", "Smoke and steam", "Garrett's shadow and reflection", "  Guards notice his shadow", "  Test mirror", "Bloom", "VSync", "Frame rate limit", "FPS counter", "Light gem and guards", "  Light gem brightness", "  Light gem falloff", "  Light gem response", "Light brightness", "Darkest exposure", "  Eyes adjust to the dark", "Ambient light", "  Follows the game's light", "  Shadow colour", "Sky brightness (as seen)", "Sky light (on the level)", "Moonlight", "  Moon direction", "  Moon height", "Sunlight (Thief 2 missions)",
+   "God rays (volumetric)", "  God ray strength", "Mission fog", "  Fog lit by the lamps", "  Lit fog quality", "Smoke and steam", "Garrett's shadow and reflection", "  His legs seen looking down", "  Guards notice his shadow", "  Test mirror", "Bloom", "VSync", "Frame rate limit", "FPS counter", "Light gem and guards", "  Light gem brightness", "  Light gem falloff", "  Light gem response", "Light brightness", "Darkest exposure", "  Eyes adjust to the dark", "Ambient light", "  Follows the game's light", "  Shadow colour", "Sky brightness (as seen)", "Sky light (on the level)", "Moonlight", "  Moon direction", "  Moon height", "Sunlight (Thief 2 missions)",
    "Light size (soft shadows)", "Surface roughness", "Model shading", "Model faces", "  Still models drawn once", "Torches and lamps", "Lamp and torch light", "Lamp reach", "Lights in walls", "Lamp glow", "Flame glow", "Materials", "Bumps", "Crevices", "Texture detail", "Parallax depth", "Polished reflections", "Water", "  Under water: brighter", "Traced sound (Steam Audio)", "  Headphone 3D sound (HRTF)",
    "Debug view", "Freeze scene (test)", "Back faces (test)", "Light sampling (test)", "Blink nearest light (test)", "Performance log", "Inspect centre of view", "Skip to next mission (test)", "Reset to defaults",
 };
@@ -4293,6 +4323,9 @@ std::string row_value(int row)
       return buf;
    case kRowPlayerBody:
       return g_cfg.playerBody == 2 ? "Shown ahead of you (test)" : g_cfg.playerBody ? "On" : "Off (as the game)";
+   case kRowPlayerLegs:
+      if (g_cfg.playerBody != 1) return "Off (needs his shadow on)";
+      return g_cfg.playerLegs ? "On (from the waist down)" : "Off (shadow only)";
    case kRowShadowAlert:
       return g_cfg.shadowAlert ? "On (suspicious; searching when near)" : "Off (as the game)";
    case kRowTestMirror:
@@ -4552,6 +4585,7 @@ void change_row(int row, int dir)
    case kRowFogLit: g_cfg.fogLit = !g_cfg.fogLit; break;
    case kRowFogQuality: g_cfg.fogQuality = (g_cfg.fogQuality - 1 + dir + 3) % 3 + 1; break;
    case kRowPlayerBody: g_cfg.playerBody = (g_cfg.playerBody + dir + 3) % 3; break;
+   case kRowPlayerLegs: g_cfg.playerLegs = !g_cfg.playerLegs; break;
    case kRowShadowAlert:
       g_cfg.shadowAlert = !g_cfg.shadowAlert;
       g_PlayerShadowAlert = g_cfg.shadowAlert;
