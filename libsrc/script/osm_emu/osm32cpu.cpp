@@ -2779,6 +2779,79 @@ bool cCpu::Step(std::string *error)
             m_state.reg[kEax] = value;
             return true;
          }
+         if (second == 0xba || second == 0xa3 || second == 0xab || second == 0xb3 || second == 0xbb)
+         {
+            // BT, BTS, BTR, BTC: r/m32 by an immediate (0F BA /4-/7, a newer
+            // Visual C++ runtime's test of what the processor has) or by a
+            // register (a bit string from memory: the register's offset,
+            // signed, past the dword at the operand)
+            uint8_t modrm;
+            sDecodedRM operand;
+            unsigned regField;
+            if (!Fetch8(&modrm, error) ||
+                !DecodeRM(modrm, &operand, &regField, error))
+               return false;
+            unsigned operation;
+            uint32_t bit;
+            if (second == 0xba)
+            {
+               uint8_t immediate;
+               if (!Fetch8(&immediate, error)) return false;
+               if (regField < 4)
+                  return FailOpcode(error, "unsupported IA-32 0F BA form", instructionAddress, regField);
+               operation = regField - 4;
+               bit = immediate & 31;
+            }
+            else
+            {
+               operation = second == 0xa3 ? 0 : second == 0xab ? 1 : second == 0xb3 ? 2 : 3;
+               const int32_t offset = static_cast<int32_t>(m_state.reg[regField]);
+               if (operand.isRegister)
+                  bit = static_cast<uint32_t>(offset) & 31;
+               else
+               {
+                  operand.address += static_cast<uint32_t>((offset >> 5) * 4);
+                  bit = static_cast<uint32_t>(offset) & 31;
+               }
+            }
+            uint32_t value;
+            if (!ReadRM32(operand, &value, error)) return false;
+            const uint32_t mask = 1u << bit;
+            m_state.eflags = (m_state.eflags & ~kFlagCarry) | ((value & mask) ? kFlagCarry : 0);
+            if (operation == 0)
+               return true;
+            const uint32_t result = operation == 1 ? (value | mask) : operation == 2 ? (value & ~mask) : (value ^ mask);
+            return WriteRM32(operand, result, error);
+         }
+         if (second == 0xbc || second == 0xbd)
+         {
+            // BSF, BSR: the lowest, the highest bit set (none: ZF, the
+            // destination left)
+            uint8_t modrm;
+            sDecodedRM operand;
+            unsigned regField;
+            uint32_t value;
+            if (!Fetch8(&modrm, error) ||
+                !DecodeRM(modrm, &operand, &regField, error) ||
+                !ReadRM32(operand, &value, error))
+               return false;
+            if (!value)
+            {
+               m_state.eflags |= kFlagZero;
+               return true;
+            }
+            m_state.eflags &= ~kFlagZero;
+            unsigned index = 0;
+            if (second == 0xbc)
+               while (!(value & (1u << index))) ++index;
+            else
+            {
+               index = 31;
+               while (!(value & (1u << index))) --index;
+            }
+            m_state.reg[regField] = index;
+            return true;
+         }
          if (second >= 0x80 && second <= 0x8f)
          {
             uint32_t displacement;

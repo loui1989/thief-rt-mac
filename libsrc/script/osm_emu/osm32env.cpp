@@ -31,6 +31,7 @@ const uint32_t kScriptManVtable = kProxyBase + 0x200;
 const uint32_t kAllocator = kProxyBase + 0x300;
 const uint32_t kAllocatorVtable = kProxyBase + 0x400;
 const uint32_t kCommandLine = kProxyBase + 0x800;
+const uint32_t kCommandLineW = kProxyBase + 0x820;
 const uint32_t kEnvironment = kProxyBase + 0x840;
 const uint32_t kImportDataBase = kProxyBase + 0x900;
 const uint32_t kThreadEnvironmentBlock = kProxyBase + 0xa00;
@@ -317,6 +318,8 @@ bool cEnvironment::Prepare(cImage *image, cMemory *memory,
    const char commandLine[] = "darkengine";
    memcpy(proxies + (kCommandLine - kProxyBase), commandLine,
           sizeof(commandLine));
+   for (size_t i = 0; i < sizeof(commandLine); ++i)
+      proxies[(kCommandLineW - kProxyBase) + i * 2] = static_cast<uint8_t>(commandLine[i]);
    // The VC9 DLL startup lock reads fs:[0x18] for the TEB and then uses the
    // stack-base field at TEB+4 as a stable per-thread identity.
    Write32(proxies + (kThreadEnvironmentBlock - kProxyBase) + 0x18,
@@ -1472,8 +1475,12 @@ bool cEnvironment::InvokeImport(const sImport &item, sCpuState *state,
       return ReturnStdcall(state, memory, 0, 0, error);
    if (IsKernelImport(item, "IsProcessorFeaturePresent"))
       return ReturnStdcall(state, memory, 4, 0, error);
+   // (LoadLibraryEx: a newer NVScript's runtime -- Reflections in Red's --
+   // asks for the system's API sets by it, with fallbacks when they are not
+   // there; it was not here, and the module did not load at all)
+   const bool loadEx = IsKernelImport(item, "LoadLibraryExW") || IsKernelImport(item, "LoadLibraryExA");
    if (IsKernelImport(item, "GetModuleHandleW") ||
-       IsKernelImport(item, "LoadLibraryA") || IsKernelImport(item, "LoadLibraryW"))
+       IsKernelImport(item, "LoadLibraryA") || IsKernelImport(item, "LoadLibraryW") || loadEx)
    {
       // KERNEL32 itself is there (the runtime waits for it, then gives up
       // and exits); none other is. Its procedures: none found -- the
@@ -1506,7 +1513,9 @@ bool cEnvironment::InvokeImport(const sImport &item, sCpuState *state,
       uint32_t handle = name ? 0 : m_moduleHandle;
       if (EqualAsciiNoCase(text, "kernel32.dll") || EqualAsciiNoCase(text, "kernel32"))
          handle = kKernel32Handle;
-      return ReturnStdcall(state, memory, 4, handle, error);
+      if (!handle)
+         m_lastError = 126;   // ERROR_MOD_NOT_FOUND
+      return ReturnStdcall(state, memory, loadEx ? 12 : 4, handle, error);
    }
    if (IsKernelImport(item, "GetProcAddress"))
       return ReturnStdcall(state, memory, 8, 0, error);
@@ -1579,9 +1588,13 @@ bool cEnvironment::InvokeImport(const sImport &item, sCpuState *state,
       }
       return ReturnStdcall(state, memory, argBytes, 1, error);
    }
-   if (IsKernelImport(item, "LCMapStringW") || IsKernelImport(item, "LCMapStringA"))
+   // (LCMapStringEx: a locale name where the LCID was, the same five after
+   // it, and three more)
+   if (IsKernelImport(item, "LCMapStringW") || IsKernelImport(item, "LCMapStringA") ||
+       IsKernelImport(item, "LCMapStringEx"))
    {
-      const bool wide = item.name == "LCMapStringW";
+      const bool wide = item.name == "LCMapStringW" || item.name == "LCMapStringEx";
+      const unsigned argumentBytes = item.name == "LCMapStringEx" ? 36 : 24;
       const uint32_t unit = wide ? 2 : 1;
       uint32_t flags, source, count, destination, capacity;
       if (!ReadStackArgument(*state, *memory, 1, &flags, error) ||
@@ -1613,14 +1626,14 @@ bool cEnvironment::InvokeImport(const sImport &item, sCpuState *state,
          if (text.size() > 0x100000) break;
       }
       if (!capacity)
-         return ReturnStdcall(state, memory, 24, static_cast<uint32_t>(text.size()), error);
+         return ReturnStdcall(state, memory, argumentBytes, static_cast<uint32_t>(text.size()), error);
       if (capacity < text.size())
-         return ReturnStdcall(state, memory, 24, 0, error);
+         return ReturnStdcall(state, memory, argumentBytes, 0, error);
       for (size_t i = 0; i < text.size(); ++i)
          if (!(wide ? memory->Write16(destination + i * unit, static_cast<uint16_t>(text[i]), error)
                     : memory->Write8(destination + i, static_cast<uint8_t>(text[i]), error)))
             return false;
-      return ReturnStdcall(state, memory, 24, static_cast<uint32_t>(text.size()), error);
+      return ReturnStdcall(state, memory, argumentBytes, static_cast<uint32_t>(text.size()), error);
    }
    if (IsKernelImport(item, "GetLocaleInfoA") || IsKernelImport(item, "GetLocaleInfoW"))
       return ReturnStdcall(state, memory, 16, 0, error);
@@ -2078,6 +2091,100 @@ bool cEnvironment::InvokeImport(const sImport &item, sCpuState *state,
       }
       DebugOutput(text);
       return ReturnStdcall(state, memory, 4, 0, error);
+   }
+
+   // A newer Visual C++ runtime's (NVScript's later builds: Reflections in
+   // Red's) -- one thread here, so its locks and its waits are nothing
+   if (IsKernelImport(item, "InitializeCriticalSectionEx"))
+      return ReturnStdcall(state, memory, 12, 1, error);
+   if (IsKernelImport(item, "EncodePointer") || IsKernelImport(item, "DecodePointer"))
+   {
+      uint32_t pointer;
+      if (!ReadStackArgument(*state, *memory, 0, &pointer, error)) return false;
+      return ReturnStdcall(state, memory, 4, pointer, error);
+   }
+   if (IsKernelImport(item, "AcquireSRWLockExclusive") || IsKernelImport(item, "ReleaseSRWLockExclusive") ||
+       IsKernelImport(item, "WakeAllConditionVariable") || IsKernelImport(item, "FreeLibrary") ||
+       IsKernelImport(item, "FindClose"))
+      return ReturnStdcall(state, memory, 4, 1, error);
+   if (IsKernelImport(item, "SleepConditionVariableSRW"))
+      return ReturnStdcall(state, memory, 16, 1, error);
+   if (IsKernelImport(item, "GetStartupInfoW"))
+   {
+      // (STARTUPINFOW: 68 bytes, its size first, nothing set)
+      uint32_t info;
+      if (!ReadStackArgument(*state, *memory, 0, &info, error)) return false;
+      for (uint32_t i = 0; i < 68; ++i)
+         if (!memory->Write8(info + i, 0, error)) return false;
+      if (!memory->Write32(info, 68, error)) return false;
+      return ReturnStdcall(state, memory, 4, 0, error);
+   }
+   if (IsKernelImport(item, "InitializeSListHead"))
+   {
+      uint32_t head;
+      if (!ReadStackArgument(*state, *memory, 0, &head, error)) return false;
+      if (!memory->Write32(head, 0, error) || !memory->Write32(head + 4, 0, error)) return false;
+      return ReturnStdcall(state, memory, 4, 0, error);
+   }
+   if (IsKernelImport(item, "InterlockedFlushSList"))
+   {
+      // (the list's first entry, the list left empty)
+      uint32_t head, first;
+      if (!ReadStackArgument(*state, *memory, 0, &head, error) ||
+          !memory->Read32(head, &first, error) ||
+          !memory->Write32(head, 0, error) || !memory->Write32(head + 4, 0, error)) return false;
+      return ReturnStdcall(state, memory, 4, first, error);
+   }
+   if (IsKernelImport(item, "GetModuleHandleExW"))
+   {
+      // (the module asking: itself, whatever it named)
+      uint32_t output;
+      if (!ReadStackArgument(*state, *memory, 2, &output, error)) return false;
+      if (output && !memory->Write32(output, m_moduleHandle, error)) return false;
+      return ReturnStdcall(state, memory, 12, 1, error);
+   }
+   if (IsKernelImport(item, "GetModuleFileNameW"))
+   {
+      static const char path[] = "guest.osm";
+      uint32_t output, capacity;
+      if (!ReadStackArgument(*state, *memory, 1, &output, error) ||
+          !ReadStackArgument(*state, *memory, 2, &capacity, error)) return false;
+      const uint32_t length = static_cast<uint32_t>(sizeof(path) - 1);
+      const uint32_t written = capacity <= length ? capacity : length;
+      for (uint32_t i = 0; i < written; ++i)
+         if (!memory->Write16(output + i * 2, static_cast<uint16_t>(path[i]), error)) return false;
+      if (capacity > length && !memory->Write16(output + length * 2, 0, error))
+         return false;
+      return ReturnStdcall(state, memory, 12, written, error);
+   }
+   if (IsKernelImport(item, "GetCommandLineW"))
+      return ReturnStdcall(state, memory, 0, kCommandLineW, error);
+   if (IsKernelImport(item, "FindFirstFileExW"))
+   {
+      m_lastError = 2;   // ERROR_FILE_NOT_FOUND
+      return ReturnStdcall(state, memory, 24, 0xffffffffu, error);
+   }
+   if (IsKernelImport(item, "FindNextFileW"))
+   {
+      m_lastError = 18;   // ERROR_NO_MORE_FILES
+      return ReturnStdcall(state, memory, 8, 0, error);
+   }
+   if (IsKernelImport(item, "SetFilePointerEx"))
+   {
+      // (handle, distance as two words, where to put the new place, how)
+      uint32_t output;
+      if (!ReadStackArgument(*state, *memory, 3, &output, error)) return false;
+      if (output && (!memory->Write32(output, 0, error) || !memory->Write32(output + 4, 0, error))) return false;
+      return ReturnStdcall(state, memory, 20, 1, error);
+   }
+   if (IsKernelImport(item, "ExitProcess") || IsKernelImport(item, "TerminateProcess") ||
+       IsKernelImport(item, "RaiseException") || IsKernelImport(item, "RtlUnwind"))
+   {
+      uint32_t code = 0;
+      ReadStackArgument(*state, *memory, item.name == "TerminateProcess" ? 1 : 0, &code, 0);
+      char detail[96];
+      snprintf(detail, sizeof(detail), "guest called %s (%#x)", item.name.c_str(), code);
+      return Fail(error, detail);
    }
 
    std::string name = item.module + "!";

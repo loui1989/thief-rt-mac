@@ -5575,7 +5575,10 @@ static BOOL AIPathCountIsValid(const char *name, unsigned count, unsigned limit)
 {
    if (count <= limit)
       return TRUE;
-   Warning(("AIPATH %s count %u exceeds codec limit %u\n", name, count, limit));
+   // (in the log: the AIs of a mission whose pathfinding is refused do not
+   // run at all -- they stand in their models' bind pose)
+   mprintf("AIPATH %s count %u exceeds codec limit %u: the pathfinding database is not loaded, AI will not run\n",
+           name, count, limit);
    return FALSE;
 }
 
@@ -5747,6 +5750,12 @@ void AIPathFindRead(ITagFile * pTagFile)
          ? DARK_LIMIT_AIPATH_34_INDEX
          : (dark1Format ? DARK_LIMIT_AIPATH_28_INDEX
                        : DARK_LIMIT_AIPATH_33_INDEX);
+      // 3.4's vertices and links are 32-bit on disk and in memory, their
+      // arrays sized as read: only the cells (and planes) have fixed-size
+      // tables (MAX_CELLS). A big map's cell-vertex links passed the cells'
+      // limit -- Reflections in Red's 151907 of 131070 -- and the whole
+      // database was refused: no AI ran, every guard stood in a T-pose.
+      const unsigned linkLimit = wideFormat ? 0xfffffeu : codecLimit;
       if (!AIPathCountIsValid("cell", g_AIPathDB.m_nCells, codecLimit))
       {
          g_fAIPathFindInited = FALSE;
@@ -5770,7 +5779,7 @@ void AIPathFindRead(ITagFile * pTagFile)
       pTagFile->Move(ArrToMoveParm(g_AIPathDB.m_Planes), sizeof(sAIPathCellPlane) * (g_AIPathDB.m_nPlanes+1));
 
       pTagFile->Move((char*)&g_AIPathDB.m_nVertices, sizeof(tAIPathVertexID));
-      if (!AIPathCountIsValid("vertex", g_AIPathDB.m_nVertices, codecLimit))
+      if (!AIPathCountIsValid("vertex", g_AIPathDB.m_nVertices, linkLimit))
       {
          g_fAIPathFindInited = FALSE;
          LGALLOC_POP_CREDIT();
@@ -5781,7 +5790,7 @@ void AIPathFindRead(ITagFile * pTagFile)
       pTagFile->Move(ArrToMoveParm(g_AIPathDB.m_Vertices), sizeof(sAIPathVertex) * (g_AIPathDB.m_nVertices+1));
 
       pTagFile->Move((char*)&g_AIPathDB.m_nLinks, sizeof(tAIPathCell2CellLinkID));
-      if (!AIPathCountIsValid("cell link", g_AIPathDB.m_nLinks, codecLimit))
+      if (!AIPathCountIsValid("cell link", g_AIPathDB.m_nLinks, linkLimit))
       {
          g_fAIPathFindInited = FALSE;
          LGALLOC_POP_CREDIT();
@@ -5794,7 +5803,7 @@ void AIPathFindRead(ITagFile * pTagFile)
                     g_AIPathDB.m_nLinks + 1);
 
       pTagFile->Move((char*)&g_AIPathDB.m_nCellVertices, sizeof(tAIPathCell2VertexLinkID));
-      if (!AIPathCountIsValid("cell vertex link", g_AIPathDB.m_nCellVertices, codecLimit))
+      if (!AIPathCountIsValid("cell vertex link", g_AIPathDB.m_nCellVertices, linkLimit))
       {
          g_fAIPathFindInited = FALSE;
          LGALLOC_POP_CREDIT();
