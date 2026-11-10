@@ -1525,7 +1525,7 @@ static void PlayerBodyUpdate(ulong dt)
    {
       const float butt = bp->loc.vec.z - mn.z;
       if (butt > 1.0f && butt < 6.0f)
-         g_BodyButt += (butt - g_BodyButt) * 0.1f;
+         g_BodyButt += (butt - g_BodyButt) * 0.5f;   // (following its stride's rise and fall)
    }
    // (held -- a pose, the bow drawn -- its height over his feet as it was
    // when it stopped, carried up and down with him: the jump, the stairs)
@@ -1553,7 +1553,10 @@ static void PlayerBodyUpdate(ulong dt)
       at.x += cosf(a) * 7.0f;
       at.y += sinf(a) * 7.0f;
    }
-   CreatureFreeHeight((s_sinceAir < 30 || held) ? g_BodyObj : OBJ_NULL);
+   // (its height always this: kept at its motion's own, as the creature
+   // system keeps a sitter's against small moves, a running stride rose a
+   // foot over each cycle and dropped back as the next began -- a pop)
+   CreatureFreeHeight(g_BodyObj);
    ObjPosUpdate(g_BodyObj, &at, &fac);
    CreatureFreeHeight(OBJ_NULL);
 
