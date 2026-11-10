@@ -1587,6 +1587,13 @@ std::unordered_map<uint32_t, uint32_t> g_emptyOut;
 // and what he holds that the double's model has not (his blackjack)
 uint32_t g_viewerItem = 0, g_viewerItemFrame = 0;
 bool g_uploadViewer = false;
+// A big model kept out of view (a building, a tower -- the game did not draw
+// it: none of its cells is in view) given unseen by the camera, as Garrett's
+// own body is: its shadow and its reflection stay. Its walls run through the
+// level's own: drawn whole, Black Parade's TowerBig stood in the middle of
+// the library, from outside, whenever it was kept for its shadow.
+bool g_uploadUnseen = false;
+constexpr float kUnseenExt = 6.0f;   // metres across, and more
 
 bool upload(uint64_t id, const RgMeshPrimitiveInfo &prim, bool firstPerson = false)
 {
@@ -1594,7 +1601,8 @@ bool upload(uint64_t id, const RgMeshPrimitiveInfo &prim, bool firstPerson = fal
       .sType = RG_STRUCTURE_TYPE_MESH_INFO,
       .pNext = nullptr,
       .flags = firstPerson      ? RgMeshInfoFlags(RG_MESH_FIRST_PERSON)
-               : g_uploadViewer ? RgMeshInfoFlags(RG_MESH_FIRST_PERSON_VIEWER)
+               : (g_uploadViewer || (g_uploadUnseen && !(prim.flags & RG_MESH_PRIMITIVE_SHADOW_ONLY)))
+                  ? RgMeshInfoFlags(RG_MESH_FIRST_PERSON_VIEWER)
                                 : 0u,
       .uniqueObjectID = id,
       .pMeshName = nullptr,
@@ -1696,6 +1704,7 @@ struct CachedObject {
    float highlightGiven = 0.0f;   // the game's highlight on it last given (in reach and usable)
    bool settled = false;     // prims made steady and given normals for hash
    bool keptOut = false;     // given out of view last frame
+   bool unseenGiven = false; // last given unseen by the camera (see g_uploadUnseen)
    uint32_t givenFrame = 0;  // last given to the path tracer
    size_t givenTris = 0;     // how many triangles it had when last given
    // each texture's look as a face turned toward the camera (flags, glow,
@@ -2704,9 +2713,17 @@ void upload_objects()
             d *= 0.6f;
          if (c.keptOut)
             d *= 0.85f;
+         // and a big one ahead of small ones: a tree's, a statue's, a cart's
+         // shadow falls across what is seen, a bottle's or a cobweb's
+         // hardly (Reflections in Red's outdoors: its many mushroom clumps
+         // and stumps took the budget, and a tree 17 m off went from the
+         // scene as you looked down, its shadow on the grass with it)
+         d /= std::clamp(ext * 0.5f, 0.5f, 3.0f);
          cands.push_back({d, e.first, tris});
       }
-      constexpr size_t kOutOfViewTris = 30000, kOutOfViewModels = 250;
+      // (a kept model unchanged costs the graphics card nothing a frame now --
+      // its BLAS kept as it was, RTGL1 0030 -- only its share of the scene)
+      constexpr size_t kOutOfViewTris = 40000, kOutOfViewModels = 300;
       size_t total = 0;
       for (const Cand &k : cands)
          total += k.tris;
@@ -2724,6 +2741,7 @@ void upload_objects()
       const uint32_t obj = it->first;
       CachedObject &c = it->second;
       bool draw = c.frame == g_frameNumber;
+      bool unseen = false;
       if (!draw) {
          float pose[6];
          const RgFloat3D cam = to_rt(g_camera.pos);
@@ -2759,9 +2777,10 @@ void upload_objects()
          if (overBudget.count(obj) ||
              dx * dx + dy * dy + dz * dz > std::min(keepAt, kKeepDistance) * std::min(keepAt, kKeepDistance)) {
             if (c.givenFrame + 1 == g_frameNumber && dx * dx + dy * dy + dz * dz < 20.0f * 20.0f)
-               log_model_change(obj, "leaves the scene: not drawn by the game for %u frames, %.1f m away (kept to %.1f m)",
+               log_model_change(obj, "leaves the scene: not drawn by the game for %u frames, %.1f m away (kept to %.1f m%s)",
                                 g_frameNumber - c.frame, std::sqrt(dx * dx + dy * dy + dz * dz),
-                                std::min(keepAt, kKeepDistance));
+                                std::min(keepAt, kKeepDistance),
+                                overBudget.count(obj) ? "; over the budget for models out of view" : "");
             c.keptOut = false;
             ++it;   // remembered, but too far away to shadow anything seen
             continue;
@@ -2794,6 +2813,7 @@ void upload_objects()
          }
          draw = true;
          ++g_cachedDrawn;
+         unseen = ext >= kUnseenExt;
       }
       const bool givenLast = c.givenFrame + 1 == g_frameNumber;
       c.givenFrame = g_frameNumber;
@@ -2860,6 +2880,7 @@ void upload_objects()
       for (const CapturedPrim &p : c.prims)
          g_perfTris += p.verts.size() / 3;
       const bool wasFresh = c.fresh;
+      g_uploadUnseen = unseen;
       if (c.fresh) {
          g_capParts.fresh += 1;
          const auto tf = std::chrono::steady_clock::now();
@@ -2986,7 +3007,7 @@ void upload_objects()
          }
       }
       if (c.passLight && c.flameInside && g_cfg.torchShadows) {
-         const bool splitKept = c.splitValid && !wasFresh && c.splitGiven;
+         const bool splitKept = c.splitValid && !wasFresh && c.splitGiven && c.unseenGiven == unseen;
          if (!c.splitValid) {
             // the faces within 12 cm of the flame (the cup it burns in) let
             // its light out; the rest cast shadows
@@ -3032,7 +3053,7 @@ void upload_objects()
          // (as given last time it was given, unless captured anew since)
          c.glowGiven = glowScale;
          c.highlightGiven = g_uploadHighlight;
-         const bool same = !wasFresh && !c.splitGiven && c.passGiven == c.passLight;
+         const bool same = !wasFresh && !c.splitGiven && c.passGiven == c.passLight && c.unseenGiven == unseen;
          g_uploadViewer = obj != 0 && (obj == g_viewerObj || obj == g_viewerItem) && g_cfg.playerBody == 1;
          for (size_t i = 0; i < c.prims.size(); ++i)
             upload_captured(ids[i], c.prims[i], c.passLight, same, glowScale,
@@ -3186,8 +3207,11 @@ void upload_objects()
       }
       g_uploadHighlight = 0.0f;
       g_uploadViewer = false;
+      g_uploadUnseen = false;
+      c.unseenGiven = unseen;
       ++it;
    }
+   g_uploadUnseen = false;
 }
 
 void log_model_change(uint32_t obj, const char *what, ...)
