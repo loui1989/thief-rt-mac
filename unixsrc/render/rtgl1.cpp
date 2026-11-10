@@ -133,7 +133,8 @@ struct Settings {
    int gi = 0;                // bounce light: 0 two bounces at half rate (as Blood RT),
                               // 1 one bounce, 2 two bounces, 3 one bounce at half rate
    bool volumetric = false;   // haze lit by every light
-   bool sunHalf = true;       // the mission's sun's (moon's) shadow rays every other frame, in tiles (cheaper)
+   bool sunHalf = false;      // the mission's sun's (moon's) shadow rays every other frame, in tiles (cheaper:
+                              // 1-2 fps at Reflections in Red's pond, and it flickered -- off)
    bool moonShafts = false;   // god rays: the haze lit by the moon alone (cheap), when volumetric is off
    float shafts = 1.0f;       // god rays' strength (the haze's light, times this)
    float moon = 0.0f;         // moonlight through the sky's openings, times its base (0 off: its
