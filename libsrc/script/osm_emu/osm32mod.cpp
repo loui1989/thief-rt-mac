@@ -1436,11 +1436,24 @@ protected:
                return Return(state, memory, 8, 0, error);
             }
             sGuestListener *l = NewListener(kListenSim, func, data);
-            l->desc = a;
             uint32_t words[4] = {0, 0, 0, 0};
             for (unsigned i = 0; i < 4 && idAddress; ++i)
                if (!memory->Read32(idAddress + i * 4, &words[i], error)) { sim->Release(); return false; }
             memcpy(&l->id, words, sizeof(GUID));
+            // The description the guest's function is told of, a copy of
+            // its own: as the engine keeps one -- the guest's was on its
+            // stack, gone by the time a message came (NVScript's and
+            // tnhScript's listeners read garbage at the sim's end)
+            l->desc = AllocGuest(32, error);
+            if (!l->desc ||
+                !memory->Write32(l->desc, l->desc + 16, error) || !memory->Write32(l->desc + 4, interests, error) ||
+                !memory->Write32(l->desc + 8, func, error) || !memory->Write32(l->desc + 12, data, error))
+            {
+               sim->Release();
+               return false;
+            }
+            for (unsigned i = 0; i < 4; ++i)
+               if (!memory->Write32(l->desc + 16 + i * 4, words[i], error)) { sim->Release(); return false; }
             l->hostDesc.pID = &l->id;
             l->hostDesc.interests = interests;
             l->hostDesc.func = SimListener;
