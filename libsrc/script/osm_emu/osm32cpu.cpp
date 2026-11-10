@@ -723,9 +723,13 @@ bool cCpu::Step(std::string *error)
    bool repeat = false;
    bool repeatNotEqual = false;
    bool operand16 = false;
-   while (opcode == 0xf2 || opcode == 0xf3 || opcode == 0x66)
+   // (LOCK, 0xf0: one thread here, every access atomic -- GCC's runtime
+   // counts references with lock xadd and lock add)
+   while (opcode == 0xf2 || opcode == 0xf3 || opcode == 0x66 || opcode == 0xf0)
    {
-      if (opcode == 0xf2 || opcode == 0xf3)
+      if (opcode == 0xf0)
+         ;
+      else if (opcode == 0xf2 || opcode == 0xf3)
       {
          repeat = true;
          repeatNotEqual = opcode == 0xf2;
@@ -2748,6 +2752,31 @@ bool cCpu::Step(std::string *error)
             else
                m_state.reg[kEax] = m_state.reg[kEbx] =
                   m_state.reg[kEcx] = m_state.reg[kEdx] = 0;
+            return true;
+         }
+         if (second == 0xc1 || second == 0xb1)
+         {
+            // XADD r/m32, r32; CMPXCHG r/m32, r32
+            uint8_t modrm;
+            sDecodedRM operand;
+            unsigned regField;
+            uint32_t value;
+            if (!Fetch8(&modrm, error) ||
+                !DecodeRM(modrm, &operand, &regField, error) ||
+                !ReadRM32(operand, &value, error))
+               return false;
+            if (second == 0xc1)
+            {
+               const uint32_t sum = value + m_state.reg[regField];
+               SetAddFlags(value, m_state.reg[regField], sum);
+               if (!WriteRM32(operand, sum, error)) return false;
+               m_state.reg[regField] = value;
+               return true;
+            }
+            SetSubFlags(m_state.reg[kEax], value, m_state.reg[kEax] - value);
+            if (m_state.reg[kEax] == value)
+               return WriteRM32(operand, m_state.reg[regField], error);
+            m_state.reg[kEax] = value;
             return true;
          }
          if (second >= 0x80 && second <= 0x8f)

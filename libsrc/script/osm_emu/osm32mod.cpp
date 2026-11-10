@@ -6,6 +6,8 @@
 #include <appagg.h>
 #include <bintrait.h>
 #include <linkman.h>
+#include <linkid.h>
+#include <linkbase.h>
 #include <mprintf.h>
 #include <property.h>
 #include <propman.h>
@@ -38,6 +40,7 @@
 
 #include <aiscrptapi.h>
 #include <traitman.h>
+#include <engscrpt.h>
 #include <objquery.h>
 #include <simman.h>
 #include <propface.h>
@@ -1207,6 +1210,8 @@ protected:
                                             error);
       else if (serviceId == 0x0228)
          invoked = InvokeVersionService(service, slot, state, memory, error);
+      else if (serviceId == 0x0229)
+         invoked = InvokeEngineService(service, slot, state, memory, error);
       else if (serviceId == 0x0226)
          invoked = InvokeCDService(service, slot, state, memory, error);
       else if (serviceId == 0x010d)
@@ -1294,6 +1299,8 @@ private:
       proxy.object = AllocGuest(4, error);
       proxy.query = query;
       proxy.references = 1;
+      proxy.data = 0;
+      proxy.dataCapacity = 0;
       if (!proxy.object ||
           !memory->Write32(proxy.object, m_linkQueryVtable, error))
          return 0;
@@ -1338,7 +1345,13 @@ private:
       {
          const uint32_t references = --proxy->references;
          proxy->query->Release();
-         if (!references) proxy->query = 0;
+         if (!references)
+         {
+            proxy->query = 0;
+            if (proxy->data) FreeGuest(proxy->data, 0);
+            proxy->data = 0;
+            proxy->dataCapacity = 0;
+         }
          return Return(state, memory, 4, references, error);
       }
       if (slot == 3)
@@ -1362,6 +1375,49 @@ private:
                        static_cast<uint32_t>(proxy->query->ID()), error);
       if (slot == 7)
          return Return(state, memory, 4, proxy->query->Next(), error);
+      if (slot == 6)
+      {
+         // Data: the link's data copied to the guest (as large as its
+         // relation's says); a copy -- written to, the link keeps its own
+         const void *data = proxy->query->Data();
+         if (!data)
+            return Return(state, memory, 4, 0, error);
+         uint32_t size = 0;
+         if (ILinkManager *links = AppGetObj(ILinkManager))
+         {
+            const LinkID id = proxy->query->ID();
+            if (IRelation *rel = links->GetRelation(LINKID_RELATION(id)))
+            {
+               if (const sRelationDataDesc *desc = rel->DescribeData())
+                  size = static_cast<uint32_t>(desc->size);
+               rel->Release();
+            }
+            links->Release();
+         }
+         if (!size || size > 0x10000)
+            return Return(state, memory, 4, 0, error);
+         if (proxy->dataCapacity < size)
+         {
+            if (proxy->data) FreeGuest(proxy->data, 0);
+            proxy->data = AllocGuest(size, error);
+            proxy->dataCapacity = proxy->data ? size : 0;
+            if (!proxy->data) return false;
+         }
+         const uint8_t *bytes = static_cast<const uint8_t *>(data);
+         for (uint32_t i = 0; i < size; ++i)
+            if (!memory->Write8(proxy->data + i, bytes[i], error)) return false;
+         return Return(state, memory, 4, proxy->data, error);
+      }
+      if (slot == 8)
+      {
+         // Inverse: a query of its own
+         ILinkQuery *inverse = proxy->query->Inverse();
+         if (!inverse)
+            return Return(state, memory, 4, 0, error);
+         const uint32_t guest = CreateLinkQuery(inverse, memory, error);
+         inverse->Release();
+         return guest && Return(state, memory, 4, guest, error);
+      }
       if (error) *error = "unsupported guest ILinkQuery method";
       return false;
    }
@@ -2613,6 +2669,119 @@ private:
             names[3].c_str()), error);
    }
 
+   // IEngineScriptService (NewDark): the configuration, key bindings, files
+   // in the search paths, the canvas, fog (NVScript asks at start)
+   bool InvokeEngineService(IUnknown *unknown, unsigned slot,
+                            osm32::sCpuState *state, osm32::cMemory *memory,
+                            std::string *error)
+   {
+      IEngineScriptService *engine = reinterpret_cast<IEngineScriptService *>(unknown);
+      std::string name, file;
+      uint32_t out = 0, out2 = 0, out3 = 0, out4 = 0;
+      switch (slot)
+      {
+         case 5:   // ConfigIsDefined
+            if (!StringArgument(*state, memory, 1, &name, error)) return false;
+            return Return(state, memory, 8, engine->ConfigIsDefined(name.c_str()) ? 1 : 0, error);
+         case 6:   // ConfigGetInt
+         {
+            int value = 0;
+            if (!StringArgument(*state, memory, 1, &name, error) ||
+                !Argument(*state, *memory, 2, &out, error)) return false;
+            const BOOL found = engine->ConfigGetInt(name.c_str(), value);
+            return (!found || memory->Write32(out, static_cast<uint32_t>(value), error)) &&
+                   Return(state, memory, 12, found ? 1 : 0, error);
+         }
+         case 7:   // ConfigGetFloat
+         {
+            real value = 0;
+            if (!StringArgument(*state, memory, 1, &name, error) ||
+                !Argument(*state, *memory, 2, &out, error)) return false;
+            const BOOL found = engine->ConfigGetFloat(name.c_str(), value);
+            uint32_t bits;
+            memcpy(&bits, &value, 4);
+            return (!found || memory->Write32(out, bits, error)) &&
+                   Return(state, memory, 12, found ? 1 : 0, error);
+         }
+         case 8:   // ConfigGetRaw
+         {
+            cScrStr value;
+            if (!StringArgument(*state, memory, 1, &name, error) ||
+                !Argument(*state, *memory, 2, &out, error)) return false;
+            const BOOL found = engine->ConfigGetRaw(name.c_str(), value);
+            return WriteGuestStringObject(memory, out, value, error) &&
+                   Return(state, memory, 12, found ? 1 : 0, error);
+         }
+         case 9:   // BindingGetFloat
+            if (!StringArgument(*state, memory, 1, &name, error)) return false;
+            return ReturnFloat(state, memory, 8, engine->BindingGetFloat(name.c_str()), error);
+         case 10:  // FindFileInPath
+         {
+            cScrStr value;
+            if (!StringArgument(*state, memory, 1, &name, error) ||
+                !StringArgument(*state, memory, 2, &file, error) ||
+                !Argument(*state, *memory, 3, &out, error)) return false;
+            const BOOL found = engine->FindFileInPath(name.c_str(), file.c_str(), value);
+            return WriteGuestStringObject(memory, out, value, error) &&
+                   Return(state, memory, 16, found ? 1 : 0, error);
+         }
+         case 11:  // IsRunningDX6
+            return Return(state, memory, 4, engine->IsRunningDX6() ? 1 : 0, error);
+         case 12:  // GetCanvasSize
+         {
+            int w = 0, h = 0;
+            if (!Argument(*state, *memory, 1, &out, error) ||
+                !Argument(*state, *memory, 2, &out2, error)) return false;
+            engine->GetCanvasSize(w, h);
+            return memory->Write32(out, static_cast<uint32_t>(w), error) &&
+                   memory->Write32(out2, static_cast<uint32_t>(h), error) &&
+                   Return(state, memory, 12, 0, error);
+         }
+         case 13:  // GetAspectRatio
+            return ReturnFloat(state, memory, 4, engine->GetAspectRatio(), error);
+         case 14:  // GetFog
+         {
+            int r = 0, g = 0, b = 0;
+            float d = 0;
+            uint32_t outD;
+            if (!Argument(*state, *memory, 1, &out, error) || !Argument(*state, *memory, 2, &out2, error) ||
+                !Argument(*state, *memory, 3, &out3, error) || !Argument(*state, *memory, 4, &outD, error))
+               return false;
+            engine->GetFog(r, g, b, d);
+            uint32_t bits;
+            memcpy(&bits, &d, 4);
+            return memory->Write32(out, static_cast<uint32_t>(r), error) &&
+                   memory->Write32(out2, static_cast<uint32_t>(g), error) &&
+                   memory->Write32(out3, static_cast<uint32_t>(b), error) &&
+                   memory->Write32(outD, bits, error) && Return(state, memory, 20, 0, error);
+         }
+         case 16:  // GetFogZone
+         {
+            int r = 0, g = 0, b = 0;
+            float d = 0;
+            uint32_t zone, outD;
+            if (!Argument(*state, *memory, 1, &zone, error) || !Argument(*state, *memory, 2, &out, error) ||
+                !Argument(*state, *memory, 3, &out2, error) || !Argument(*state, *memory, 4, &out3, error) ||
+                !Argument(*state, *memory, 5, &outD, error))
+               return false;
+            engine->GetFogZone(static_cast<int>(zone), r, g, b, d);
+            uint32_t bits;
+            memcpy(&bits, &d, 4);
+            return memory->Write32(out, static_cast<uint32_t>(r), error) &&
+                   memory->Write32(out2, static_cast<uint32_t>(g), error) &&
+                   memory->Write32(out3, static_cast<uint32_t>(b), error) &&
+                   memory->Write32(outD, bits, error) && Return(state, memory, 24, 0, error);
+         }
+         default:
+            break;
+      }
+      (void)out4;
+      char message[64];
+      snprintf(message, sizeof(message), "unsupported Engine service method %u", slot);
+      if (error) *error = message;
+      return false;
+   }
+
    bool InvokeVersionService(IUnknown *unknown, unsigned slot,
                              osm32::sCpuState *state,
                              osm32::cMemory *memory,
@@ -3596,11 +3765,14 @@ private:
                        reinterpret_cast<tBreak>(vtable[slot])(service),
                        error);
       }
-      if (slot != 5 && slot != 6)
+      if (slot != 5 && slot != 6 && slot != 8)
       {
          if (error) *error = "unsupported Debug service method";
          return false;
       }
+      // (8: NewDark's Log, MPrint's arguments, to the log file -- here,
+      // MPrint's monolog)
+      const unsigned nativeSlot = slot == 8 ? 5 : slot;
       std::string values[8];
       for (unsigned i = 0; i < 8; ++i)
          if (!ScriptStringArgument(*state, memory, i + 1, &values[i],
@@ -3616,7 +3788,7 @@ private:
          const cScrStr *, const cScrStr *, const cScrStr *,
          const cScrStr *, const cScrStr *, const cScrStr *,
          const cScrStr *);
-      const HRESULT result = reinterpret_cast<tPrint>(vtable[slot])(
+      const HRESULT result = reinterpret_cast<tPrint>(vtable[nativeSlot])(
          service, &strings[0], &strings[1], &strings[2], &strings[3],
          &strings[4], &strings[5], &strings[6], &strings[7]);
       return Return(state, memory, 36, result, error);
@@ -3627,6 +3799,8 @@ private:
       uint32_t object;
       ILinkQuery *query;
       uint32_t references;
+      uint32_t data;           // the current link's data, copied out (Data)
+      uint32_t dataCapacity;
    };
 
    IScriptMan *m_scriptManager;
