@@ -780,8 +780,8 @@ void AIDebugDumpCellConnectionInfo(int cell_id)
    const sAIPathCell *pCell=g_AIPathDB.GetCell(cell_id);
    int          i, has_invalid=0;
 
-   const tAIPathCellIDPacked iFirstCellID = pCell->firstCell;
-   const tAIPathCellIDPacked iFinalCellID = (tAIPathCellIDPacked)(iFirstCellID+pCell->cellCount);
+   const tAIPathCell2CellLinkID iFirstCellID = pCell->firstCell;
+   const tAIPathCell2CellLinkID iFinalCellID = iFirstCellID + pCell->cellCount;
 
    mprintf("Cell %d: %d connections: ",cell_id,pCell->cellCount);
    for (i=iFirstCellID; i<iFinalCellID; i++)

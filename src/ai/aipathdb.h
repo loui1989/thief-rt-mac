@@ -261,7 +261,7 @@ public:
    cAIPathArray<sbool>                    m_Marks;
    cDynArray_<tAIPathCellID, 128>         m_MarkedCells;
    int                                    m_nMarkedCells;
-   cAIPathArray<ushort>                   m_BestCostToReach;
+   cAIPathArray<unsigned>                 m_BestCostToReach;
 
    cFleeRegionsHash                       m_FleeRegions;
    int                                    m_nNumFleeRegions;

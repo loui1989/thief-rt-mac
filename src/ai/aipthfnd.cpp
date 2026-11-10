@@ -443,6 +443,10 @@ static IAIPath * AIPathfindNearInternal(const mxs_vector & fromLocation, tAIPath
    TIMER_Start(AI_PF_Init);
 
    g_AIPathDB.MarkBegin();
+   // (the cells, links and costs as the database has them: a NewDark map's
+   // 3.4 database has more than 65535 links -- Reflections in Red's 87608 --
+   // and a link kept in 16 bits here sent the AI through another cell's
+   // doorway, into a wall, or left it no path at all)
    memset(g_AIPathDB.m_BestCostToReach, 0xFF, (g_AIPathDB.m_nCells  + 1) * sizeof(g_AIPathDB.m_BestCostToReach[0]));
 
    TIMER_MarkStop(AI_PF_Init);
@@ -556,16 +560,16 @@ static IAIPath * AIPathfindNearInternal(const mxs_vector & fromLocation, tAIPath
                            AISpewPathFind (("  adding %d\n", newNode));
 
                            pNewCell->next = pCell->next;
-                           pCell->next    = (tAIPathCellIDPacked)newNode;
+                           pCell->next    = newNode;
                            g_AIPathDB.Mark(newNode);
                         }
 
                         // update pts of this node to bestNode so we can remember
                         // the path eventually.
 
-                        g_AIPathDB.m_BestCostToReach[newNode] = (ushort)costToReachNewNode;
-                        pNewCell->bestNeighbor     = (tAIPathCellIDPacked) bestNode;
-                        pNewCell->linkFromNeighbor = (tAIPathCell2CellLinkIDPacked) i;
+                        g_AIPathDB.m_BestCostToReach[newNode] = (unsigned)costToReachNewNode;
+                        pNewCell->bestNeighbor     = bestNode;
+                        pNewCell->linkFromNeighbor = i;
                      }
                   }
                }
@@ -898,16 +902,16 @@ static IAIPath * AIPathfindInternal(const mxs_vector & fromLocation, tAIPathCell
                         AISpewPathFind (("  adding %d\n", newNode));
 
                         pNewCell->next = pCell->next;
-                        pCell->next    = (tAIPathCellIDPacked)newNode;
+                        pCell->next    = newNode;
                         g_AIPathDB.Mark(newNode);
                      }
 
                      // update pts of this node to bestNode so we can remember
                      // the path eventually.
 
-                     g_AIPathDB.m_BestCostToReach[newNode] = (ushort)costToReachNewNode;
-                     pNewCell->bestNeighbor     = (tAIPathCellIDPacked) bestNode;
-                     pNewCell->linkFromNeighbor = (tAIPathCell2CellLinkIDPacked) i;
+                     g_AIPathDB.m_BestCostToReach[newNode] = (unsigned)costToReachNewNode;
+                     pNewCell->bestNeighbor     = bestNode;
+                     pNewCell->linkFromNeighbor = i;
                   }
                }
             }
