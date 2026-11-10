@@ -6,6 +6,7 @@
 #include <cstring>
 #include <cstdio>
 #include <limits>
+#include <cstdlib>
 
 namespace
 {
@@ -133,6 +134,14 @@ private:
 	int m_BitCount;
 	bool m_Ended;
 };
+
+bool TransparentIndexUsed(const uint8* pBits, unsigned long pixelCount, int index)
+{
+	for (unsigned long i = 0; i < pixelCount; ++i)
+		if (pBits[i] == index)
+			return true;
+	return false;
+}
 
 bool DecodeImage(IStoreStream* pStream, int minimumCodeSize, uint8* pBits, const GifImageBlock& image)
 {
@@ -347,6 +356,14 @@ grs_bitmap* ResGifReadImage(IStoreStream* pStream, IResMemOverride* pResMem)
 	// Dark's indexed transparency convention reserves palette index zero.
 	// GIF permits any palette entry to be transparent, so exchange the two
 	// indices while retaining all opaque index-zero pixels at their old colour.
+	// Only when the picture has any of its declared transparent colour: one
+	// that has none is keyed the game's way, by index zero, its GIF's own
+	// transparent entry a paint program's leftover (Shadows of the Metal
+	// Age's explosion, bitmap/txt16/expyc: its green key at 0, "transparent"
+	// white at 255 used nowhere -- swapped, the key showed as a green square).
+	if (transparentIndex > 0 && transparentIndex < 256 &&
+		!TransparentIndexUsed(pBits, pixelCount, transparentIndex))
+		transparentIndex = -1;
 	if (transparentIndex > 0 && transparentIndex < 256)
 	{
 		for (unsigned long i = 0; i < pixelCount; ++i)
@@ -425,6 +442,23 @@ uint8* ResGifReadPalette(IStoreStream* pStream, IResMemOverride* pResMem)
 	else
 		std::memcpy(pPalette, globalPalette, 3 * globalEntries);
 
+	// (exchanged as the image's indices are, ResGifReadImage: only when the
+	// picture has any of its transparent colour -- read it to see)
+	if (transparentIndex > 0 && transparentIndex < 256)
+	{
+		const int minimumCodeSize = pStream->Getc();
+		const auto pixelCount = static_cast<unsigned long>(image.width) * image.height;
+		bool used = true;
+		if (minimumCodeSize >= 0 && pixelCount > 0 && pixelCount <= 16u * 1024u * 1024u)
+		{
+			uint8* pBits = static_cast<uint8*>(malloc(pixelCount));
+			if (pBits && DecodeImage(pStream, minimumCodeSize, pBits, image))
+				used = TransparentIndexUsed(pBits, pixelCount, transparentIndex);
+			free(pBits);
+		}
+		if (!used)
+			transparentIndex = -1;
+	}
 	if (transparentIndex > 0 && transparentIndex < 256)
 	{
 		for (int channel = 0; channel < 3; ++channel)
