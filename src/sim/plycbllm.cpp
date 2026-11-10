@@ -677,6 +677,10 @@ static BOOL BodyLegTorso(float *leg, float *torso)
 static float g_BodyCrouch = 0.0f;
 // (this update's, for the log of a pop as it is drawn)
 static float g_BodyFootZ = 0.0f;
+// how high its lower toe joint is over the floor, standing on it (learnt
+// walking upright, where its feet are on the floor): a crouch is set down so
+static float g_BodySole = 0.15f;
+static BOOL g_BodySoleKnown = FALSE;
 static BOOL g_BodyInAir = FALSE, g_BodyOnGround = TRUE;
 static int g_BodyMode = 0;
 
@@ -860,6 +864,18 @@ static void BodyPoseReshape(ObjID obj, int n, mxs_vector *J, mxs_matrix *O, quat
       mx_mul_mat(&t, &r2, &O[knee[s]]);
       O[knee[s]] = t;
       J[knee[s]] = K2;
+   }
+
+   // set down: its lower toe on his floor, as standing (its height from
+   // its bounding box did not follow the crouch: it hung a foot up, but
+   // for a frame now and then)
+   if (g_BodySoleKnown)
+   {
+      const float lowest = J[toe[0]].z < J[toe[1]].z ? J[toe[0]].z : J[toe[1]].z;
+      const float dz = g_BodyFootZ + g_BodySole - lowest;
+      if (dz > -3.0f && dz < 3.0f)
+         for (int j = 0; j < n; ++j)
+            J[j].z += dz;
    }
 
    // orientations relative to their parents', for those changed
@@ -1540,6 +1556,20 @@ static void PlayerBodyUpdate(ulong dt)
       s_heldButtSet = TRUE;
    }
    g_BodyFootZ = foot.z;
+   if (g_BodyCrouch < 0.01f && !inAir && !held && g_BodyPosed > 10)
+   {
+      // (the lower toe over the floor: down at once, up slowly -- a stride
+      // lifts both a moment)
+      const float lt = GetCreatureJointPos(g_BodyObj, kCJ_LToe).z, rt = GetCreatureJointPos(g_BodyObj, kCJ_RToe).z;
+      const float sole = (lt < rt ? lt : rt) - foot.z;
+      if (sole > -1.0f && sole < 1.0f)
+      {
+         if (!g_BodySoleKnown)
+            g_BodySole = sole, g_BodySoleKnown = TRUE;
+         else
+            g_BodySole += (sole - g_BodySole) * (sole < g_BodySole ? 0.5f : 0.02f);
+      }
+   }
    mxs_vector at = foot;
    at.z += held ? s_heldButt : g_BodyButt;
    mxs_angvec fac;
