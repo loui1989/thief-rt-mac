@@ -71,6 +71,9 @@ void RenderRTDrawWorld(int primitive, const sRenderBackendVertex *vertices,
 enum { kRenderRTObjectWhole = 1, kRenderRTObjectNoShadow = 2, kRenderRTObjectFirstPerson = 4 };
 void RenderRTObjectBegin(uint32_t obj, int flags);
 void RenderRTObjectEnd(void);
+// a model the game is about to draw, unchanged a while: kept as it was, the
+// game skips drawing it (1)
+int RenderRTObjectReuse(uint32_t obj);
 // Nonzero if an object that was not drawn this frame should be drawn for the
 // ray tracer: it is not kept from an earlier frame, or it has moved since.
 int RenderRTObjectWanted(uint32_t obj);

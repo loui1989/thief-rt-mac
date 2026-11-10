@@ -2435,6 +2435,14 @@ BOOL rendobj_core_render_object(ObjID obj, int fragment, int idx, uchar *clut,
    if (g_lgd3d)
       r3_use_lgd3d();
 
+#ifdef DARK_RT
+   // a still model the ray tracer already has as it is (RenderRTObjectReuse):
+   // not drawn again (not the one in reach, lit up; not his arm or weapon)
+   if (g_lgd3d && RenderRTCaptureDraws() && fragment == OBJ_NO_SPLIT && obj != highlit_obj &&
+       !rt_first_person_object(obj) && RenderRTObjectReuse((uint32_t)obj))
+      return TRUE;
+#endif
+
    setup_object_lighting(obj, 0, 0);
 
    ptmf->setup(obj);

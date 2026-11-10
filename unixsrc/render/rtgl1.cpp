@@ -172,6 +172,7 @@ struct Settings {
    int fogQuality = 1;        // the lit fog's light samples a frame: 1 normal (3), 2 high (5), 3 highest (7)
    float lightSoft = 1.0f;    // a strong lamp's light is a bigger source: no white spot on the wall next to it (0 off)  // a torch's body casts shadows (only its cup lets the flame's light out)
    bool steadyFaces = true;   // models' faces seen or shadow-only by a fixed rule, not by the view
+   bool reuseModels = true;   // a model unchanged a while: the game does not draw it again (RenderRTObjectReuse)
    bool lightFix = true;      // lights moved out of the walls they sit in
    bool fixturesPass = true;  // a torch or small lamp lets its own light out
    bool lightCull = true;     // skip lights the level's lighting has on no cell near or in view
@@ -271,6 +272,7 @@ void load_settings()
       else if (k == "bloom") g_cfg.bloom = value != 0;
       else if (k == "light_fade") g_cfg.lightFade = value != 0;
       else if (k == "steady_faces") g_cfg.steadyFaces = value != 0;
+      else if (k == "reuse_models") g_cfg.reuseModels = value != 0;
       else if (k == "torch_shadows") g_cfg.torchShadows = value != 0;
       else if (k == "wall_offset") g_cfg.wallOffset = value != 0;
       else if (k == "underwater_clarity") g_cfg.underwaterClarity = std::clamp(value, 0.2f, 5.0f);
@@ -347,6 +349,7 @@ void save_settings()
    fprintf(f, "shadow_alert = %d\n", g_cfg.shadowAlert);
    fprintf(f, "fog_lamps = %d\n", int(g_cfg.fogLit));
    fprintf(f, "fog_quality = %d\n", g_cfg.fogQuality);
+   fprintf(f, "reuse_models = %d\n", int(g_cfg.reuseModels));
    fclose(f);
 }
 
@@ -1540,6 +1543,7 @@ struct CaptureParts {
    double draws = 0, ends = 0, faces = 0, match = 0, world = 0, models = 0, lights = 0;
    double drawCalls = 0, fresh = 0;
    double hashes = 0;   // models' ends hashing what was drawn
+   double reused = 0;   // models the game did not draw again: as they were (RenderRTObjectReuse)
    double nearSame = 0;  // captures taken as unchanged to within 2 mm (same_within)
    double prep[5] = {};              // RenderRTPrepMark's parts
 } g_capParts;
@@ -4201,7 +4205,7 @@ const char *kUpscaleNames[] = {"Off",
 
 enum UiRow {
    kRowUpscale, kRowScale, kRowOutput, kRowDynres, kRowBounces, kRowReach, kRowLights, kRowLightFade, kRowCandidates, kRowLightCull, kRowResponse, kRowFlicker, kRowVolumetric, kRowShafts, kRowFog, kRowFogLit, kRowFogQuality, kRowSmoke, kRowPlayerBody, kRowShadowAlert, kRowTestMirror, kRowBloom, kRowVsync, kRowFrameCap,
-   kRowFps, kRowDetection, kRowGemScale, kRowGemMatch, kRowGemEase, kRowLight, kRowExposure, kRowDarkAdapt, kRowAmbient, kRowAmbientFollow, kRowShadowCool, kRowSkySeen, kRowSky, kRowMoon, kRowMoonDir, kRowMoonHeight, kRowSun, kRowLightSize, kRowRough, kRowSmooth, kRowSteady, kRowFixtures, kRowFixtureLight, kRowSmallLamps, kRowLightFix, kRowGlow, kRowFlameGlow, kRowMaterials, kRowBump, kRowCrevice, kRowTexDetail, kRowParallax, kRowPolish, kRowWater, kRowUnderwater, kRowTracedSound, kRowHrtf,
+   kRowFps, kRowDetection, kRowGemScale, kRowGemMatch, kRowGemEase, kRowLight, kRowExposure, kRowDarkAdapt, kRowAmbient, kRowAmbientFollow, kRowShadowCool, kRowSkySeen, kRowSky, kRowMoon, kRowMoonDir, kRowMoonHeight, kRowSun, kRowLightSize, kRowRough, kRowSmooth, kRowSteady, kRowReuseModels, kRowFixtures, kRowFixtureLight, kRowSmallLamps, kRowLightFix, kRowGlow, kRowFlameGlow, kRowMaterials, kRowBump, kRowCrevice, kRowTexDetail, kRowParallax, kRowPolish, kRowWater, kRowUnderwater, kRowTracedSound, kRowHrtf,
    kRowDebug, kRowFreeze, kRowBackFaces, kRowReuse, kRowBlink, kRowPerf, kRowInspect, kRowSkipMission, kRowReset, kRowCount
 };
 
@@ -4209,7 +4213,7 @@ const char *kRowLabels[kRowCount] = {
    "Upscaler", "Render resolution", "Output resolution", "Dynamic resolution", "Bounce light", "Light reach", "Lights traced",
    "Lights coming into range", "Lights tried per pixel", "Lights behind walls", "Light changes", "Light flicker",
    "God rays (volumetric)", "  God ray strength", "Mission fog", "  Fog lit by the lamps", "  Lit fog quality", "Smoke and steam", "Garrett's shadow and reflection", "  Guards notice his shadow", "  Test mirror", "Bloom", "VSync", "Frame rate limit", "FPS counter", "Light gem and guards", "  Light gem brightness", "  Light gem falloff", "  Light gem response", "Light brightness", "Darkest exposure", "  Eyes adjust to the dark", "Ambient light", "  Follows the game's light", "  Shadow colour", "Sky brightness (as seen)", "Sky light (on the level)", "Moonlight", "  Moon direction", "  Moon height", "Sunlight (Thief 2 missions)",
-   "Light size (soft shadows)", "Surface roughness", "Model shading", "Model faces", "Torches and lamps", "Lamp and torch light", "Lamp reach", "Lights in walls", "Lamp glow", "Flame glow", "Materials", "Bumps", "Crevices", "Texture detail", "Parallax depth", "Polished reflections", "Water", "  Under water: brighter", "Traced sound (Steam Audio)", "  Headphone 3D sound (HRTF)",
+   "Light size (soft shadows)", "Surface roughness", "Model shading", "Model faces", "  Still models drawn once", "Torches and lamps", "Lamp and torch light", "Lamp reach", "Lights in walls", "Lamp glow", "Flame glow", "Materials", "Bumps", "Crevices", "Texture detail", "Parallax depth", "Polished reflections", "Water", "  Under water: brighter", "Traced sound (Steam Audio)", "  Headphone 3D sound (HRTF)",
    "Debug view", "Freeze scene (test)", "Back faces (test)", "Light sampling (test)", "Blink nearest light (test)", "Performance log", "Inspect centre of view", "Skip to next mission (test)", "Reset to defaults",
 };
 
@@ -4354,6 +4358,9 @@ std::string row_value(int row)
    case kRowSmooth: return g_cfg.smoothModels ? "Smooth" : "Flat (steady)";
    case kRowLightFix: return g_cfg.lightFix ? "Moved out" : "Left as placed";
    case kRowSteady: return g_cfg.steadyFaces ? "Steady (all seen)" : "As the game draws them";
+   case kRowReuseModels:
+      if (!g_cfg.steadyFaces) return "Off (needs steady model faces)";
+      return g_cfg.reuseModels ? "On (the game skips redrawing them: faster)" : "Off (all redrawn every frame)";
    case kRowFixtures: return g_cfg.fixturesPass ? "Let their light out" : "Block their own light";
    case kRowFreeze: {
       static const char *kModes[] = {"Off", "Models and lights", "Models only", "Lights only"};
@@ -4505,6 +4512,7 @@ void change_row(int row, int dir)
    case kRowSmooth: g_cfg.smoothModels = !g_cfg.smoothModels; break;
    case kRowFixtures: g_cfg.fixturesPass = !g_cfg.fixturesPass; break;
    case kRowSteady: g_cfg.steadyFaces = !g_cfg.steadyFaces; break;
+   case kRowReuseModels: g_cfg.reuseModels = !g_cfg.reuseModels; break;
    case kRowLightFix: g_cfg.lightFix = !g_cfg.lightFix; g_lightFixes.clear(); break;
    case kRowLightFade: g_cfg.lightFade = !g_cfg.lightFade; break;
    case kRowCandidates: {
@@ -4886,9 +4894,9 @@ void perf_frame(double t)
       }
       const CaptureParts &cp = g_capParts;
       fprintf(f, "  capture parts (ms per frame): draws %.2f (%.0f calls), models' ends %.2f, given to the path tracer: lights %.2f, world %.2f, models %.2f; "
-                 "of these, faces made steady %.2f, matched to last frame %.2f (%.0f models captured anew; %.1f taken as unchanged to within 2 mm)\n",
+                 "of these, faces made steady %.2f, matched to last frame %.2f (%.0f models captured anew; %.1f taken as unchanged to within 2 mm; %.0f not drawn again, as they were)\n",
               cp.draws * ms, cp.drawCalls / n, cp.ends * ms, cp.lights * ms, cp.world * ms, cp.models * ms,
-              cp.faces * ms, cp.match * ms, cp.fresh / n, cp.nearSame / n);
+              cp.faces * ms, cp.match * ms, cp.fresh / n, cp.nearSame / n, cp.reused / n);
       fprintf(f, "  more parts (ms per frame): inside the path tracer's library %.2f; models' ends hashing %.2f; "
                  "rt prep: world %.2f, lights found %.2f, their reach %.2f, objects' lights %.2f, models out of view %.2f\n",
               g_uploadLibrarySecs * 1000.0 / n, cp.hashes * ms, cp.prep[0] * ms, cp.prep[1] * ms, cp.prep[2] * ms,
@@ -7697,6 +7705,47 @@ void wall_offset(CachedObject &c)
       for (RgPrimitiveVertex &v : p.verts)
          for (int k = 0; k < 3; ++k)
             v.position[k] += c.wallOffset[k];
+}
+
+// A model the game is about to draw again: unchanged for a while (its shape
+// and its texture's place on it), holding still, not a creature, no sprites
+// in it -- as it was, and the game need not draw it (its every vertex moved
+// and lit by the processor, then captured, hashed and found the same: a
+// fan mission's castle vista, 330 models, kept the frame on the processor
+// near 40 ms, the graphics card waiting). Every fourth frame (each model
+// on its own one) it is drawn anyway, so that a change -- a lever's joint,
+// a texture that animates -- shows within a few frames; a change seen, it
+// is drawn every frame until it is still again.
+int RenderRTObjectReuse(uint32_t obj)
+{
+   if (!g_cfg.reuseModels || !g_cfg.steadyFaces || !g_inScene || g_freeze)
+      return 0;
+   auto it = g_objects.find(obj);
+   if (it == g_objects.end())
+      return 0;
+   CachedObject &c = it->second;
+   if (!c.settled || !c.whole || !c.posed || c.unchanged < 12 || c.prims.empty())
+      return 0;
+   if (c.frame != g_frameNumber && ((g_frameNumber + obj) & 3u) == 0)
+      return 0;
+   if (c.creature < 0)
+      c.creature = RenderRTGameObjectIsCreature(obj);
+   if (c.creature != 0)
+      return 0;
+   for (const CapturedPrim &p : c.prims)
+      if (p.sprite)
+         return 0;
+   float pose[6];
+   if (!RenderRTGameObjectPose(obj, pose))
+      return 0;
+   for (int k = 0; k < 3; ++k)
+      if (std::fabs(pose[k] - c.pose[k]) >= 0.01f)
+         return 0;
+   if (pose[3] != c.pose[3] || pose[4] != c.pose[4] || pose[5] != c.pose[5])
+      return 0;
+   c.frame = g_frameNumber;
+   g_capParts.reused += 1;
+   return 1;
 }
 
 void RenderRTObjectEnd(void)
