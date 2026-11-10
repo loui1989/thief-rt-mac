@@ -2975,6 +2975,7 @@ struct WorldGroup {
    bool given = false;               // given to it since the world was made (unchanged since)
    int lmPage = -1;                  // the game's light: its lightmaps' page of the atlas
    int underWater = 0;               // under water: 0 not, else (its depth in 0.25 m steps) + 1
+   std::vector<float> baseUv;        // the stand-in water's own texture coordinates (stand_in_water)
    std::vector<RgFloat2D> lmuv;      // and where on it, a u,v for each vertex
 };
 constexpr float kWorldChunk = 24.0f;      // meters
@@ -3078,14 +3079,27 @@ void mirror_textures_clear()
    mirror_world_regive(-1);
 }
 
-// The film over untextured water lit by the game's lights at each vertex
-// (see upload_world): its colour, the water's, in the vertices' colours.
-void water_film_light(WorldGroup &g)
+// The stand-in texture on untextured water (portal.c, PORTAL_RT_STAND_IN_WATER)
+constexpr int kStandInWater = 0xffff;
+
+// ...drifting (its texture coordinates moved on every frame: 1 tile in 40 s
+// one way, in 70 s the other) and lit by the game's lights at each vertex
+// (falling off, spot cones, from above; no shadows): in the vertices' colours
+void stand_in_water(WorldGroup &g)
 {
-   const float top = std::max({g_waterRgb[0], g_waterRgb[1], g_waterRgb[2], 1.0f});
-   float hue[3];
-   for (int k = 0; k < 3; ++k)
-      hue[k] = 0.35f + 0.65f * g_waterRgb[k] / top;
+   if (g.baseUv.size() != g.verts.size() * 2) {
+      g.baseUv.resize(g.verts.size() * 2);
+      for (size_t i = 0; i < g.verts.size(); ++i) {
+         g.baseUv[i * 2] = g.verts[i].texCoord[0];
+         g.baseUv[i * 2 + 1] = g.verts[i].texCoord[1];
+      }
+   }
+   const double t = now_seconds();
+   const float du = float(std::fmod(t / 40.0, 1.0)), dv = float(std::fmod(t / 70.0, 1.0));
+   for (size_t i = 0; i < g.verts.size(); ++i) {
+      g.verts[i].texCoord[0] = g.baseUv[i * 2] + du;
+      g.verts[i].texCoord[1] = g.baseUv[i * 2 + 1] + dv;
+   }
    struct Near {
       float pos[3], rgb[3], dir[3], reach, inner, outer;
    };
@@ -3127,10 +3141,11 @@ void water_film_light(WorldGroup &g)
          for (int k = 0; k < 3; ++k)
             lit[k] += n.rgb[k] * f;
       }
-      const float L = std::min((lit[0] + lit[1] + lit[2]) / 3.0f, 1.5f);
+      // (a little even in the dark: it is still there)
+      const float L = std::clamp(0.1f + 0.9f * (lit[0] + lit[1] + lit[2]) / 3.0f, 0.0f, 1.0f);
       // (the rasterizer takes vertex colours as sRGB: rasterizedVertexColorGamma)
-      auto enc = [](float linear) { return std::pow(std::clamp(linear, 0.0f, 1.0f), 1.0f / 2.2f); };
-      v.color = pack_color(enc(hue[0] * L * 0.12f), enc(hue[1] * L * 0.12f), enc(hue[2] * L * 0.12f), 1.0f);
+      const float e = std::pow(L, 1.0f / 2.2f);
+      v.color = pack_color(e, e, e, 1.0f);
    }
 }
 
@@ -3279,22 +3294,23 @@ void upload_world()
          if (!tex) {
             // a water surface with no texture of its own (texture 0, as
             // Black Parade's canals, where the mission has no other water to
-            // borrow one from): the game draws none -- what is under it,
-            // hazed by its depth (below), shows the water. Over it, a film,
-            // mostly see-through, the water's dark green: it takes 40% of
-            // what is under it away, and gives back the water's colour as
-            // lit by the lamps around (each vertex by the game's lights,
-            // no shadows) -- a sheen under a lamp, only the darkening where
-            // none reaches. (See-through surfaces are drawn unlit, and a
-            // colour of their own glowed in the darkest canal as the eyes
-            // adapted. The path tracer's own water showed as a flat grey
-            // sheet; as a mirror it showed the world's unfinished
-            // undersides; drawn solid, a black slab over the canal's bed.)
+            // borrow one from, and Black Parade's own stand-in, portal.c,
+            // missing): not drawn, as the game draws none -- what is under
+            // it, hazed by its depth (below), is all the water shows. (A
+            // see-through film of a colour of its own was never seen; the
+            // path tracer's own water a flat grey sheet; a mirror showed the
+            // world's unfinished undersides; drawn solid, a black slab.)
+            continue;
+         } else if (g.textureId == kStandInWater) {
+            // the stand-in on untextured water (portal.c): see-through as
+            // the game's water is, slowly drifting, and lit by the lamps
+            // around (see-through surfaces are drawn unlit: as bright in the
+            // darkest canal as under a lamp)
             if (g_underwater)
                continue;   // (from under it: the water's own haze)
             flags |= RG_MESH_PRIMITIVE_TRANSLUCENT;
-            water_film_light(g);
-            alpha = 0.4f;
+            alpha = g_cfg.waterAlpha;
+            stand_in_water(g);
          } else if (g_cfg.water == 1) {
             flags |= RG_MESH_PRIMITIVE_WATER;    // RTGL1's reflective/refractive water
          } else if (g_cfg.water == 0) {

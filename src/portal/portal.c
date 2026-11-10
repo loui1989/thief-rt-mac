@@ -1721,7 +1721,9 @@ unsigned portal_sound_world(void (*fn)(void *user, int n, const float *xyz,
 
 \* ----------------------------------------------------------------------- */
 #include <render_rt.h>
+#include <stdlib.h>
 extern void *lgd3d_rt_texture_for_bitmap(grs_bitmap *bm);
+extern void *RenderBackendCreateTexture(int width, int height, const void *rgba, int rowBytes);
 extern void *portal_rt_water_texture(r3s_texture tex);
 extern float hw_water_tex_scale;
 extern int GetWaterBankForFlow(int idx);             // h2ocolor.cpp
@@ -2048,6 +2050,93 @@ static void portal_rt_lm_update(void)
    }
 }
 
+// A water surface with no texture where the mission has no water texture at
+// all (Black Parade's canals and falls: the game draws them as nothing) is
+// given one of the mission's own, unused: its green hardware water
+// (fam/waterhw/GRin), slowly scrolling in the path tracer -- not what the
+// author drew, but it reads as water. The ray tracer's texture, made from
+// the PCX once.
+#define PORTAL_RT_STAND_IN_WATER 0xffff
+static void *portal_rt_stand_in_water;
+static int portal_rt_stand_in_tried;
+
+static void *portal_rt_load_pcx(const char *path)
+{
+   FILE *f = fopen(path, "rb");
+   unsigned char head[128], *data = NULL, *rgba = NULL;
+   long size;
+   int w, h, bpl, x, y, at;
+   void *handle = NULL;
+   if (!f)
+      return NULL;
+   fseek(f, 0, SEEK_END);
+   size = ftell(f);
+   fseek(f, 0, SEEK_SET);
+   if (size < 128 + 769 || fread(head, 1, 128, f) != 128 || head[0] != 10 || head[2] != 1 ||
+       head[3] != 8 || head[65] != 1) {
+      fclose(f);
+      return NULL;
+   }
+   w = (head[8] | (head[9] << 8)) - (head[4] | (head[5] << 8)) + 1;
+   h = (head[10] | (head[11] << 8)) - (head[6] | (head[7] << 8)) + 1;
+   bpl = head[66] | (head[67] << 8);
+   data = (unsigned char *)malloc(size - 128);
+   if (w <= 0 || h <= 0 || w > 4096 || h > 4096 || bpl < w || !data ||
+       fread(data, 1, size - 128, f) != (size_t)(size - 128) || data[size - 128 - 769] != 12) {
+      free(data);
+      fclose(f);
+      return NULL;
+   }
+   fclose(f);
+   rgba = (unsigned char *)malloc(w * h * 4);
+   if (rgba) {
+      const unsigned char *pal = data + (size - 128 - 768);
+      const long end = size - 128 - 769;
+      at = 0;
+      for (y = 0; y < h; ++y) {
+         x = 0;
+         while (x < bpl && at < end) {
+            int run = 1, v = data[at++];
+            if ((v & 0xc0) == 0xc0 && at < end) {
+               run = v & 0x3f;
+               v = data[at++];
+            }
+            while (run-- > 0 && x < bpl) {
+               if (x < w) {
+                  unsigned char *d = rgba + (y * w + x) * 4;
+                  d[0] = pal[v * 3];
+                  d[1] = pal[v * 3 + 1];
+                  d[2] = pal[v * 3 + 2];
+                  d[3] = 255;
+               }
+               ++x;
+            }
+         }
+      }
+      handle = RenderBackendCreateTexture(w, h, rgba, w * 4);
+      mprintf("RT: untextured water: %s (%dx%d) in its place\n", path, w, h);
+   }
+   free(rgba);
+   free(data);
+   return handle;
+}
+
+static void *portal_rt_stand_in_water_texture(void)
+{
+   static const char *const names[] = {"fam/waterhw/GRin.PCX", "fam/waterhw/grin.pcx", "fam/waterhw/GRIN.PCX"};
+   const char *fm = getenv("DARK_FM_PATH");
+   int i;
+   if (portal_rt_stand_in_tried)
+      return portal_rt_stand_in_water;
+   portal_rt_stand_in_tried = 1;
+   for (i = 0; fm && fm[0] && i < (int)(sizeof(names) / sizeof(names[0])) && !portal_rt_stand_in_water; ++i) {
+      char path[1024];
+      snprintf(path, sizeof(path), "%s/%s", fm, names[i]);
+      portal_rt_stand_in_water = portal_rt_load_pcx(path);
+   }
+   return portal_rt_stand_in_water;
+}
+
 static void portal_rt_submit_world(void)
 {
    uint32 serial;
@@ -2174,8 +2263,11 @@ static void portal_rt_submit_world(void)
             int tid = ri->texture_id;
             if (n < 3 || n > 256)
                continue;
+            int stand_in = 0;
             if (p >= first_portal && portal_rt_is_sky(tid) && water_tex >= 0)
                tid = water_tex;
+            else if (p >= first_portal && portal_rt_is_sky(tid) && portal_rt_stand_in_water_texture())
+               stand_in = 1;   // (given as PORTAL_RT_STAND_IN_WATER, below)
             // (a water surface -- a medium boundary -- is never a sky, though
             // its texture number may be 0: Black Parade's canals, drawn as
             // openings onto the sky, invisible. Without a texture of its own,
@@ -2226,8 +2318,8 @@ static void portal_rt_submit_world(void)
                if (u2 <= 0.0f || v2 <= 0.0f) {
                   // (no mapping of its own -- a borrowed water texture: laid
                   // flat, a tile every 4 feet)
-                  uv[i*2] = (tid != ri->texture_id) ? w->x * 0.25f : 0.0f;
-                  uv[i*2+1] = (tid != ri->texture_id) ? w->y * 0.25f : 0.0f;
+                  uv[i*2] = (tid != ri->texture_id || stand_in) ? w->x * 0.25f : 0.0f;
+                  uv[i*2+1] = (tid != ri->texture_id || stand_in) ? w->y * 0.25f : 0.0f;
                } else if (uvdot == 0.0f) {
                   uv[i*2]   = du * u_scale / u2 + u_base;
                   uv[i*2+1] = dv * v_scale / v2 + v_base;
@@ -2271,7 +2363,7 @@ static void portal_rt_submit_world(void)
                if (water_top[c] - z > 0.0f)
                   RenderRTWorldPolygonUnderWater(water_top[c] - z);
             }
-            RenderRTWorldPolygon(tid, flags, n, xyz, uv);
+            RenderRTWorldPolygon(stand_in ? PORTAL_RT_STAND_IN_WATER : tid, flags, n, xyz, uv);
             if (!(flags & kRenderRTWorldSky) && !portal_rt_is_sky(tid) &&
                 tid < PORTAL_RT_MAX_TEXTURE_IDS) {
                // 2: a water surface, drawn through its medium's palette
@@ -2317,6 +2409,8 @@ static void portal_rt_submit_world(void)
          RenderRTWorldTexture(c, handle);
       }
    }
+   if (portal_rt_stand_in_water)
+      RenderRTWorldTexture(PORTAL_RT_STAND_IN_WATER, portal_rt_stand_in_water);
    portal_rt_submit_skybox();
 }
 
