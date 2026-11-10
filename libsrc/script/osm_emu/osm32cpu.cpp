@@ -1165,6 +1165,8 @@ bool cCpu::Step(std::string *error)
          }
          return WriteRM16(operand, result, error);
       }
+      if (opcode == 0x90)
+         return true;   // (66 90: a two-byte NOP, GCC's padding)
       return FailAddress(error, "unsupported IA-32 operand-size override at",
                          instructionAddress);
    }
@@ -1638,6 +1640,16 @@ bool cCpu::Step(std::string *error)
 
       case 0x90:
          return true;
+
+      case 0x91: case 0x92: case 0x93: case 0x94: case 0x95: case 0x96: case 0x97:
+      {
+         // XCHG EAX, r32 (the newer runtime's stack probe: xchg eax, esp)
+         const unsigned other = opcode - 0x90;
+         const uint32_t value = m_state.reg[kEax];
+         m_state.reg[kEax] = m_state.reg[other];
+         m_state.reg[other] = value;
+         return true;
+      }
 
       case 0x99: // CDQ
          m_state.reg[kEdx] = (m_state.reg[kEax] & 0x80000000u) ?

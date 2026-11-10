@@ -137,6 +137,11 @@ EXTERN void DetailAttachmentsUpdate(void)
    {
       sLink link;
       query->Link(&link);
+      // (a link on archetypes -- abstract objects, negative numbers, as
+      // Malazar's Tower has -- is no place in the world: looked up as one it
+      // was out of every array, and the game crashed loading the mission)
+      if (link.source <= 0 || link.dest <= 0)
+         continue;
       const sDetailAttachData *data = (const sDetailAttachData *)g_pDetailAttachRelation->GetData(query->ID());
       ObjPos *parent = ObjPosGet(link.dest);
       if (parent == NULL || link.source == link.dest)

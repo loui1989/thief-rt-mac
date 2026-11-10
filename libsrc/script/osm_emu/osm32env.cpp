@@ -5,6 +5,7 @@
 
 #pragma pack(push, 8)
 #include <chrono>
+#include <ctype.h>
 #include <cmath>
 #include <stdio.h>
 #include <stdlib.h>
@@ -67,6 +68,126 @@ bool ReadCString(const osm32::cMemory &memory, uint32_t address,
    return Fail(error, "unterminated guest string");
 }
 
+// printf's formatting for a guest: its format, its arguments read from guest
+// memory one after another from argCursor (the stack, or a va_list)
+bool FormatGuest(const osm32::cMemory &memory, const std::string &format,
+                 uint32_t argCursor, std::string *out, std::string *error)
+{
+   out->clear();
+   auto next32 = [&](uint32_t *v) {
+      const bool ok = memory.Read32(argCursor, v, error);
+      argCursor += 4;
+      return ok;
+   };
+   for (size_t i = 0; i < format.size(); ++i)
+   {
+      if (format[i] != '%')
+      {
+         out->push_back(format[i]);
+         continue;
+      }
+      std::string spec = "%";
+      ++i;
+      while (i < format.size() && strchr("-+ #0", format[i])) spec += format[i++];
+      if (i < format.size() && format[i] == '*')
+      {
+         uint32_t w;
+         if (!next32(&w)) return false;
+         spec += std::to_string(static_cast<int32_t>(w));
+         ++i;
+      }
+      while (i < format.size() && isdigit(static_cast<unsigned char>(format[i]))) spec += format[i++];
+      if (i < format.size() && format[i] == '.')
+      {
+         spec += format[i++];
+         if (i < format.size() && format[i] == '*')
+         {
+            uint32_t p;
+            if (!next32(&p)) return false;
+            spec += std::to_string(static_cast<int32_t>(p));
+            ++i;
+         }
+         while (i < format.size() && isdigit(static_cast<unsigned char>(format[i]))) spec += format[i++];
+      }
+      bool wide64 = false;
+      while (i < format.size() && strchr("hlLIwjzt", format[i]))
+      {
+         if (format.compare(i, 3, "I64") == 0) { wide64 = true; i += 3; continue; }
+         if (format.compare(i, 2, "ll") == 0) { wide64 = true; i += 2; continue; }
+         ++i;   // (h, l, L, w...: 32 bits here, as on the guest)
+      }
+      if (i >= format.size()) break;
+      const char conv = format[i];
+      char buffer[512];
+      buffer[0] = 0;
+      if (conv == '%')
+         out->push_back('%');
+      else if (strchr("diouxXc", conv))
+      {
+         uint32_t lo, hi = 0;
+         if (!next32(&lo) || (wide64 && !next32(&hi))) return false;
+         if (wide64)
+         {
+            const uint64_t v = (static_cast<uint64_t>(hi) << 32) | lo;
+            snprintf(buffer, sizeof(buffer), (spec + "ll" + conv).c_str(),
+                     (conv == 'd' || conv == 'i') ? static_cast<long long>(v) : static_cast<long long>(v));
+         }
+         else if (conv == 'd' || conv == 'i')
+            snprintf(buffer, sizeof(buffer), (spec + conv).c_str(), static_cast<int>(static_cast<int32_t>(lo)));
+         else
+            snprintf(buffer, sizeof(buffer), (spec + conv).c_str(), static_cast<unsigned>(lo));
+         *out += buffer;
+      }
+      else if (strchr("eEfFgGaA", conv))
+      {
+         uint32_t lo, hi;
+         if (!next32(&lo) || !next32(&hi)) return false;
+         const uint64_t bits = (static_cast<uint64_t>(hi) << 32) | lo;
+         double v;
+         memcpy(&v, &bits, sizeof(v));
+         snprintf(buffer, sizeof(buffer), (spec + conv).c_str(), v);
+         *out += buffer;
+      }
+      else if (conv == 's' || conv == 'S')
+      {
+         uint32_t address;
+         if (!next32(&address)) return false;
+         std::string text = "(null)";
+         if (address && !ReadCString(memory, address, &text, error)) return false;
+         snprintf(buffer, sizeof(buffer), (spec + 's').c_str(), text.c_str());
+         *out += strlen(buffer) + 1 < sizeof(buffer) ? std::string(buffer) : text;
+      }
+      else if (conv == 'p')
+      {
+         uint32_t v;
+         if (!next32(&v)) return false;
+         snprintf(buffer, sizeof(buffer), "%08X", v);
+         *out += buffer;
+      }
+      else if (conv == 'n')
+      {
+         uint32_t v;
+         if (!next32(&v)) return false;   // (not written)
+      }
+      else
+         out->push_back(conv);
+   }
+   return true;
+}
+
+bool WriteGuestText(osm32::cMemory *memory, uint32_t destination, const std::string &text,
+                    uint32_t capacity, std::string *error)
+{
+   // (capacity counts the terminator; 0xffffffff: as long as it is)
+   const uint32_t n = static_cast<uint32_t>(text.size());
+   const uint32_t copy = capacity == 0xffffffffu ? n : (n < capacity ? n : capacity);
+   for (uint32_t i = 0; i < copy; ++i)
+      if (!memory->Write8(destination + i, static_cast<uint8_t>(text[i]), error)) return false;
+   if (copy < capacity || capacity == 0xffffffffu)
+      return memory->Write8(destination + copy, 0, error);
+   return true;
+}
+
 bool ReadStackDouble(const osm32::sCpuState &state,
                      const osm32::cMemory &memory, unsigned wordOffset,
                      double *value, std::string *error)
@@ -98,6 +219,9 @@ uint8_t AsciiLower(uint8_t character)
       static_cast<uint8_t>(character + ('a' - 'A')) : character;
 }
 
+// the handle KERNEL32 is found by (GetModuleHandleW): never a real module
+const uint32_t kKernel32Handle = 0x7c800000u;
+
 bool IsKernelImport(const osm32::sImport &item, const char *name)
 {
    return !item.byOrdinal && item.module == "KERNEL32.dll" &&
@@ -118,7 +242,8 @@ bool IsCrtImport(const osm32::sImport &item, const char *name)
 bool IsCrtDataImport(const osm32::sImport &item)
 {
    return !item.byOrdinal &&
-          (item.name == "_encoded_null" || item.name == "_adjust_fdiv");
+          (item.name == "_encoded_null" || item.name == "_adjust_fdiv" ||
+           item.name == "_pctype" || item.name == "__mb_cur_max");
 }
 
 bool EqualAsciiNoCase(const std::string &left, const std::string &right)
@@ -138,7 +263,10 @@ namespace osm32
 
 cEnvironment::cEnvironment()
  : m_imports(0),
+   m_memory(0),
    m_moduleHandle(0),
+   m_errno(0),
+   m_strtokNext(0),
    m_lastError(0)
 {
 }
@@ -162,6 +290,7 @@ bool cEnvironment::Prepare(cImage *image, cMemory *memory,
 {
    m_imports = &image->Imports();
    m_moduleHandle = image->LoadedBase();
+   m_memory = memory;
    for (size_t i = 0; i < m_imports->size(); ++i)
    {
       if (getenv("DARK_OSM32_TRACE") &&
@@ -198,10 +327,46 @@ bool cEnvironment::Prepare(cImage *image, cMemory *memory,
    m_services.clear();
    m_initializers.clear();
 
-   return memory->Map(kProxyBase, sizeof(proxies), kMemRead | kMemWrite,
-                      error) &&
-          memory->Load(kProxyBase, proxies, sizeof(proxies), error) &&
-          m_heap.Initialize(memory, kHeapBase, kHeapSize, error);
+   if (!memory->Map(kProxyBase, sizeof(proxies), kMemRead | kMemWrite,
+                    error) ||
+       !memory->Load(kProxyBase, proxies, sizeof(proxies), error) ||
+       !m_heap.Initialize(memory, kHeapBase, kHeapSize, error))
+      return false;
+   // the old runtime's data a module imports: its character types (as
+   // pointed to, by _pctype: from EOF, -1, on), one byte a character
+   // (__mb_cur_max); errno's place
+   m_errno = m_heap.Alloc(4, error);
+   if (!m_errno || !memory->Write32(m_errno, 0, error))
+      return false;
+   for (size_t i = 0; i < m_imports->size(); ++i)
+   {
+      const sImport &item = (*m_imports)[i];
+      const uint32_t cell = kImportDataBase + static_cast<uint32_t>(i) * 4;
+      if (!IsCrtDataImport(item))
+         continue;
+      if (item.name == "__mb_cur_max" && !memory->Write32(cell, 1, error))
+         return false;
+      if (item.name == "_pctype")
+      {
+         const uint32_t table = m_heap.Alloc(257 * 2, error);
+         if (!table || !memory->Write16(table, 0, error)) return false;
+         for (unsigned ch = 0; ch < 256; ++ch)
+         {
+            uint16_t type = 0;
+            if (ch >= 'A' && ch <= 'Z') type |= 0x101;
+            if (ch >= 'a' && ch <= 'z') type |= 0x102;
+            if (ch >= '0' && ch <= '9') type |= 0x04;
+            if ((ch >= 'a' && ch <= 'f') || (ch >= 'A' && ch <= 'F') || (ch >= '0' && ch <= '9')) type |= 0x80;
+            if (ch == ' ' || (ch >= 9 && ch <= 13)) type |= 0x08;
+            if (ch == ' ') type |= 0x40;
+            if (ch < 32 || ch == 127) type |= 0x20;
+            if (ch > 32 && ch < 127 && !(type & 0x107)) type |= 0x10;
+            if (!memory->Write16(table + 2 + ch * 2, type, error)) return false;
+         }
+         if (!memory->Write32(cell, table + 2, error)) return false;
+      }
+   }
+   return true;
 }
 
 bool cEnvironment::Handles(uint32_t address) const
@@ -318,6 +483,7 @@ bool cEnvironment::InvokeScriptManager(unsigned slot, sCpuState *state,
       const unsigned kServiceSlots = 64;
       sServiceProxy proxy;
       proxy.id = serviceId;
+      proxy.native = 0;
       proxy.object = m_heap.Alloc(4, error);
       proxy.vtable = m_heap.Alloc(kServiceSlots * 4, error);
       proxy.references = 1;
@@ -331,10 +497,99 @@ bool cEnvironment::InvokeScriptManager(unsigned slot, sCpuState *state,
       m_services.push_back(proxy);
       return ReturnStdcall(state, memory, 8, proxy.object, error);
    }
+   if (slot == 0)
+      return QueryAggregate(state, memory, error);
+   if (slot == 1 || slot == 2)
+      return ReturnStdcall(state, memory, 4, 1, error);   // AddRef, Release
    char message[80];
    snprintf(message, sizeof(message),
             "unsupported guest IScriptMan slot %u", slot);
    return Fail(error, message);
+}
+
+// QueryInterface on the script manager, or on an engine interface it gave
+// (stack: this, the IID, where the interface goes).
+bool cEnvironment::QueryAggregate(sCpuState *state, cMemory *memory, std::string *error)
+{
+   // In the game the script manager is part of the application's
+   // aggregate, as each of its interfaces is: asked for any of the
+   // engine's interfaces (Telliamed's and NamelessVoice's script
+   // libraries ask for the trait, sim and property managers), it hands
+   // it over. Here: the script manager itself, or IUnknown; the engine
+   // interfaces the host has proxies for (EngineInterfaceAvailable);
+   // for the others, none (the guest's libraries go without, or say so).
+   uint32_t guidAddress, result;
+   uint32_t guid[4];
+   if (!ReadStackArgument(*state, *memory, 1, &guidAddress, error) ||
+       !ReadStackArgument(*state, *memory, 2, &result, error))
+      return false;
+   for (unsigned i = 0; i < 4; ++i)
+      if (!memory->Read32(guidAddress + i * 4, &guid[i], error))
+         return false;
+   // (IUnknown: {00000000-0000-0000-C000-000000000046}; an LG one, n:
+   // {n...-7a80+n-11cf+n-8348-00aa00a82b51}, IScriptMan's n 0xcf)
+   const bool unknown = !guid[0] && !guid[1] && guid[2] == 0xc0u && guid[3] == 0x46000000u;
+   const uint32_t n = guid[1] & 0xffffu;
+   const bool lg = n >= 0x7a80u && guid[3] == 0x512ba800u;
+   const bool scriptMan = lg && n - 0x7a80u == 0xcfu;
+   static const bool s_trace = getenv("DARK_OSM32_TRACE") != NULL;
+   if (s_trace || (!unknown && !scriptMan && !(lg && EngineInterfaceAvailable(n - 0x7a80u))))
+   {
+      static unsigned s_told = 0;
+      if (s_told++ < 16)
+         fprintf(stderr, "OSM32: a script module asked for %s%#x: %s\n",
+                 lg ? "LG interface " : "interface ", lg ? n - 0x7a80u : guid[0],
+                 unknown || scriptMan ? "itself" : "not here");
+   }
+   if (unknown || scriptMan)
+   {
+      if (result && !memory->Write32(result, kScriptMan, error)) return false;
+      return ReturnStdcall(state, memory, 12, 0, error);
+   }
+   if (lg && n - 0x7a80u < 0x4000u && EngineInterfaceAvailable(n - 0x7a80u))
+   {
+      const uint16_t id = static_cast<uint16_t>(kEngineInterface | (n - 0x7a80u));
+      uint32_t object = 0;
+      for (size_t i = 0; i < m_services.size() && !object; ++i)
+         if (m_services[i].id == id)
+         {
+            object = m_services[i].object;
+            ++m_services[i].references;
+         }
+      if (!object && !(object = CreateInterfaceProxy(id, 0, error)))
+         return false;
+      if (result && !memory->Write32(result, object, error)) return false;
+      return ReturnStdcall(state, memory, 12, 0, error);
+   }
+   if (result && !memory->Write32(result, 0, error)) return false;
+   return ReturnStdcall(state, memory, 12, 0x80004002u, error);
+}
+
+uint32_t cEnvironment::CreateInterfaceProxy(uint16_t id, void *native, std::string *error)
+{
+const unsigned kSlots = 64;
+sServiceProxy proxy;
+proxy.id = id;
+proxy.native = native;
+proxy.references = 1;
+proxy.object = m_heap.Alloc(4, error);
+proxy.vtable = m_heap.Alloc(kSlots * 4, error);
+if (!proxy.object || !proxy.vtable || !m_memory ||
+    !m_memory->Write32(proxy.object, proxy.vtable, error))
+   return 0;
+for (unsigned i = 0; i < kSlots; ++i)
+   if (!m_memory->Write32(proxy.vtable + i * 4, kServiceTrap + i * kTrapStride, error))
+      return 0;
+m_services.push_back(proxy);
+return proxy.object;
+}
+
+void *cEnvironment::GetProxyNative(uint32_t object) const
+{
+   for (size_t i = 0; i < m_services.size(); ++i)
+      if (m_services[i].object == object)
+         return m_services[i].native;
+   return 0;
 }
 
 bool cEnvironment::GetScriptServiceId(uint32_t object, uint16_t *id) const
@@ -364,6 +619,8 @@ bool cEnvironment::InvokeScriptService(unsigned slot, sCpuState *state,
       }
    if (!proxy)
       return Fail(error, "invalid guest script service object");
+   if (slot == 0 && (proxy->id & kEngineInterface) && !(proxy->id & 0x4000))
+      return QueryAggregate(state, memory, error);
    if (slot == 0)
    {
       uint32_t output;
@@ -379,7 +636,17 @@ bool cEnvironment::InvokeScriptService(unsigned slot, sCpuState *state,
    {
       if (proxy->references)
          --proxy->references;
-      return ReturnStdcall(state, memory, 4, proxy->references, error);
+      const uint32_t left = proxy->references;
+      if (!left && proxy->native)
+      {
+         // (an object an engine interface returned: let go of, and its proxy)
+         const sServiceProxy gone = *proxy;
+         m_services.erase(m_services.begin() + (proxy - &m_services[0]));
+         ReleaseProxyNative(gone.id, gone.native);
+         m_heap.Free(gone.vtable, 0);
+         m_heap.Free(gone.object, 0);
+      }
+      return ReturnStdcall(state, memory, 4, left, error);
    }
    char message[96];
    snprintf(message, sizeof(message),
@@ -473,6 +740,15 @@ bool cEnvironment::ContinueInitializers(sCpuState *state, cMemory *memory,
 bool cEnvironment::InvokeImport(const sImport &item, sCpuState *state,
                                 cMemory *memory, std::string *error)
 {
+   static const bool s_traceImports = getenv("DARK_OSM32_IMPORTS") != NULL;
+   if (s_traceImports)
+   {
+      uint32_t a[3] = {0, 0, 0};
+      for (unsigned i = 0; i < 3; ++i)
+         ReadStackArgument(*state, *memory, i, &a[i], 0);
+      fprintf(stderr, "OSM32 import %s!%s (%08x %08x %08x)\n", item.module.c_str(),
+              item.name.c_str(), a[0], a[1], a[2]);
+   }
    if (IsCrtImport(item, "toupper") || IsCrtImport(item, "isspace"))
    {
       uint32_t character;
@@ -605,6 +881,276 @@ bool cEnvironment::InvokeImport(const sImport &item, sCpuState *state,
             address + static_cast<uint32_t>(offset)) :
          static_cast<uint32_t>(offset);
       return ReturnStdcall(state, memory, 0, result, error);
+   }
+   // The old runtime's (msvcrt.dll: tnhScript.osm)
+   if (IsCrtImport(item, "sprintf") || IsCrtImport(item, "_snprintf") ||
+       IsCrtImport(item, "_vsnprintf") || IsCrtImport(item, "vsprintf"))
+   {
+      const bool counted = item.name == "_snprintf" || item.name == "_vsnprintf";
+      const bool list = item.name == "_vsnprintf" || item.name == "vsprintf";
+      uint32_t destination, count = 0xffffffffu, formatAddress, cursor;
+      unsigned at = 0;
+      std::string format, text;
+      if (!ReadStackArgument(*state, *memory, at++, &destination, error) ||
+          (counted && !ReadStackArgument(*state, *memory, at++, &count, error)) ||
+          !ReadStackArgument(*state, *memory, at++, &formatAddress, error) ||
+          !ReadCString(*memory, formatAddress, &format, error))
+         return false;
+      if (list)
+      {
+         if (!ReadStackArgument(*state, *memory, at, &cursor, error)) return false;
+      }
+      else
+         cursor = state->reg[kEsp] + 4 + at * 4;
+      if (!FormatGuest(*memory, format, cursor, &text, error))
+         return false;
+      // (_snprintf: no terminator when it fills the buffer, and -1)
+      if (counted && text.size() >= count)
+      {
+         if (!WriteGuestText(memory, destination, text, count, error)) return false;
+         return ReturnStdcall(state, memory, 0, text.size() == count ? count : 0xffffffffu, error);
+      }
+      if (!WriteGuestText(memory, destination, text, 0xffffffffu, error)) return false;
+      return ReturnStdcall(state, memory, 0, static_cast<uint32_t>(text.size()), error);
+   }
+   if (IsCrtImport(item, "tolower"))
+   {
+      uint32_t ch;
+      if (!ReadStackArgument(*state, *memory, 0, &ch, error)) return false;
+      return ReturnStdcall(state, memory, 0, (ch >= 'A' && ch <= 'Z') ? ch + 32 : ch, error);
+   }
+   if (IsCrtImport(item, "_isctype"))
+   {
+      uint32_t ch, mask;
+      if (!ReadStackArgument(*state, *memory, 0, &ch, error) ||
+          !ReadStackArgument(*state, *memory, 1, &mask, error)) return false;
+      uint32_t type = 0;
+      if (ch < 128)
+      {
+         if (ch >= 'A' && ch <= 'Z') type |= 0x101;
+         if (ch >= 'a' && ch <= 'z') type |= 0x102;
+         if (ch >= '0' && ch <= '9') type |= 0x84;
+         if ((ch >= 'a' && ch <= 'f') || (ch >= 'A' && ch <= 'F')) type |= 0x80;
+         if (ch == ' ' || (ch >= 9 && ch <= 13)) type |= 0x08;
+         if (ch == ' ') type |= 0x40;
+         if (ch < 32 || ch == 127) type |= 0x20;
+         if (ch > 32 && ch < 127 && !(type & 0x107)) type |= 0x10;
+      }
+      return ReturnStdcall(state, memory, 0, type & mask, error);
+   }
+   if (IsCrtImport(item, "_errno"))
+      return ReturnStdcall(state, memory, 0, m_errno, error);
+   if (IsCrtImport(item, "strtoul"))
+   {
+      uint32_t address, endAddress, base;
+      std::string value;
+      if (!ReadStackArgument(*state, *memory, 0, &address, error) ||
+          !ReadStackArgument(*state, *memory, 1, &endAddress, error) ||
+          !ReadStackArgument(*state, *memory, 2, &base, error) ||
+          !ReadCString(*memory, address, &value, error))
+         return false;
+      char *end = 0;
+      const unsigned long result = strtoul(value.c_str(), &end, static_cast<int>(base));
+      if (endAddress && !memory->Write32(endAddress, address + static_cast<uint32_t>(end - value.c_str()), error))
+         return false;
+      return ReturnStdcall(state, memory, 0, static_cast<uint32_t>(result), error);
+   }
+   if (IsCrtImport(item, "strtok"))
+   {
+      // (its place in the string kept here, as the runtime keeps it)
+      uint32_t address, delimiters;
+      std::string delims;
+      if (!ReadStackArgument(*state, *memory, 0, &address, error) ||
+          !ReadStackArgument(*state, *memory, 1, &delimiters, error) ||
+          !ReadCString(*memory, delimiters, &delims, error))
+         return false;
+      uint32_t at = address ? address : m_strtokNext;
+      if (!at)
+         return ReturnStdcall(state, memory, 0, 0, error);
+      uint8_t ch;
+      for (;;)
+      {
+         if (!memory->Read8(at, &ch, error)) return false;
+         if (!ch || delims.find(static_cast<char>(ch)) == std::string::npos) break;
+         ++at;
+      }
+      if (!ch)
+      {
+         m_strtokNext = 0;
+         return ReturnStdcall(state, memory, 0, 0, error);
+      }
+      const uint32_t token = at;
+      for (;;)
+      {
+         if (!memory->Read8(at, &ch, error)) return false;
+         if (!ch) { m_strtokNext = 0; break; }
+         if (delims.find(static_cast<char>(ch)) != std::string::npos)
+         {
+            if (!memory->Write8(at, 0, error)) return false;
+            m_strtokNext = at + 1;
+            break;
+         }
+         ++at;
+      }
+      return ReturnStdcall(state, memory, 0, token, error);
+   }
+   if (IsCrtImport(item, "sscanf"))
+   {
+      // %d %i %u %x %f %g %e %s %c %n and %[..], widths, %*: the parsing
+      // the host's sscanf does, one conversion at a time
+      uint32_t source, formatAddress;
+      std::string input, format;
+      if (!ReadStackArgument(*state, *memory, 0, &source, error) ||
+          !ReadStackArgument(*state, *memory, 1, &formatAddress, error) ||
+          !ReadCString(*memory, source, &input, error) ||
+          !ReadCString(*memory, formatAddress, &format, error))
+         return false;
+      uint32_t cursor = state->reg[kEsp] + 4 + 2 * 4;
+      size_t at = 0;
+      int assigned = 0;
+      bool failed = false;
+      for (size_t i = 0; i < format.size() && !failed; ++i)
+      {
+         const char f = format[i];
+         if (isspace(static_cast<unsigned char>(f)))
+         {
+            while (at < input.size() && isspace(static_cast<unsigned char>(input[at]))) ++at;
+            continue;
+         }
+         if (f != '%' || (i + 1 < format.size() && format[i + 1] == '%'))
+         {
+            if (f == '%') ++i;
+            if (at < input.size() && input[at] == format[i]) { ++at; continue; }
+            break;
+         }
+         std::string spec = "%";
+         ++i;
+         const bool skip = i < format.size() && format[i] == '*';
+         if (skip) { spec += '*'; ++i; }
+         while (i < format.size() && isdigit(static_cast<unsigned char>(format[i]))) spec += format[i++];
+         bool isLong = false;
+         while (i < format.size() && strchr("hlL", format[i])) { isLong |= format[i] != 'h'; ++i; }
+         if (i >= format.size()) break;
+         char conv = format[i];
+         if (conv == '[')
+         {
+            spec += '[';
+            ++i;
+            if (i < format.size() && format[i] == '^') spec += format[i++];
+            if (i < format.size() && format[i] == ']') spec += format[i++];
+            while (i < format.size() && format[i] != ']') spec += format[i++];
+            spec += ']';
+         }
+         else
+            spec += conv;
+         spec += "%n";
+         const char *rest = input.c_str() + at;
+         int consumed = -1;
+         uint32_t target = 0;
+         if (!skip && conv != 'n')
+         {
+            if (!memory->Read32(cursor, &target, error)) return false;
+            cursor += 4;
+         }
+         if (conv == 'n')
+         {
+            if (!memory->Read32(cursor, &target, error)) return false;
+            cursor += 4;
+            if (!memory->Write32(target, static_cast<uint32_t>(at), error)) return false;
+            continue;
+         }
+         if (strchr("diuxXo", conv))
+         {
+            long long v = 0;
+            std::string sp = spec;
+            sp.insert(sp.size() - 3, "ll");
+            if (skip) sscanf(rest, sp.c_str(), &consumed);
+            else if (sscanf(rest, sp.c_str(), &v, &consumed) < 1) consumed = -1;
+            if (consumed < 0) { failed = true; break; }
+            if (!skip && !memory->Write32(target, static_cast<uint32_t>(v), error)) return false;
+         }
+         else if (strchr("eEfgG", conv))
+         {
+            double v = 0;
+            std::string sp = spec;
+            sp.insert(sp.size() - 3, "l");
+            if (skip) sscanf(rest, sp.c_str(), &consumed);
+            else if (sscanf(rest, sp.c_str(), &v, &consumed) < 1) consumed = -1;
+            if (consumed < 0) { failed = true; break; }
+            if (!skip)
+            {
+               uint64_t bits;
+               if (isLong) memcpy(&bits, &v, 8);
+               else { const float fv = static_cast<float>(v); uint32_t b32; memcpy(&b32, &fv, 4); bits = b32; }
+               if (!memory->Write32(target, static_cast<uint32_t>(bits), error) ||
+                   (isLong && !memory->Write32(target + 4, static_cast<uint32_t>(bits >> 32), error)))
+                  return false;
+            }
+         }
+         else
+         {
+            std::vector<char> v(input.size() + 2, 0);
+            if (skip) sscanf(rest, spec.c_str(), &consumed);
+            else if (sscanf(rest, spec.c_str(), v.data(), &consumed) < 1) consumed = -1;
+            if (consumed < 0) { failed = true; break; }
+            if (!skip)
+            {
+               const size_t n = conv == 'c' ? static_cast<size_t>(consumed) : strlen(v.data());
+               for (size_t k = 0; k < n; ++k)
+                  if (!memory->Write8(target + static_cast<uint32_t>(k), static_cast<uint8_t>(v[k]), error)) return false;
+               if (conv != 'c' && !memory->Write8(target + static_cast<uint32_t>(n), 0, error)) return false;
+            }
+         }
+         at += static_cast<size_t>(consumed);
+         if (!skip) ++assigned;
+      }
+      if (!assigned && failed && at >= input.size())
+         return ReturnStdcall(state, memory, 0, 0xffffffffu, error);   // EOF
+      return ReturnStdcall(state, memory, 0, static_cast<uint32_t>(assigned), error);
+   }
+   if (IsCrtImport(item, "div"))
+   {
+      // (an 8-byte struct, returned in EDX:EAX)
+      uint32_t n, d;
+      if (!ReadStackArgument(*state, *memory, 0, &n, error) ||
+          !ReadStackArgument(*state, *memory, 1, &d, error)) return false;
+      const int32_t ni = static_cast<int32_t>(n), di = static_cast<int32_t>(d);
+      if (!di) return Fail(error, "guest div by zero");
+      state->reg[kEdx] = static_cast<uint32_t>(ni % di);
+      return ReturnStdcall(state, memory, 0, static_cast<uint32_t>(ni / di), error);
+   }
+   if (IsCrtImport(item, "acos"))
+   {
+      double first;
+      if (!ReadStackDouble(*state, *memory, 0, &first, error)) return false;
+      return ReturnCrtDouble(state, memory, std::acos(first), error);
+   }
+   if (IsCrtImport(item, "_write"))
+   {
+      uint32_t handle, buffer, count;
+      if (!ReadStackArgument(*state, *memory, 0, &handle, error) ||
+          !ReadStackArgument(*state, *memory, 1, &buffer, error) ||
+          !ReadStackArgument(*state, *memory, 2, &count, error)) return false;
+      std::string text;
+      for (uint32_t i = 0; i < count && i < 1024; ++i)
+      {
+         uint8_t b;
+         if (!memory->Read8(buffer + i, &b, error)) return false;
+         text += static_cast<char>(b);
+      }
+      DebugOutput(text);
+      return ReturnStdcall(state, memory, 0, count, error);
+   }
+   if (IsCrtImport(item, "_assert") || IsCrtImport(item, "abort"))
+   {
+      std::string what = "guest runtime ";
+      what += item.name;
+      uint32_t text;
+      std::string message;
+      if (item.name == "_assert" && ReadStackArgument(*state, *memory, 0, &text, 0) &&
+          ReadCString(*memory, text, &message, 0))
+         what += ": " + message;
+      return Fail(error, what.c_str());
    }
    if (IsCrtImport(item, "strtol") || IsCrtImport(item, "strtod"))
    {
@@ -843,6 +1389,237 @@ bool cEnvironment::InvokeImport(const sImport &item, sCpuState *state,
       return ReturnStdcall(state, memory, 0, destination, error);
    }
 
+   // The newer Visual C++ runtime's start-up (NVScript.osm): its security
+   // cookie from the time, the process and a counter; its locks with a spin
+   // count; its handlers for unhandled exceptions, which this host has none
+   // of; the platform's procedures it looks up, found by none here.
+   if (IsKernelImport(item, "GetSystemTimeAsFileTime") ||
+       IsKernelImport(item, "QueryPerformanceCounter"))
+   {
+      uint32_t destination;
+      if (!ReadStackArgument(*state, *memory, 0, &destination, error))
+         return false;
+      const uint64_t ticks = static_cast<uint64_t>(
+         std::chrono::duration_cast<std::chrono::microseconds>(
+            std::chrono::steady_clock::now().time_since_epoch()).count()) * 10u +
+         116444736000000000ull;
+      if (!memory->Write32(destination, static_cast<uint32_t>(ticks), error) ||
+          !memory->Write32(destination + 4, static_cast<uint32_t>(ticks >> 32), error))
+         return false;
+      return ReturnStdcall(state, memory, 4, 1, error);
+   }
+   if (IsKernelImport(item, "QueryPerformanceFrequency"))
+   {
+      uint32_t destination;
+      if (!ReadStackArgument(*state, *memory, 0, &destination, error) ||
+          !memory->Write32(destination, 10000000u, error) ||
+          !memory->Write32(destination + 4, 0, error))
+         return false;
+      return ReturnStdcall(state, memory, 4, 1, error);
+   }
+   if (IsKernelImport(item, "GetCurrentProcessId"))
+      return ReturnStdcall(state, memory, 0, 0x1000, error);
+   if (IsKernelImport(item, "GetCurrentProcess"))
+      return ReturnStdcall(state, memory, 0, 0xffffffffu, error);
+   if (IsKernelImport(item, "InitializeCriticalSectionAndSpinCount"))
+      return ReturnStdcall(state, memory, 8, 1, error);
+   if (IsKernelImport(item, "SetUnhandledExceptionFilter"))
+      return ReturnStdcall(state, memory, 4, 0, error);
+   if (IsKernelImport(item, "IsDebuggerPresent"))
+      return ReturnStdcall(state, memory, 0, 0, error);
+   if (IsKernelImport(item, "IsProcessorFeaturePresent"))
+      return ReturnStdcall(state, memory, 4, 0, error);
+   if (IsKernelImport(item, "GetModuleHandleW") ||
+       IsKernelImport(item, "LoadLibraryA") || IsKernelImport(item, "LoadLibraryW"))
+   {
+      // KERNEL32 itself is there (the runtime waits for it, then gives up
+      // and exits); none other is. Its procedures: none found -- the
+      // runtime has its fallbacks (thread storage for fibre storage...)
+      uint32_t name;
+      if (!ReadStackArgument(*state, *memory, 0, &name, error)) return false;
+      std::string text;
+      if (name)
+      {
+         const bool wide = item.name.back() == 'W';
+         for (uint32_t i = 0; i < 260; ++i)
+         {
+            uint32_t ch = 0;
+            if (wide)
+            {
+               uint16_t w;
+               if (!memory->Read16(name + i * 2, &w, error)) return false;
+               ch = w;
+            }
+            else
+            {
+               uint8_t b;
+               if (!memory->Read8(name + i, &b, error)) return false;
+               ch = b;
+            }
+            if (!ch) break;
+            text += static_cast<char>(ch < 128 ? ch : '?');
+         }
+      }
+      uint32_t handle = name ? 0 : m_moduleHandle;
+      if (EqualAsciiNoCase(text, "kernel32.dll") || EqualAsciiNoCase(text, "kernel32"))
+         handle = kKernel32Handle;
+      return ReturnStdcall(state, memory, 4, handle, error);
+   }
+   if (IsKernelImport(item, "GetProcAddress"))
+      return ReturnStdcall(state, memory, 8, 0, error);
+   if (IsKernelImport(item, "Sleep"))
+      return ReturnStdcall(state, memory, 4, 0, error);
+   if (IsKernelImport(item, "IsValidCodePage"))
+      return ReturnStdcall(state, memory, 4, 1, error);
+   if (IsKernelImport(item, "GetUserDefaultLCID"))
+      return ReturnStdcall(state, memory, 0, 0x0409, error);
+   if (IsKernelImport(item, "IsValidLocale"))
+      return ReturnStdcall(state, memory, 8, 1, error);
+   if (IsKernelImport(item, "VirtualAlloc"))
+   {
+      // (zeroed, as the system's pages are; never given back)
+      uint32_t size;
+      if (!ReadStackArgument(*state, *memory, 1, &size, error)) return false;
+      const uint32_t allocation = size ? m_heap.Alloc(size, error) : 0;
+      if (!allocation && size) return false;
+      for (uint32_t i = 0; i < size; ++i)
+         if (!memory->Write8(allocation + i, 0, error)) return false;
+      return ReturnStdcall(state, memory, 16, allocation, error);
+   }
+   if (IsKernelImport(item, "VirtualFree"))
+      return ReturnStdcall(state, memory, 12, 1, error);
+   // Character types and case (the runtime's ctype tables and toupper):
+   // ASCII as the system has it, every other character none of them
+   if (IsKernelImport(item, "GetStringTypeW") || IsKernelImport(item, "GetStringTypeA") ||
+       IsKernelImport(item, "GetStringTypeExA"))
+   {
+      const bool ansi = item.name != "GetStringTypeW";
+      const unsigned first = ansi ? 1 : 0;   // (the A forms: a locale first)
+      uint32_t infoType, source, count, destination;
+      if (!ReadStackArgument(*state, *memory, first, &infoType, error) ||
+          !ReadStackArgument(*state, *memory, first + 1, &source, error) ||
+          !ReadStackArgument(*state, *memory, first + 2, &count, error) ||
+          !ReadStackArgument(*state, *memory, first + 3, &destination, error))
+         return false;
+      const uint32_t argBytes = (first + 4) * 4;
+      if (infoType != 1)
+         return ReturnStdcall(state, memory, argBytes, 0, error);
+      for (uint32_t i = 0; count == 0xffffffffu || i < count; ++i)
+      {
+         uint32_t ch = 0;
+         if (ansi)
+         {
+            uint8_t b;
+            if (!memory->Read8(source + i, &b, error)) return false;
+            ch = b;
+         }
+         else
+         {
+            uint16_t w;
+            if (!memory->Read16(source + i * 2, &w, error)) return false;
+            ch = w;
+         }
+         uint16_t type = 0;
+         if (ch < 128)
+         {
+            if (ch >= 'A' && ch <= 'Z') type |= 0x101;
+            if (ch >= 'a' && ch <= 'z') type |= 0x102;
+            if (ch >= '0' && ch <= '9') type |= 0x84;
+            if ((ch >= 'a' && ch <= 'f') || (ch >= 'A' && ch <= 'F')) type |= 0x80;
+            if (ch == ' ' || (ch >= 9 && ch <= 13)) type |= 0x08;
+            if (ch == ' ' || ch == 9) type |= 0x40;
+            if (ch < 32 || ch == 127) type |= 0x20;
+            if (ch > 32 && ch < 127 && !(type & 0x107)) type |= 0x10;
+         }
+         if (!memory->Write16(destination + i * 2, type, error)) return false;
+         if (count == 0xffffffffu && !ch) break;
+      }
+      return ReturnStdcall(state, memory, argBytes, 1, error);
+   }
+   if (IsKernelImport(item, "LCMapStringW") || IsKernelImport(item, "LCMapStringA"))
+   {
+      const bool wide = item.name == "LCMapStringW";
+      const uint32_t unit = wide ? 2 : 1;
+      uint32_t flags, source, count, destination, capacity;
+      if (!ReadStackArgument(*state, *memory, 1, &flags, error) ||
+          !ReadStackArgument(*state, *memory, 2, &source, error) ||
+          !ReadStackArgument(*state, *memory, 3, &count, error) ||
+          !ReadStackArgument(*state, *memory, 4, &destination, error) ||
+          !ReadStackArgument(*state, *memory, 5, &capacity, error))
+         return false;
+      std::vector<uint32_t> text;
+      for (uint32_t i = 0; count == 0xffffffffu || i < count; ++i)
+      {
+         uint32_t ch = 0;
+         if (wide)
+         {
+            uint16_t w;
+            if (!memory->Read16(source + i * 2, &w, error)) return false;
+            ch = w;
+         }
+         else
+         {
+            uint8_t b;
+            if (!memory->Read8(source + i, &b, error)) return false;
+            ch = b;
+         }
+         if (flags & 0x100) ch = (ch >= 'A' && ch <= 'Z') ? ch + 32 : ch;
+         if (flags & 0x200) ch = (ch >= 'a' && ch <= 'z') ? ch - 32 : ch;
+         text.push_back(ch);
+         if (count == 0xffffffffu && !ch) break;
+         if (text.size() > 0x100000) break;
+      }
+      if (!capacity)
+         return ReturnStdcall(state, memory, 24, static_cast<uint32_t>(text.size()), error);
+      if (capacity < text.size())
+         return ReturnStdcall(state, memory, 24, 0, error);
+      for (size_t i = 0; i < text.size(); ++i)
+         if (!(wide ? memory->Write16(destination + i * unit, static_cast<uint16_t>(text[i]), error)
+                    : memory->Write8(destination + i, static_cast<uint8_t>(text[i]), error)))
+            return false;
+      return ReturnStdcall(state, memory, 24, static_cast<uint32_t>(text.size()), error);
+   }
+   if (IsKernelImport(item, "GetLocaleInfoA") || IsKernelImport(item, "GetLocaleInfoW"))
+      return ReturnStdcall(state, memory, 16, 0, error);
+   if (IsKernelImport(item, "EnumSystemLocalesA") || IsKernelImport(item, "EnumSystemLocalesW"))
+      return ReturnStdcall(state, memory, 8, 1, error);
+   // Files and the console: none (the runtime's start-up and its messages)
+   if (IsKernelImport(item, "GetConsoleCP") || IsKernelImport(item, "GetConsoleOutputCP"))
+      return ReturnStdcall(state, memory, 0, 437, error);
+   if (IsKernelImport(item, "GetConsoleMode"))
+      return ReturnStdcall(state, memory, 8, 0, error);
+   if (IsKernelImport(item, "WriteFile") || IsKernelImport(item, "WriteConsoleA") ||
+       IsKernelImport(item, "WriteConsoleW"))
+   {
+      // (taken: all of it said written, the debug text shown)
+      uint32_t buffer, count, written;
+      if (!ReadStackArgument(*state, *memory, 1, &buffer, error) ||
+          !ReadStackArgument(*state, *memory, 2, &count, error) ||
+          !ReadStackArgument(*state, *memory, 3, &written, error))
+         return false;
+      if (written && !memory->Write32(written, count, error)) return false;
+      std::string text;
+      for (uint32_t i = 0; i < count && i < 512 && item.name != "WriteConsoleW"; ++i)
+      {
+         uint8_t b;
+         if (!memory->Read8(buffer + i, &b, error)) return false;
+         text += static_cast<char>(b);
+      }
+      DebugOutput(text);
+      return ReturnStdcall(state, memory, 20, 1, error);
+   }
+   if (IsKernelImport(item, "ReadFile"))
+      return ReturnStdcall(state, memory, 20, 0, error);
+   if (IsKernelImport(item, "SetFilePointer"))
+      return ReturnStdcall(state, memory, 16, 0xffffffffu, error);
+   if (IsKernelImport(item, "CreateFileA") || IsKernelImport(item, "CreateFileW"))
+      return ReturnStdcall(state, memory, 28, 0xffffffffu, error);
+   if (IsKernelImport(item, "CloseHandle") || IsKernelImport(item, "FlushFileBuffers"))
+      return ReturnStdcall(state, memory, 4, 1, error);
+   if (IsKernelImport(item, "UnhandledExceptionFilter"))
+      return ReturnStdcall(state, memory, 4, 0, error);
+   if (!item.byOrdinal && item.module == "USER32.dll" && item.name == "GetAsyncKeyState")
+      return ReturnStdcall(state, memory, 4, 0, error);
    if (IsKernelImport(item, "GetVersion"))
       return ReturnStdcall(state, memory, 0, 5, error);
    if (IsKernelImport(item, "DisableThreadLibraryCalls"))

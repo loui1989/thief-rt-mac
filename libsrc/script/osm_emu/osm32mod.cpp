@@ -37,6 +37,12 @@
 #pragma pack(pop)
 
 #include <aiscrptapi.h>
+#include <traitman.h>
+#include <objquery.h>
+#include <simman.h>
+#include <propface.h>
+#include <pfaceiid.h>
+#include <map>
 #include <drkuiscrapi.h>
 
 namespace
@@ -849,6 +855,239 @@ protected:
       return Return(state, memory, 12, result, error);
    }
 
+   // The engine's own interfaces a guest asked the script manager for
+   // (Telliamed's and NamelessVoice's script libraries: the trait manager,
+   // for what inherits from what), and the object queries they return.
+   virtual bool EngineInterfaceAvailable(uint32_t lgNumber)
+   {
+      return lgNumber == 0x8f ||    // ITraitManager
+             lgNumber == 0x149 ||   // ISimManager
+             lgNumber == 0x78;      // IPropertyManager
+   }
+
+   virtual void ReleaseProxyNative(uint16_t id, void *native)
+   {
+      if (id == (kEngineObject | 1) && native)
+         static_cast<IObjectQuery *>(native)->Release();
+      if (id == (kEngineObject | 2) && native)
+         static_cast<IProperty *>(native)->Release();
+   }
+
+   // a string property's text, copied out to the guest (one buffer an
+   // object, reused while the text fits)
+   struct sGuestText { uint32_t address; uint32_t capacity; };
+   std::map<int32_t, sGuestText> m_guestTexts;
+
+   bool GuestText(int32_t obj, const char *text, osm32::cMemory *memory, uint32_t *address,
+                  std::string *error)
+   {
+      const uint32_t length = static_cast<uint32_t>(strlen(text ? text : ""));
+      sGuestText &t = m_guestTexts[obj];
+      if (t.capacity < length + 1)
+      {
+         if (t.address)
+            FreeGuest(t.address, 0);
+         t.capacity = length + 1 < 64 ? 64 : length + 1;
+         t.address = AllocGuest(t.capacity, error);
+         if (!t.address)
+         {
+            t.capacity = 0;
+            return false;
+         }
+      }
+      for (uint32_t i = 0; i <= length; ++i)
+         if (!memory->Write8(t.address + i, i < length ? static_cast<uint8_t>(text[i]) : 0, error))
+            return false;
+      *address = t.address;
+      return true;
+   }
+
+   bool InvokeEngineInterface(uint16_t id, uint32_t guestObject, unsigned slot,
+                              osm32::sCpuState *state, osm32::cMemory *memory,
+                              std::string *error)
+   {
+      uint32_t a = 0, b = 0, c = 0;
+      Argument(*state, *memory, 1, &a, 0);
+      Argument(*state, *memory, 2, &b, 0);
+      Argument(*state, *memory, 3, &c, 0);
+      if (id == (kEngineObject | 1))
+      {
+         // IObjectQuery: Done, Object, Next
+         IObjectQuery *query = static_cast<IObjectQuery *>(GetProxyNative(guestObject));
+         if (!query)
+         {
+            if (error) *error = "object query proxy without its query";
+            return false;
+         }
+         if (slot == 3) return Return(state, memory, 4, query->Done() ? 1 : 0, error);
+         if (slot == 4) return Return(state, memory, 4, static_cast<uint32_t>(query->Object()), error);
+         if (slot == 5) return Return(state, memory, 4, static_cast<uint32_t>(query->Next()), error);
+      }
+      else if (id == (kEngineInterface | 0x149))
+      {
+         // ISimManager: a guest's listener for the sim's messages is taken
+         // and never called (its library's caches are only ever fresh)
+         if (slot == 3 || slot == 4) return Return(state, memory, 8, 0, error);
+         if (slot == 9)
+         {
+            ISimManager *sim = AppGetObj(ISimManager);
+            const uint32_t last = sim ? static_cast<uint32_t>(sim->LastMsg()) : 0;
+            if (sim) sim->Release();
+            return Return(state, memory, 4, last, error);
+         }
+      }
+      else if (id == (kEngineInterface | 0x78) && (slot == 3 || slot == 4))
+      {
+         // IPropertyManager: GetProperty, GetPropertyNamed
+         IPropertyManager *props = AppGetObj(IPropertyManager);
+         if (!props)
+         {
+            if (error) *error = "native property manager is unavailable";
+            return false;
+         }
+         IProperty *prop = 0;
+         if (slot == 3)
+            prop = props->GetProperty(static_cast<PropertyID>(a));
+         else
+         {
+            std::string name;
+            if (!ReadGuestString(memory, a, &name, error))
+            {
+               props->Release();
+               return false;
+            }
+            prop = props->GetPropertyNamed(name.c_str());
+         }
+         props->Release();
+         uint32_t result = 0;
+         if (prop && !(result = CreateInterfaceProxy(kEngineObject | 2, prop, error)))
+         {
+            prop->Release();
+            return false;
+         }
+         return Return(state, memory, 8, result, error);
+      }
+      else if (id == (kEngineObject | 2))
+      {
+         // IProperty, and as IStringProperty (the Design Note's text)
+         IProperty *prop = static_cast<IProperty *>(GetProxyNative(guestObject));
+         if (!prop)
+         {
+            if (error) *error = "property proxy without its property";
+            return false;
+         }
+         const ObjID obj = static_cast<ObjID>(static_cast<int32_t>(a));
+         switch (slot)
+         {
+            case 4: return Return(state, memory, 4, static_cast<uint32_t>(prop->GetID()), error);
+            case 6: return Return(state, memory, 8, static_cast<uint32_t>(prop->Create(obj)), error);
+            case 7:
+               return Return(state, memory, 12,
+                             static_cast<uint32_t>(prop->Copy(obj, static_cast<ObjID>(static_cast<int32_t>(b)))), error);
+            case 8: return Return(state, memory, 8, static_cast<uint32_t>(prop->Delete(obj)), error);
+            case 9: return Return(state, memory, 8, prop->IsRelevant(obj) ? 1 : 0, error);
+            case 10: return Return(state, memory, 8, prop->IsSimplyRelevant(obj) ? 1 : 0, error);
+            case 11: return Return(state, memory, 8, prop->Touch(obj) ? 1 : 0, error);
+            // (a guest's listener for its changes: taken, never called --
+            // its library reads the Design Note afresh)
+            case 13: return Return(state, memory, 16, 1, error);
+            case 14: return Return(state, memory, 8, 0, error);
+            default: break;
+         }
+         if (slot >= 18 && slot <= 21)
+         {
+            IStringProperty *text = 0;
+            if (FAILED(prop->QueryInterface(IID_IStringProperty, reinterpret_cast<void **>(&text))) || !text)
+            {
+               if (error) *error = "property is not a string property";
+               return false;
+            }
+            uint32_t result = 0;
+            bool ok = true;
+            if (slot == 18 || slot == 19)
+            {
+               std::string value;
+               ok = !b || ReadGuestString(memory, b, &value, error);
+               if (ok)
+                  result = slot == 18 ? static_cast<uint32_t>(text->Set(obj, value.c_str()))
+                                      : (text->TouchValue(obj, value.c_str()) ? 1 : 0);
+            }
+            else
+            {
+               const char *value = 0;
+               const BOOL got = slot == 20 ? text->Get(obj, &value) : text->GetSimple(obj, &value);
+               result = got ? 1 : 0;
+               uint32_t address = 0;
+               if (got && b)
+                  ok = GuestText(static_cast<int32_t>(obj), value, memory, &address, error) &&
+                       memory->Write32(b, address, error);
+            }
+            text->Release();
+            return ok && Return(state, memory, 12, result, error);
+         }
+      }
+      else if (id == (kEngineInterface | 0x8f))
+      {
+         ITraitManager *traits = AppGetObj(ITraitManager);
+         if (!traits)
+         {
+            if (error) *error = "native trait manager is unavailable";
+            return false;
+         }
+         const ObjID objA = static_cast<ObjID>(static_cast<int32_t>(a));
+         const ObjID objB = static_cast<ObjID>(static_cast<int32_t>(b));
+         bool done = true;
+         uint32_t result = 0, bytes = 4;
+         switch (slot)
+         {
+            case 6: result = static_cast<uint32_t>(traits->GetArchetype(objA)); bytes = 8; break;
+            case 7: result = static_cast<uint32_t>(traits->SetArchetype(objA, objB)); bytes = 12; break;
+            case 8: result = traits->IsArchetype(objA) ? 1 : 0; bytes = 8; break;
+            case 9: result = static_cast<uint32_t>(traits->RootMetaProperty()); bytes = 4; break;
+            case 11: result = traits->IsMetaProperty(objA) ? 1 : 0; bytes = 8; break;
+            case 12: result = static_cast<uint32_t>(traits->AddObjMetaProperty(objA, objB)); bytes = 12; break;
+            case 13:
+               result = static_cast<uint32_t>(traits->AddObjMetaPropertyPrioritized(
+                  objA, objB, static_cast<tMetaPropertyPriority>(c)));
+               bytes = 16;
+               break;
+            case 14: result = static_cast<uint32_t>(traits->RemoveObjMetaProperty(objA, objB)); bytes = 12; break;
+            case 15:
+               result = static_cast<uint32_t>(traits->RemoveObjMetaPropertyPrioritized(
+                  objA, objB, static_cast<tMetaPropertyPriority>(c)));
+               bytes = 16;
+               break;
+            case 16: result = traits->ObjHasDonor(objA, objB) ? 1 : 0; bytes = 12; break;
+            case 17: result = traits->ObjHasDonorIntrinsically(objA, objB) ? 1 : 0; bytes = 12; break;
+            case 18: result = traits->ObjIsDonor(objA) ? 1 : 0; bytes = 8; break;
+            case 19:
+            {
+               IObjectQuery *query = traits->Query(objA, static_cast<eTraitQueryType>(b));
+               bytes = 12;
+               if (query)
+               {
+                  result = CreateInterfaceProxy(kEngineObject | 1, query, error);
+                  if (!result)
+                  {
+                     query->Release();
+                     traits->Release();
+                     return false;
+                  }
+               }
+               break;
+            }
+            default: done = false; break;
+         }
+         traits->Release();
+         if (done)
+            return Return(state, memory, bytes, result, error);
+      }
+      char message[96];
+      snprintf(message, sizeof(message), "unsupported engine interface %#x method %u", id, slot);
+      if (error) *error = message;
+      return false;
+   }
+
    virtual bool InvokeScriptService(unsigned slot, osm32::sCpuState *state,
                                     osm32::cMemory *memory,
                                     std::string *error)
@@ -862,6 +1101,8 @@ protected:
                                     error) ||
           !GetScriptServiceId(guestObject, &serviceId))
          return false;
+      if (serviceId & kEngineInterface)
+         return InvokeEngineInterface(serviceId, guestObject, slot, state, memory, error);
 
       if (!osm32::GuestServiceMethodExists(m_guestAbi, serviceId, slot))
       {

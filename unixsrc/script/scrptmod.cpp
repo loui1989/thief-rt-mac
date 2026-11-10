@@ -8,6 +8,7 @@
 #pragma pack(push, 8)
 #include <dlfcn.h>
 #include <stdlib.h>
+#include <stdio.h>
 #include <string>
 #pragma pack(pop)
 
@@ -49,9 +50,16 @@ BOOL cScriptMan::LoadModule(const cFileSpec &module, sScrModuleInfo *info)
     }
 
     std::string error;
-    return LoadOsm32Module(module.GetName(), module.GetFileName(), this,
-                           guestAbi,
-                           &info->pModule, &error) ? TRUE : FALSE;
+    if (LoadOsm32Module(module.GetName(), module.GetFileName(), this,
+                        guestAbi, &info->pModule, &error))
+        return TRUE;
+    // (said: a mission's scripts missing without a word left its
+    // contraptions dead -- Malazar's Tower's NVScript and tnhScript)
+    mprintf("Script module %s could not be loaded: %s\n", module.GetFileName(),
+            error.empty() ? "no reason given" : error.c_str());
+    fprintf(stderr, "Script module %s could not be loaded: %s\n", module.GetFileName(),
+            error.empty() ? "no reason given" : error.c_str());
+    return FALSE;
 }
 
 void cScriptMan::FreeModule(sScrModuleInfo *info)
