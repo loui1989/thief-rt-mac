@@ -1313,6 +1313,9 @@ struct SkyDraw {
 struct SkyCapture {
    int face = -1;
    float ul[3] = {}, right[3] = {}, down[3] = {};
+   // how far its drawn triangles reach on it (screen points; not grown):
+   // the face's edges as the game clipped to them (RenderRTSkyFaceEnd)
+   float x0 = 1e9f, x1 = -1e9f, y0 = 1e9f, y1 = -1e9f;
 } g_skyCap;
 std::vector<SkyDraw> g_skyFaces[6];
 unsigned g_skyFacesSeen = 0;   // a bit for each face drawn since the world came
@@ -3831,17 +3834,14 @@ void SetFog(int, uint32_t) {}
 // a sky face's polygons (or points: stars), back in 3D (see g_skyFaces)
 void sky_capture(int primitive, const sRenderBackendVertex *v, int count)
 {
-   const SkyCapture &c = g_skyCap;
+   SkyCapture &c = g_skyCap;
    const float S = float(kSkyFaceSize);
+   // (kept as drawn -- the screen point and its depth -- and turned to a
+   // direction when the face is done: RenderRTSkyFaceEnd)
    auto at = [&](float x, float y, float rhw, float out[3]) {
-      // (r3_get_view_vec: a screen point's direction, linear across the face;
-      // r3's projection puts the face's edges at -0.5 and S - 0.5, its
-      // pixels' centres -- taken as 0 and S, each face lay half a pixel off
-      // its own pyramid, and two faces' clouds did not meet at their edge)
-      const float a = (x + 0.5f) / S, b = (y + 0.5f) / S;
-      const float z = rhw > 1e-9f ? 1.0f / rhw : 1e6f;
-      for (int k = 0; k < 3; ++k)
-         out[k] = (c.ul[k] + c.right[k] * a + c.down[k] * b) * z;
+      out[0] = x;
+      out[1] = y;
+      out[2] = rhw > 1e-9f ? 1.0f / rhw : 1e6f;
    };
    auto vert = [&](const sRenderBackendVertex &q, const float p[3], float uOff, float vOff) {
       RgPrimitiveVertex d{};
@@ -3907,6 +3907,10 @@ void sky_capture(int primitive, const sRenderBackendVertex *v, int count)
             };
             snap(x);
             snap(y);
+            c.x0 = std::min(c.x0, x);
+            c.x1 = std::max(c.x1, x);
+            c.y0 = std::min(c.y0, y);
+            c.y1 = std::max(c.y1, y);
             if (grow) {
                const float dx = x - cx, dy = y - cy, l = std::sqrt(dx * dx + dy * dy);
                if (l > 1e-3f)
@@ -7399,6 +7403,8 @@ void RenderRTSkyFaceBegin(int face, const float corners[12])
    g_skyFaces[face].clear();
    g_skyTris = 0;
    c.face = face;
+   c.x0 = c.y0 = 1e9f;
+   c.x1 = c.y1 = -1e9f;
 }
 
 void RenderRTSkyFaceEnd(void)
@@ -7407,6 +7413,35 @@ void RenderRTSkyFaceEnd(void)
    g_skyCap.face = -1;
    if (face < 0)
       return;
+   {
+      // Screen points to directions, by the face's view pyramid. Its edges
+      // where the game clipped its triangles to them -- as far as they reach
+      // on it, the sky filling the face -- else where r3 puts them (-0.5, S -
+      // 0.5). Two faces' clouds met at a common edge only so: a face mapped
+      // half a pixel off its pyramid left a gap in the clouds along every edge
+      // of the cube (dotted dark lines across the sky), whichever half pixel
+      // it was taken to be.
+      const SkyCapture &c = g_skyCap;
+      const float S = float(kSkyFaceSize);
+      float x0 = -0.5f, x1 = S - 0.5f, y0 = -0.5f, y1 = S - 0.5f;
+      const bool filled = c.x1 - c.x0 > 0.9f * S && c.y1 - c.y0 > 0.9f * S &&
+                          c.x0 > -3.0f && c.y0 > -3.0f && c.x1 < S + 3.0f && c.y1 < S + 3.0f;
+      if (filled)
+         x0 = c.x0, x1 = c.x1, y0 = c.y0, y1 = c.y1;
+      static unsigned s_logged = 0;
+      if (!(s_logged & (1u << face))) {
+         s_logged |= 1u << face;
+         fprintf(stderr, "RT: sky face %d reaches %.2f to %.2f across, %.2f to %.2f down (of %d)%s\n", face, c.x0, c.x1,
+                 c.y0, c.y1, kSkyFaceSize, filled ? "" : " -- not filled: its edges taken as r3's");
+      }
+      for (SkyDraw &d : g_skyFaces[face])
+         for (RgPrimitiveVertex &v : d.verts) {
+            const float a = (v.position[0] - x0) / (x1 - x0), b = (v.position[1] - y0) / (y1 - y0);
+            const float z = v.position[2];
+            for (int k = 0; k < 3; ++k)
+               v.position[k] = (c.ul[k] + c.right[k] * a + c.down[k] * b) * z;
+         }
+   }
    {
       // the first face drawn sets the scale (its farthest point to 100 m)
       float far = 0.0f;
