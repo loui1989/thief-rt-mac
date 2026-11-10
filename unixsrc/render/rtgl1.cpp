@@ -168,6 +168,7 @@ struct Settings {
    int playerBody = 1;        // Garrett's own model: his shadow, and him in mirrors and water (unseen by the camera)
    int shadowAlert = 0;       // the guards notice his shadow (g_PlayerShadowAlert, objlight.c)
    int testMirror = 0;        // inspecting a wall makes its texture a mirror (to see Garrett whole)
+   bool fogLit = false;       // the mission's fog lit by the lamps in it (a grain as the view moves), or flat as the game's
    float lightSoft = 1.0f;    // a strong lamp's light is a bigger source: no white spot on the wall next to it (0 off)  // a torch's body casts shadows (only its cup lets the flame's light out)
    bool steadyFaces = true;   // models' faces seen or shadow-only by a fixed rule, not by the view
    bool lightFix = true;      // lights moved out of the walls they sit in
@@ -246,6 +247,7 @@ void load_settings()
       else if (k == "sun") g_cfg.sun = std::clamp(value, 0.0f, 4.0f);
       else if (k == "metalfx_denoiser") g_cfg.mfxDenoise = value != 0;
       else if (k == "fog") g_cfg.fog = std::clamp(int(value), 0, 3);
+      else if (k == "fog_lit") g_cfg.fogLit = value != 0;
       else if (k == "materials") g_cfg.materials = value != 0;
       else if (k == "bump") g_cfg.bump = std::clamp(value, 0.0f, 4.0f);
       else if (k == "parallax") g_cfg.parallax = std::clamp(value, 0.0f, 0.1f);
@@ -341,6 +343,7 @@ void save_settings()
    fprintf(f, "volumetric_smoke = %.2f\n", g_cfg.smoke);
    fprintf(f, "player_body = %d\n", g_cfg.playerBody == 2 ? 1 : g_cfg.playerBody);
    fprintf(f, "shadow_alert = %d\n", g_cfg.shadowAlert);
+   fprintf(f, "fog_lit = %d\n", int(g_cfg.fogLit));
    fclose(f);
 }
 
@@ -4194,7 +4197,7 @@ const char *kUpscaleNames[] = {"Off",
                                "MetalFX Custom"};
 
 enum UiRow {
-   kRowUpscale, kRowScale, kRowOutput, kRowDynres, kRowBounces, kRowReach, kRowLights, kRowLightFade, kRowCandidates, kRowLightCull, kRowResponse, kRowFlicker, kRowVolumetric, kRowShafts, kRowFog, kRowSmoke, kRowPlayerBody, kRowShadowAlert, kRowTestMirror, kRowBloom, kRowVsync, kRowFrameCap,
+   kRowUpscale, kRowScale, kRowOutput, kRowDynres, kRowBounces, kRowReach, kRowLights, kRowLightFade, kRowCandidates, kRowLightCull, kRowResponse, kRowFlicker, kRowVolumetric, kRowShafts, kRowFog, kRowFogLit, kRowSmoke, kRowPlayerBody, kRowShadowAlert, kRowTestMirror, kRowBloom, kRowVsync, kRowFrameCap,
    kRowFps, kRowDetection, kRowGemScale, kRowGemMatch, kRowGemEase, kRowLight, kRowExposure, kRowDarkAdapt, kRowAmbient, kRowAmbientFollow, kRowShadowCool, kRowSkySeen, kRowSky, kRowMoon, kRowMoonDir, kRowMoonHeight, kRowSun, kRowLightSize, kRowRough, kRowSmooth, kRowSteady, kRowFixtures, kRowFixtureLight, kRowSmallLamps, kRowLightFix, kRowGlow, kRowFlameGlow, kRowMaterials, kRowBump, kRowCrevice, kRowTexDetail, kRowParallax, kRowPolish, kRowWater, kRowUnderwater, kRowTracedSound, kRowHrtf,
    kRowDebug, kRowFreeze, kRowBackFaces, kRowReuse, kRowBlink, kRowPerf, kRowInspect, kRowSkipMission, kRowReset, kRowCount
 };
@@ -4202,7 +4205,7 @@ enum UiRow {
 const char *kRowLabels[kRowCount] = {
    "Upscaler", "Render resolution", "Output resolution", "Dynamic resolution", "Bounce light", "Light reach", "Lights traced",
    "Lights coming into range", "Lights tried per pixel", "Lights behind walls", "Light changes", "Light flicker",
-   "God rays (volumetric)", "  God ray strength", "Mission fog", "Smoke and steam", "Garrett's shadow and reflection", "  Guards notice his shadow", "  Test mirror", "Bloom", "VSync", "Frame rate limit", "FPS counter", "Light gem and guards", "  Light gem brightness", "  Light gem falloff", "  Light gem response", "Light brightness", "Darkest exposure", "  Eyes adjust to the dark", "Ambient light", "  Follows the game's light", "  Shadow colour", "Sky brightness (as seen)", "Sky light (on the level)", "Moonlight", "  Moon direction", "  Moon height", "Sunlight (Thief 2 missions)",
+   "God rays (volumetric)", "  God ray strength", "Mission fog", "  Fog lit by the lamps", "Smoke and steam", "Garrett's shadow and reflection", "  Guards notice his shadow", "  Test mirror", "Bloom", "VSync", "Frame rate limit", "FPS counter", "Light gem and guards", "  Light gem brightness", "  Light gem falloff", "  Light gem response", "Light brightness", "Darkest exposure", "  Eyes adjust to the dark", "Ambient light", "  Follows the game's light", "  Shadow colour", "Sky brightness (as seen)", "Sky light (on the level)", "Moonlight", "  Moon direction", "  Moon height", "Sunlight (Thief 2 missions)",
    "Light size (soft shadows)", "Surface roughness", "Model shading", "Model faces", "Torches and lamps", "Lamp and torch light", "Lamp reach", "Lights in walls", "Lamp glow", "Flame glow", "Materials", "Bumps", "Crevices", "Texture detail", "Parallax depth", "Polished reflections", "Water", "  Under water: brighter", "Traced sound (Steam Audio)", "  Headphone 3D sound (HRTF)",
    "Debug view", "Freeze scene (test)", "Back faces (test)", "Light sampling (test)", "Blink nearest light (test)", "Performance log", "Inspect centre of view", "Skip to next mission (test)", "Reset to defaults",
 };
@@ -4295,6 +4298,8 @@ std::string row_value(int row)
       return buf;
    case kRowFog:
       return g_cfg.fog == 0 ? "Off" : g_cfg.fog == 1 ? "Light" : g_cfg.fog == 3 ? "Thick" : "As the mission";
+   case kRowFogLit:
+      return g_cfg.fogLit ? "On (glows round lamps; grainy as the view moves)" : "Off (flat, as the game's: smooth)";
    case kRowBloom: return g_cfg.bloom ? "On" : "Off";
    case kRowVsync: return g_cfg.vsync ? "On" : frame_gen_on() ? "On (for frame generation)" : "Off";
    case kRowFps: return g_cfg.fps ? "On" : "Off";
@@ -4531,6 +4536,7 @@ void change_row(int row, int dir)
                              : (g_cfg.sun <= 0.25f && dir < 0 ? 0.0f : step_mul(g_cfg.sun, dir, 0.25f, 4.0f));
       break;
    case kRowFog: g_cfg.fog = (g_cfg.fog + dir + 4) % 4; break;
+   case kRowFogLit: g_cfg.fogLit = !g_cfg.fogLit; break;
    case kRowPlayerBody: g_cfg.playerBody = (g_cfg.playerBody + dir + 3) % 3; break;
    case kRowShadowAlert:
       g_cfg.shadowAlert = !g_cfg.shadowAlert;
@@ -5302,6 +5308,13 @@ void draw_frame(bool sceneDrawn)
    // keeps near things clear the way the game's fog does. Its reach is the
    // fog's distance: what lies beyond is fog.
    const bool fogOn = g_cfg.fog > 0 && g_fogDistFt > 0;
+   // The fog flat, as the game draws it (unless it is to be lit by the
+   // lamps): by depth alone, its colour fading in over the distance --
+   // smooth. Lit by every lamp, each of the volume's cells has one light
+   // sample a frame, and the fog was a blotchy grain that swarmed as the
+   // view moved (Malazar's Tower). It takes the volume: the volumetric
+   // option's lamp-lit haze and moon shafts wait outside the fog.
+   const bool flatFog = fogOn && !g_cfg.fogLit;
    float volFar = 40.0f, volNear = 0.3f, volFarDens = 0.3f;
    RgFloat3D volAmbient = {{0.004f, 0.005f, 0.008f}};
    if (fogOn) {
@@ -5327,6 +5340,13 @@ void draw_frame(bool sceneDrawn)
    // lamps, its few light samples a pixel were blotches the denoiser smeared
    // across the view.
    const bool waterHaze = g_underwater && g_cfg.underwaterHaze > 0.0f && !fogOn;
+   if (flatFog) {
+      // the game's fog is opaque at its distance; here 95% (e^-3) at it,
+      // the simple volume's density being this x 0.00005 a metre
+      const float D = g_fogDistFt * 0.3048f;
+      const float thick = g_cfg.fog == 1 ? 0.5f : g_cfg.fog == 3 ? 1.8f : 1.0f;
+      volNear = (3.0f * thick / std::max(D, 1.0f)) / 0.00005f;
+   }
    // god rays: the haze lit by the moon, where it comes in through the sky
    const bool moonHaze = g_cfg.moonShafts && sky_light_on() && !waterHaze;
    if (moonHaze && !fogOn && !g_cfg.volumetric) {
@@ -5439,11 +5459,13 @@ void draw_frame(bool sceneDrawn)
    {
       const float reach = otherVolume ? volFar : kSmokeOnlyFar;
       g_smokeSlice = reach / 64.0f;
-      g_smokeReach = 0.85f * reach;
+      // (the flat fog has no volume to put smoke in: the smoke stays the
+      // game's sprites)
+      g_smokeReach = flatFog ? 0.0f : 0.85f * reach;
    }
    // the haze lit throughout by every lamp: the mission's fog, or the
    // volumetric option's "every light"
-   const bool lampHaze = fogOn || g_cfg.volumetric;
+   const bool lampHaze = (fogOn && !flatFog) || g_cfg.volumetric;
    auto volumetric = RgDrawFrameVolumetricParams{
       .sType = RG_STRUCTURE_TYPE_DRAW_FRAME_VOLUMETRIC_PARAMS,
       .pNext = &smoke,
@@ -5453,7 +5475,7 @@ void draw_frame(bool sceneDrawn)
       // (lit by the lamps: a longer memory -- its light changes slowly, and
       // one sample a cell a frame is grain)
       .maxHistoryLength = lampHaze ? 16.0f : 8.0f,
-      .useSimpleDepthBased = waterHaze,
+      .useSimpleDepthBased = waterHaze || flatFog,
       .volumetricFar = volFar,
       .ambientColor = volAmbient,
       .scaterring = volNear,
