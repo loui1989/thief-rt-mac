@@ -38,6 +38,7 @@
 
 #include <algorithm>
 #include <array>
+#include <functional>
 #include <atomic>
 #include <chrono>
 #include <cmath>
@@ -2943,14 +2944,15 @@ void upload_objects()
                             i < lampGlow.size() ? lampGlow[i] : 0.0f);
          if (g_uploadViewer && obj == g_viewerObj && g_cfg.playerLegs) {
             // His legs and feet, seen as he looks down (a shadow with no one
-            // standing in it looked wrong): the faces below his waist given
+            // standing in it looked wrong): his body below the waist given
             // again, seen by the camera only (as his arm is: the whole of him,
-            // unseen, still casts his shadow and is him in mirrors). The
-            // waist: 80 cm over his soles, and at least 60 cm under his eyes
-            // (crouched, his chest is lower). Not his hands, hanging at his
-            // sides (cut off at the wrist they floated beside him). And set
-            // back 25 cm: right under the eyes, looking down, the camera saw
-            // into them where they were cut.
+            // unseen, still casts his shadow and is him in mirrors). Cut
+            // through at the waist -- 80 cm over his soles, at least 60 cm
+            // under his eyes (crouched, his chest is lower) -- and closed
+            // there, each leg's cut capped flat (open, the camera looked down
+            // into them). Not his hands, hanging at his sides (cut off at the
+            // wrist they floated beside him). Set back 20 cm, the cap mostly
+            // behind the eyes' straight-down.
             const RgFloat3D cam = to_rt(g_camera.pos);
             const float cut = std::min(c.bmin[2] + 0.80f, cam.data[2] - 0.60f);
             // (his left, level; his facing, level, from it: the view's
@@ -2961,28 +2963,118 @@ void upload_objects()
             if (level)
                lx /= ll, ly /= ll;
             const float fx = ly, fy = -lx;   // forward: left turned a quarter clockwise
-            const float back = 0.25f;
+            const float back = 0.20f;
+            const RgNormalPacked32 upNormal = rt.rgUtilPackNormal ? rt.rgUtilPackNormal(0, 0, 1) : 0;
             g_uploadViewer = false;
-            for (size_t i = 0; i < c.prims.size(); ++i) {
+            for (size_t i = 0; i < c.prims.size() && level; ++i) {
                const CapturedPrim &p = c.prims[i];
                if (p.sprite)
                   continue;
                CapturedPrim lo = p;
                lo.verts.clear();
+               // where the cut crosses a face: a segment of the cap's edge
+               std::vector<std::pair<RgPrimitiveVertex, RgPrimitiveVertex>> edge;
+               auto cross = [&](const RgPrimitiveVertex &in, const RgPrimitiveVertex &out) {
+                  const float s = (cut - in.position[2]) / (out.position[2] - in.position[2]);
+                  RgPrimitiveVertex r = in;
+                  for (int k = 0; k < 3; ++k)
+                     r.position[k] = in.position[k] + (out.position[k] - in.position[k]) * s;
+                  r.position[2] = cut;
+                  for (int k = 0; k < 2; ++k)
+                     r.texCoord[k] = in.texCoord[k] + (out.texCoord[k] - in.texCoord[k]) * s;
+                  return r;
+               };
                for (size_t v = 0; v + 2 < p.verts.size(); v += 3) {
+                  const RgPrimitiveVertex *tri = &p.verts[v];
                   float m[3] = {0, 0, 0};
                   for (int j = 0; j < 3; ++j)
                      for (int k = 0; k < 3; ++k)
-                        m[k] += p.verts[v + j].position[k] / 3.0f;
-                  if (m[2] >= cut)
-                     continue;
+                        m[k] += tri[j].position[k] / 3.0f;
                   // (a hand: out to his side, over his knees)
                   const float side = (m[0] - c.center[0]) * lx + (m[1] - c.center[1]) * ly;
-                  if (level && std::fabs(side) > 0.22f && m[2] > c.bmin[2] + 0.45f)
+                  if (std::fabs(side) > 0.22f && m[2] > c.bmin[2] + 0.45f)
                      continue;
-                  lo.verts.insert(lo.verts.end(), p.verts.begin() + v, p.verts.begin() + v + 3);
+                  int below = 0;
+                  for (int j = 0; j < 3; ++j)
+                     below += tri[j].position[2] < cut;
+                  if (below == 3) {
+                     lo.verts.insert(lo.verts.end(), tri, tri + 3);
+                     continue;
+                  }
+                  if (below == 0)
+                     continue;
+                  // the part below the cut, in the triangle's own order
+                  RgPrimitiveVertex poly[4];
+                  int n = 0;
+                  RgPrimitiveVertex hit[2];
+                  int hits = 0;
+                  for (int j = 0; j < 3; ++j) {
+                     const RgPrimitiveVertex &a = tri[j], &b = tri[(j + 1) % 3];
+                     const bool ain = a.position[2] < cut, bin = b.position[2] < cut;
+                     if (ain)
+                        poly[n++] = a;
+                     if (ain != bin) {
+                        const RgPrimitiveVertex x = ain ? cross(a, b) : cross(b, a);
+                        poly[n++] = x;
+                        if (hits < 2)
+                           hit[hits++] = x;
+                     }
+                  }
+                  for (int j = 1; j + 1 < n; ++j) {
+                     lo.verts.push_back(poly[0]);
+                     lo.verts.push_back(poly[j]);
+                     lo.verts.push_back(poly[j + 1]);
+                  }
+                  if (hits == 2)
+                     edge.push_back({hit[0], hit[1]});
                }
-               if (lo.verts.empty() || !level)
+               // the caps: the cut's edges joined where they meet (each leg's
+               // ring its own), each closed by a fan from its middle, facing up
+               if (!edge.empty()) {
+                  std::vector<int> parent(edge.size());
+                  for (size_t e = 0; e < edge.size(); ++e)
+                     parent[e] = int(e);
+                  std::function<int(int)> root = [&](int e) { return parent[e] == e ? e : parent[e] = root(parent[e]); };
+                  std::unordered_map<uint64_t, int> at;
+                  auto key = [](const RgPrimitiveVertex &q) {
+                     return (uint64_t(uint32_t(int32_t(std::lround(q.position[0] * 500.0f)))) << 32) ^
+                            uint64_t(uint32_t(int32_t(std::lround(q.position[1] * 500.0f))));
+                  };
+                  for (size_t e = 0; e < edge.size(); ++e)
+                     for (const RgPrimitiveVertex *q : {&edge[e].first, &edge[e].second}) {
+                        auto f = at.find(key(*q));
+                        if (f == at.end())
+                           at[key(*q)] = int(e);
+                        else
+                           parent[root(int(e))] = root(f->second);
+                     }
+                  std::unordered_map<int, std::array<double, 4>> mid;   // x, y, count
+                  for (size_t e = 0; e < edge.size(); ++e) {
+                     std::array<double, 4> &s = mid[root(int(e))];
+                     s[0] += edge[e].first.position[0] + edge[e].second.position[0];
+                     s[1] += edge[e].first.position[1] + edge[e].second.position[1];
+                     s[2] += 2.0;
+                  }
+                  for (size_t e = 0; e < edge.size(); ++e) {
+                     const std::array<double, 4> &s = mid[root(int(e))];
+                     RgPrimitiveVertex m = edge[e].first, q0 = edge[e].first, q1 = edge[e].second;
+                     m.position[0] = float(s[0] / s[2]);
+                     m.position[1] = float(s[1] / s[2]);
+                     m.position[2] = cut;
+                     for (int k = 0; k < 2; ++k)
+                        m.texCoord[k] = 0.5f * (q0.texCoord[k] + q1.texCoord[k]);
+                     // (facing up: counter-clockwise seen from above)
+                     const float cz = (q0.position[0] - m.position[0]) * (q1.position[1] - m.position[1]) -
+                                      (q0.position[1] - m.position[1]) * (q1.position[0] - m.position[0]);
+                     if (cz < 0)
+                        std::swap(q0, q1);
+                     m.normalPacked = q0.normalPacked = q1.normalPacked = upNormal;
+                     lo.verts.push_back(m);
+                     lo.verts.push_back(q0);
+                     lo.verts.push_back(q1);
+                  }
+               }
+               if (lo.verts.empty())
                   continue;
                for (RgPrimitiveVertex &q : lo.verts) {
                   q.position[0] -= fx * back;
@@ -3742,8 +3834,11 @@ void sky_capture(int primitive, const sRenderBackendVertex *v, int count)
    const SkyCapture &c = g_skyCap;
    const float S = float(kSkyFaceSize);
    auto at = [&](float x, float y, float rhw, float out[3]) {
-      // (r3_get_view_vec: a screen point's direction, linear across the face)
-      const float a = x / S, b = y / S;
+      // (r3_get_view_vec: a screen point's direction, linear across the face;
+      // r3's projection puts the face's edges at -0.5 and S - 0.5, its
+      // pixels' centres -- taken as 0 and S, each face lay half a pixel off
+      // its own pyramid, and two faces' clouds did not meet at their edge)
+      const float a = (x + 0.5f) / S, b = (y + 0.5f) / S;
       const float z = rhw > 1e-9f ? 1.0f / rhw : 1e6f;
       for (int k = 0; k < 3; ++k)
          out[k] = (c.ul[k] + c.right[k] * a + c.down[k] * b) * z;
@@ -3805,10 +3900,10 @@ void sky_capture(int primitive, const sRenderBackendVertex *v, int count)
             // and the cube's edges showed across the sky as dotted dark lines
             // (Reflections in Red's opening vista).
             auto snap = [S](float &u) {
-               if (std::fabs(u) < 1.0f)
-                  u = 0.0f;
-               else if (std::fabs(u - S) < 1.0f)
-                  u = S;
+               if (std::fabs(u + 0.5f) < 1.0f)
+                  u = -0.5f;
+               else if (std::fabs(u - (S - 0.5f)) < 1.0f)
+                  u = S - 0.5f;
             };
             snap(x);
             snap(y);
@@ -7795,9 +7890,10 @@ void wall_offset(CachedObject &c)
 // and lit by the processor, then captured, hashed and found the same: a
 // fan mission's castle vista, 330 models, kept the frame on the processor
 // near 40 ms, the graphics card waiting). Every fourth frame (each model
-// on its own one) it is drawn anyway, so that a change -- a lever's joint,
-// a texture that animates -- shows within a few frames; a change seen, it
-// is drawn every frame until it is still again.
+// on its own one; every eighth, once still a long while) it is drawn
+// anyway, so that a change -- a lever's joint, a texture that animates --
+// shows within a few frames; a change seen, it is drawn every frame until
+// it is still again.
 int RenderRTObjectReuse(uint32_t obj)
 {
    if (!g_cfg.reuseModels || !g_cfg.steadyFaces || !g_inScene || g_freeze)
@@ -7808,7 +7904,9 @@ int RenderRTObjectReuse(uint32_t obj)
    CachedObject &c = it->second;
    if (!c.settled || !c.whole || !c.posed || c.unchanged < 12 || c.prims.empty())
       return 0;
-   if (c.frame != g_frameNumber && ((g_frameNumber + obj) & 3u) == 0)
+   // (one still a long while -- 60 captures -- every eighth frame)
+   const uint32_t every = c.unchanged >= 60 ? 7u : 3u;
+   if (c.frame != g_frameNumber && ((g_frameNumber + obj) & every) == 0)
       return 0;
    if (c.creature < 0)
       c.creature = RenderRTGameObjectIsCreature(obj);

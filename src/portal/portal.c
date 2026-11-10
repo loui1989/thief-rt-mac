@@ -2896,7 +2896,15 @@ void portal_render_scene(Position *pos, float zoom)
    PORTAL_PART(1);
    portal_mip_setup(zoom);
 
-   if ((g_lgd3d)&&(!punt_hardware_lighting)) {
+   // (not under the path tracer: these are the light map textures the
+   // engine's own drawing of the walls and floors uses, and it does not draw
+   // them -- see draw_region_lgd3d; the path tracer's light maps are its
+   // own, made with the world. 4 ms a frame at Reflections in Red's vista.)
+   if ((g_lgd3d)&&(!punt_hardware_lighting)
+#ifdef DARK_RT
+       && !RenderRTActive()
+#endif
+      ) {
       for (i=0; i < r_sorted_count; i++)
          portal_preload_lightmaps(active_regions[i]);
       porthw_end_frame();
