@@ -3181,6 +3181,7 @@ struct WorldGroup {
    float bmin[3] = {1e30f, 1e30f, 1e30f}, bmax[3] = {-1e30f, -1e30f, -1e30f};   // meters
    bool shown = false;               // given to the path tracer last frame
    bool given = false;               // given to it since the world was made (unchanged since)
+   uint64_t givenSig = 0;            // all else it was last given with (world_prim_sig)
    int lmPage = -1;                  // the game's light: its lightmaps' page of the atlas
    int underWater = 0;               // under water: 0 not, else (its depth in 0.25 m steps) + 1
    std::vector<float> baseUv;        // the stand-in water's own texture coordinates (stand_in_water)
@@ -3194,6 +3195,7 @@ int g_worldCell = -1;
 float g_nextFacing[3] = {0, 0, 1};
 bool g_nextFacingSet = false;
 uint32_t g_worldShownGroups = 0;
+uint32_t g_worldRepeated = 0;   // of them, given again as they were (rgThiefRepeatPrimitives)
 uint32_t g_worldSerial = 0;
 bool g_worldValid = false;
 std::vector<WorldGroup> g_world;
@@ -3357,6 +3359,51 @@ void stand_in_water(WorldGroup &g)
    }
 }
 
+// Thief's own RTGL1 (patches/rtgl1-lib/0028): a primitive given before marked
+// unchanged, given again as it was then without its data -- the path tracer
+// keeps its vertices and all it found from them. (Null: a library without it.)
+using RepeatPrimitivesFn = uint32_t (*)(const uint64_t *ids, uint32_t count, uint8_t *repeated);
+RepeatPrimitivesFn repeat_primitives_fn()
+{
+   static int s = -1;
+   static RepeatPrimitivesFn fn = nullptr;
+   if (s < 0 && g_lib) {
+      fn = reinterpret_cast<RepeatPrimitivesFn>(dlsym(g_lib, "rgThiefRepeatPrimitives"));
+      s = 1;
+   }
+   return fn;
+}
+
+// everything a world piece is given with but its vertices: the same as last
+// time, and it can be given again as it was
+uint64_t world_prim_sig(const RgMeshPrimitiveInfo &prim, const RgTextureLayer *lm)
+{
+   uint64_t h = 1469598103934665603ull;
+   auto mix = [&h](uint64_t v) { h = (h ^ v) * 1099511628211ull; h ^= h >> 31; };
+   auto mixStr = [&mix](const char *s) {
+      uint64_t x = 0xcbf29ce484222325ull;
+      for (; s && *s; ++s)
+         x = (x ^ uint8_t(*s)) * 1099511628211ull;
+      mix(x);
+   };
+   uint32_t em, emGi;
+   memcpy(&em, &prim.emissive, 4);
+   memcpy(&emGi, &prim.emissiveGi, 4);
+   mix(prim.flags);
+   mix(prim.color);
+   mix(em);
+   mix(emGi);
+   mix(uint64_t(prim.vertexCount) << 32 | prim.indexCount);
+   mixStr(prim.pTextureName);
+   mix(lm != nullptr);
+   if (lm) {
+      mixStr(lm->pTextureName);
+      mix(lm->color);
+      mix(uint64_t(lm->blend));
+   }
+   return h;
+}
+
 void upload_world()
 {
    if (!g_worldValid)
@@ -3386,6 +3433,8 @@ void upload_world()
    const RgColor4DPacked32 lmParams =
       pack_color(1.0f - 0.45f * cool, 1.0f - 0.25f * cool, 1.0f, float(followBits * 16 + greyBits) / 255.0f);
    int lmStat[6] = {};
+   g_worldRepeated = 0;
+   RepeatPrimitivesFn repeatFn = repeat_primitives_fn();
    // (seen from under the water, what is under it is not hazed by its depth:
    // the camera's own water does that -- given again as that changes)
    static bool s_hazedFromAbove = true;
@@ -3595,9 +3644,29 @@ void upload_world()
          };
          prim.pNext = &lmLayers;
       }
-      if (g.given)
-         prim.flags |= kRtPrimUnchanged;
-      upload(0x100000000ull + i, prim);
+      // (the stand-in water's texture drifts and its lamps light it: its
+      // vertices change every frame)
+      const bool same = g.given && g.textureId != kStandInWater;
+      const uint64_t wid = 0x100000000ull + i;
+      const uint64_t sig = world_prim_sig(prim, prim.pNext == &lmLayers ? &lmLayer : nullptr);
+      bool repeated = false;
+      if (same && repeatFn && g.givenSig == sig) {
+         // as it was last given: nothing of it is given again
+         uint8_t ok = 0;
+         const auto t0 = std::chrono::steady_clock::now();
+         repeated = repeatFn(&wid, 1, &ok) == 1 && ok;
+         g_uploadLibrarySecs += std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
+         if (repeated) {
+            ++g_framePrims;
+            ++g_worldRepeated;
+         }
+      }
+      if (!repeated) {
+         if (same)
+            prim.flags |= kRtPrimUnchanged;
+         upload(wid, prim);
+         g.givenSig = sig;
+      }
       g.given = true;
       tris += g.indices.size() / 3;
       // (for the log: how many world pieces took the game's light, and why not)
@@ -5101,9 +5170,9 @@ void perf_frame(double t)
          fprintf(f, "%s %s %.2f", shown ? "," : "", c.second.c_str(), c.first);
          ++shown;
       }
-      fprintf(f, "\n  scene per frame: %.0f models (%.0f kept out of view), %.0f primitives, %.0fk model triangles; world %u of %zu pieces traced; %.0f lights traced of %u\n",
+      fprintf(f, "\n  scene per frame: %.0f models (%.0f kept out of view), %.0f primitives, %.0fk model triangles; world %u of %zu pieces traced (%u of them given again as they were); %.0f lights traced of %u\n",
               g_perf.models / n, g_perf.kept / n, g_perf.prims / n, g_perf.tris / n / 1000.0,
-              g_worldShownGroups, g_world.size(), g_perf.lights / n, g_lightsTotal);
+              g_worldShownGroups, g_world.size(), g_worldRepeated, g_perf.lights / n, g_lightsTotal);
       {
          // the screen's own draws (HUD, inventory pictures), and how warm the Mac
          // is: when it is too warm, or saving power, its GPU runs slower and
