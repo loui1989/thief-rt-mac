@@ -120,6 +120,13 @@ public:
                        std::string *error);
    bool ReadString(uint32_t address, std::string *value,
                    std::string *error) const;
+   // a guest function called from the host (a guest's listener told of
+   // something), its arguments pushed as 32-bit values; nests in a guest call
+   bool CallFunction(uint32_t function, const uint32_t *arguments,
+                     size_t argumentCount, uint32_t *result, std::string *error)
+   {
+      return Call(function, arguments, argumentCount, result, error);
+   }
 
    cMemory &Memory() { return m_cpu.Memory(); }
    const cMemory &Memory() const { return m_cpu.Memory(); }

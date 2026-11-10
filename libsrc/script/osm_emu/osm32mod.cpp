@@ -40,6 +40,9 @@
 
 #include <aiscrptapi.h>
 #include <traitman.h>
+#include <traittyp.h>
+#include <traitbas.h>
+#include <dspchdef.h>
 #include <engscrpt.h>
 #include <objquery.h>
 #include <simman.h>
@@ -681,15 +684,171 @@ public:
    cOsm32Environment(IScriptMan *scriptManager, osm32::eGuestAbi guestAbi)
     : m_scriptManager(scriptManager),
       m_guestAbi(guestAbi),
-      m_linkQueryVtable(0)
+      m_linkQueryVtable(0),
+      m_runtime(0)
    {
    }
 
    virtual ~cOsm32Environment()
    {
+      DropListeners();
       for (size_t i = 0; i < m_linkQueries.size(); ++i)
          if (m_linkQueries[i].query)
             m_linkQueries[i].query->Release();
+   }
+
+   void SetRuntime(osm32::cModule *runtime) { m_runtime = runtime; }
+
+   // The guest's listeners (the sim's messages, a property's, a relation's,
+   // the archetype hierarchy's): each a native listener of the engine's that
+   // calls the guest's function back with the message copied to it.
+   enum eListenerKind { kListenSim, kListenProperty, kListenRelation, kListenHierarchy };
+   struct sGuestListener
+   {
+      cOsm32Environment *owner;   // 0: its module gone (the engine may still call)
+      eListenerKind kind;
+      uint32_t func, data, desc, token;
+      IUnknown *native;           // the property or relation listened to (AddRef'd)
+      PropListenerHandle handle;
+      GUID id;
+      sDispatchListenerDesc hostDesc;
+   };
+   std::vector<sGuestListener *> m_listeners;
+   uint32_t m_nextListenerToken = 1;
+
+   void DropListeners()
+   {
+      for (sGuestListener *l : m_listeners)
+      {
+         if (!l->owner)
+            continue;
+         if (l->kind == kListenProperty && l->native)
+            static_cast<IProperty *>(l->native)->Unlisten(l->handle);
+         if (l->kind == kListenSim)
+            if (ISimManager *sim = AppGetObj(ISimManager))
+            {
+               sim->Unlisten(&l->id);
+               sim->Release();
+            }
+         // (relations and the hierarchy cannot be unlistened: the engine
+         // keeps calling, and the listener, ownerless, does nothing -- kept)
+         l->owner = 0;
+      }
+      m_listeners.clear();
+   }
+
+   // the guest's function called with its message (bytes copied to the
+   // guest, freed after) and its data
+   void CallListener(sGuestListener *l, const void *message, uint32_t size, uint32_t second)
+   {
+      if (!l->owner || !m_runtime)
+         return;
+      std::string error;
+      const uint32_t guestMessage = AllocGuest(size, &error);
+      if (!guestMessage)
+         return;
+      osm32::cMemory &memory = m_runtime->Memory();
+      bool ok = memory.Load(guestMessage, message, size, &error);
+      uint32_t ignored;
+      const uint32_t args[2] = {guestMessage, second};
+      ok = ok && m_runtime->CallFunction(l->func, args, 2, &ignored, &error);
+      FreeGuest(guestMessage, 0);
+      if (!ok)
+      {
+         static unsigned s_told = 0;
+         if (s_told++ < 20)
+            fprintf(stderr, "OSM32 '%s': a script library's listener failed: %s\n",
+                    m_runtime->Name().c_str(), error.c_str());
+      }
+   }
+
+   static void SimListener(const sDispatchMsg *msg, const sDispatchListenerDesc *desc)
+   {
+      sGuestListener *l = static_cast<sGuestListener *>(desc->data);
+      if (!l || !l->owner || !msg) return;
+      const uint32_t guest[2] = {static_cast<uint32_t>(msg->kind), 0};
+      l->owner->CallListener(l, guest, sizeof(guest), l->desc);
+   }
+
+   static void LGAPI RelationListener(sRelationListenMsg *msg, RelationListenerData data)
+   {
+      sGuestListener *l = static_cast<sGuestListener *>(data);
+      if (!l || !l->owner || !msg) return;
+      const uint32_t guest[5] = {static_cast<uint32_t>(msg->type), static_cast<uint32_t>(msg->id),
+                                 static_cast<uint32_t>(msg->link.source), static_cast<uint32_t>(msg->link.dest),
+                                 static_cast<uint32_t>(static_cast<int32_t>(msg->link.flavor))};
+      l->owner->CallListener(l, guest, sizeof(guest), l->data);
+   }
+
+   static void LGAPI HierarchyListener(const sHierarchyMsg *msg, HierarchyListenerData data)
+   {
+      sGuestListener *l = static_cast<sGuestListener *>(data);
+      if (!l || !l->owner || !msg) return;
+      const uint32_t guest[3] = {static_cast<uint32_t>(msg->kind), static_cast<uint32_t>(msg->obj),
+                                 static_cast<uint32_t>(msg->donor)};
+      l->owner->CallListener(l, guest, sizeof(guest), l->data);
+   }
+
+   static void LGAPI PropertyListener(sPropertyListenMsg *msg, PropListenerData data)
+   {
+      sGuestListener *l = reinterpret_cast<sGuestListener *>(data);
+      if (!l || !l->owner || !msg) return;
+      l->owner->DeliverProperty(l, msg);
+   }
+
+   void DeliverProperty(sGuestListener *l, sPropertyListenMsg *msg)
+   {
+      // the new value: an int, BOOL or float as it is; a string or a
+      // structure by pointer, copied to the guest (as Get gives it)
+      IProperty *prop = static_cast<IProperty *>(l->native);
+      uint32_t value = static_cast<uint32_t>(msg->value.intval);
+      bool scalar = false;
+      IUnknown *probe = 0;
+      static const GUID *const kScalars[] = {&IID_IIntProperty, &IID_IBoolProperty, &IID_IFloatProperty};
+      for (const GUID *iid : kScalars)
+         if (!scalar && SUCCEEDED(prop->QueryInterface(*iid, reinterpret_cast<void **>(&probe))) && probe)
+         {
+            scalar = true;
+            probe->Release();
+         }
+      if (!scalar)
+      {
+         value = 0;
+         std::string error;
+         osm32::cMemory &memory = m_runtime->Memory();
+         const int64_t key = (static_cast<int64_t>(0x7d000000) | static_cast<uint16_t>(msg->property)) << 32 |
+                             static_cast<uint32_t>(msg->obj);
+         if (msg->value.ptrval)
+         {
+            IStringProperty *text = 0;
+            if (SUCCEEDED(prop->QueryInterface(IID_IStringProperty, reinterpret_cast<void **>(&text))) && text)
+            {
+               text->Release();
+               GuestText(key, static_cast<const char *>(msg->value.ptrval), &memory, &value, &error);
+            }
+            else if (const sPropertyTypeDesc *type = prop->DescribeType())
+               if (type->size && type->size <= 0x10000)
+                  GuestBytes(key, msg->value.ptrval, static_cast<uint32_t>(type->size), &memory, &value, &error);
+         }
+      }
+      const uint32_t guest[5] = {static_cast<uint32_t>(msg->type), static_cast<uint32_t>(msg->property),
+                                 static_cast<uint32_t>(msg->obj), value, static_cast<uint32_t>(msg->donor)};
+      CallListener(l, guest, sizeof(guest), l->data);
+   }
+
+   sGuestListener *NewListener(eListenerKind kind, uint32_t func, uint32_t data)
+   {
+      sGuestListener *l = new sGuestListener();
+      l->owner = this;
+      l->kind = kind;
+      l->func = func;
+      l->data = data;
+      l->desc = 0;
+      l->token = m_nextListenerToken++;
+      l->native = 0;
+      l->handle = 0;
+      m_listeners.push_back(l);
+      return l;
    }
 
    osm32::eGuestAbi GuestAbi() const { return m_guestAbi; }
@@ -991,6 +1150,20 @@ protected:
             return Return(state, memory, 4, address, error);
          }
          if (slot == 4) return Return(state, memory, 4, static_cast<uint32_t>(static_cast<int32_t>(rel->GetID())), error);
+         if (slot == 16)
+         {
+            // Listen(interests, func, data)
+            if (arg[1])
+            {
+               sGuestListener *l = NewListener(kListenRelation, arg[1], arg[2]);
+               rel->AddRef();
+               l->native = rel;
+               return Return(state, memory, 16,
+                             static_cast<uint32_t>(rel->Listen(static_cast<RelationListenMsgSet>(arg[0]),
+                                                               RelationListener, l)), error);
+            }
+            return Return(state, memory, 16, 0, error);
+         }
          if (slot == 7)
          {
             IRelation *inverse = rel->Inverse();
@@ -1249,7 +1422,53 @@ protected:
       {
          // ISimManager: a guest's listener for the sim's messages is taken
          // and never called (its library's caches are only ever fresh)
-         if (slot == 3 || slot == 4) return Return(state, memory, 8, 0, error);
+         if (slot == 3)
+         {
+            // Listen: the guest's sDispatchListenerDesc {pID, interests, func, data}
+            uint32_t idAddress = 0, interests = 0, func = 0, data = 0;
+            if (!memory->Read32(a, &idAddress, error) || !memory->Read32(a + 4, &interests, error) ||
+                !memory->Read32(a + 8, &func, error) || !memory->Read32(a + 12, &data, error))
+               return false;
+            ISimManager *sim = AppGetObj(ISimManager);
+            if (!sim || !func)
+            {
+               if (sim) sim->Release();
+               return Return(state, memory, 8, 0, error);
+            }
+            sGuestListener *l = NewListener(kListenSim, func, data);
+            l->desc = a;
+            uint32_t words[4] = {0, 0, 0, 0};
+            for (unsigned i = 0; i < 4 && idAddress; ++i)
+               if (!memory->Read32(idAddress + i * 4, &words[i], error)) { sim->Release(); return false; }
+            memcpy(&l->id, words, sizeof(GUID));
+            l->hostDesc.pID = &l->id;
+            l->hostDesc.interests = interests;
+            l->hostDesc.func = SimListener;
+            l->hostDesc.data = l;
+            const HRESULT hr = sim->Listen(&l->hostDesc);
+            sim->Release();
+            return Return(state, memory, 8, static_cast<uint32_t>(hr), error);
+         }
+         if (slot == 4)
+         {
+            // Unlisten, by the guest's id
+            uint32_t words[4] = {0, 0, 0, 0};
+            for (unsigned i = 0; i < 4 && a; ++i)
+               if (!memory->Read32(a + i * 4, &words[i], error)) return false;
+            for (size_t i = 0; i < m_listeners.size(); ++i)
+               if (m_listeners[i]->kind == kListenSim && !memcmp(&m_listeners[i]->id, words, sizeof(GUID)))
+               {
+                  if (ISimManager *sim = AppGetObj(ISimManager))
+                  {
+                     sim->Unlisten(&m_listeners[i]->id);
+                     sim->Release();
+                  }
+                  m_listeners[i]->owner = 0;
+                  m_listeners.erase(m_listeners.begin() + i);
+                  break;
+               }
+            return Return(state, memory, 8, 0, error);
+         }
          if (slot == 9)
          {
             ISimManager *sim = AppGetObj(ISimManager);
@@ -1310,10 +1529,31 @@ protected:
             case 9: return Return(state, memory, 8, prop->IsRelevant(obj) ? 1 : 0, error);
             case 10: return Return(state, memory, 8, prop->IsSimplyRelevant(obj) ? 1 : 0, error);
             case 11: return Return(state, memory, 8, prop->Touch(obj) ? 1 : 0, error);
-            // (a guest's listener for its changes: taken, never called --
-            // its library reads the Design Note afresh)
-            case 13: return Return(state, memory, 16, 1, error);
-            case 14: return Return(state, memory, 8, 0, error);
+            case 13:
+            {
+               // Listen(interests, func, data): the guest's function told of
+               // every change, through a native listener; a token its handle
+               if (!b) return Return(state, memory, 16, 0, error);
+               sGuestListener *l = NewListener(kListenProperty, b, c);
+               prop->AddRef();
+               l->native = prop;
+               l->handle = prop->Listen(static_cast<PropertyListenMsgSet>(a), PropertyListener,
+                                        reinterpret_cast<PropListenerData>(l));
+               return Return(state, memory, 16, l->token, error);
+            }
+            case 14:
+            {
+               for (size_t i = 0; i < m_listeners.size(); ++i)
+                  if (m_listeners[i]->kind == kListenProperty && m_listeners[i]->token == a)
+                  {
+                     sGuestListener *l = m_listeners[i];
+                     static_cast<IProperty *>(l->native)->Unlisten(l->handle);
+                     l->owner = 0;
+                     m_listeners.erase(m_listeners.begin() + i);
+                     break;
+                  }
+               return Return(state, memory, 8, 0, error);
+            }
             default: break;
          }
          if (slot >= 18 && slot <= 21)
@@ -1380,6 +1620,12 @@ protected:
             case 16: result = traits->ObjHasDonor(objA, objB) ? 1 : 0; bytes = 12; break;
             case 17: result = traits->ObjHasDonorIntrinsically(objA, objB) ? 1 : 0; bytes = 12; break;
             case 18: result = traits->ObjIsDonor(objA) ? 1 : 0; bytes = 8; break;
+            case 21:
+               // Listen(func, data): the archetype hierarchy's changes
+               bytes = 12;
+               if (a)
+                  result = static_cast<uint32_t>(traits->Listen(HierarchyListener, NewListener(kListenHierarchy, a, b)));
+               break;
             case 19:
             {
                IObjectQuery *query = traits->Query(objA, static_cast<eTraitQueryType>(b));
@@ -4123,6 +4369,7 @@ private:
    IScriptMan *m_scriptManager;
    const osm32::eGuestAbi m_guestAbi;
    uint32_t m_linkQueryVtable;
+   osm32::cModule *m_runtime;   // the guest, to call its listeners
    std::vector<sLinkQueryProxy> m_linkQueries;
 };
 
@@ -4155,9 +4402,11 @@ public:
    cOsm32Module(IScriptMan *scriptManager, osm32::eGuestAbi guestAbi)
     : m_environment(scriptManager, guestAbi)
    {
+      m_environment.SetRuntime(&m_runtime);
    }
    virtual ~cOsm32Module()
    {
+      m_environment.DropListeners();
       g_Modules.erase(std::remove(g_Modules.begin(), g_Modules.end(), this),
                       g_Modules.end());
    }
@@ -4346,7 +4595,8 @@ private:
       size_t guestIndex;
    };
 
-   // Declaration order makes the runtime unload before its environment.
+   // Declaration order makes the runtime unload before its environment
+   // (whose listeners are dropped first: the module's destructor).
    cOsm32Environment m_environment;
    osm32::cModule m_runtime;
    std::vector<sClass> m_classes;
