@@ -133,6 +133,7 @@ struct Settings {
    int gi = 0;                // bounce light: 0 two bounces at half rate (as Blood RT),
                               // 1 one bounce, 2 two bounces, 3 one bounce at half rate
    bool volumetric = false;   // haze lit by every light
+   bool sunHalf = true;       // the mission's sun's (moon's) shadow rays every other frame, in tiles (cheaper)
    bool moonShafts = false;   // god rays: the haze lit by the moon alone (cheap), when volumetric is off
    float shafts = 1.0f;       // god rays' strength (the haze's light, times this)
    float moon = 0.0f;         // moonlight through the sky's openings, times its base (0 off: its
@@ -245,6 +246,7 @@ void load_settings()
       else if (k == "gi") g_cfg.gi = std::clamp(int(value), 0, 3);
       else if (k == "volumetric") g_cfg.volumetric = value != 0;
       else if (k == "moon_shafts") g_cfg.moonShafts = value != 0;
+      else if (k == "sun_shadow_half") g_cfg.sunHalf = value != 0;
       else if (k == "god_ray_strength") g_cfg.shafts = std::clamp(value, 0.1f, 8.0f);
       else if (k == "moon") g_cfg.moon = std::clamp(value, 0.0f, 8.0f);
       else if (k == "moon_azimuth") g_cfg.moonAzimuth = value < 0 ? -1 : int(value) % 360;
@@ -344,6 +346,7 @@ void save_settings()
    fprintf(f, "texture_detail = %d\n", g_cfg.texDetail);
    fprintf(f, "dark_adapt = %d\n", g_cfg.darkAdapt);
    fprintf(f, "sun = %.2f\n", g_cfg.sun);
+   fprintf(f, "sun_shadow_half = %d\n", int(g_cfg.sunHalf));
    fprintf(f, "underwater_brighter = %.1f\n", g_cfg.underwaterLift);
    fprintf(f, "frame_generation = %d\n", int(g_cfg.frameGen));
    fprintf(f, "moon_shafts = %d\ngod_ray_strength = %.2f\nmoon = %.2f\nmoon_azimuth = %d\nmoon_height = %d\nmetalfx_denoiser = %d\n",
@@ -4690,14 +4693,14 @@ const char *kUpscaleNames[] = {"Off",
 
 enum UiRow {
    kRowUpscale, kRowScale, kRowOutput, kRowDynres, kRowBounces, kRowReach, kRowLights, kRowLightFade, kRowCandidates, kRowNeighbours, kRowLightCull, kRowResponse, kRowFlicker, kRowVolumetric, kRowShafts, kRowFog, kRowFogLit, kRowFogQuality, kRowSmoke, kRowPlayerBody, kRowPlayerLegs, kRowShadowAlert, kRowTestMirror, kRowBloom, kRowVsync, kRowFrameCap,
-   kRowFps, kRowDetection, kRowGemScale, kRowGemMatch, kRowGemEase, kRowLight, kRowExposure, kRowDarkAdapt, kRowAmbient, kRowAmbientFollow, kRowShadowCool, kRowSkySeen, kRowSky, kRowMoon, kRowMoonDir, kRowMoonHeight, kRowSun, kRowLightSize, kRowRough, kRowSmooth, kRowSteady, kRowReuseModels, kRowFixtures, kRowFixtureLight, kRowSmallLamps, kRowLightFix, kRowGlow, kRowFlameGlow, kRowMaterials, kRowBump, kRowCrevice, kRowTexDetail, kRowParallax, kRowPolish, kRowWater, kRowUnderwater, kRowTracedSound, kRowHrtf,
+   kRowFps, kRowDetection, kRowGemScale, kRowGemMatch, kRowGemEase, kRowLight, kRowExposure, kRowDarkAdapt, kRowAmbient, kRowAmbientFollow, kRowShadowCool, kRowSkySeen, kRowSky, kRowMoon, kRowMoonDir, kRowMoonHeight, kRowSun, kRowSunHalf, kRowLightSize, kRowRough, kRowSmooth, kRowSteady, kRowReuseModels, kRowFixtures, kRowFixtureLight, kRowSmallLamps, kRowLightFix, kRowGlow, kRowFlameGlow, kRowMaterials, kRowBump, kRowCrevice, kRowTexDetail, kRowParallax, kRowPolish, kRowWater, kRowUnderwater, kRowTracedSound, kRowHrtf,
    kRowDebug, kRowFreeze, kRowBackFaces, kRowReuse, kRowBlink, kRowPerf, kRowInspect, kRowSkipMission, kRowReset, kRowCount
 };
 
 const char *kRowLabels[kRowCount] = {
    "Upscaler", "Render resolution", "Output resolution", "Dynamic resolution", "Bounce light", "Light reach", "Lights traced",
    "Lights coming into range", "Lights tried per pixel", "  Lights shared with neighbours", "Lights behind walls", "Light changes", "Light flicker",
-   "God rays (volumetric)", "  God ray strength", "Mission fog", "  Fog lit by the lamps", "  Lit fog quality", "Smoke and steam", "Garrett's shadow and reflection", "  His legs seen looking down", "  Guards notice his shadow", "  Test mirror", "Bloom", "VSync", "Frame rate limit", "FPS counter", "Light gem and guards", "  Light gem brightness", "  Light gem falloff", "  Light gem response", "Light brightness", "Darkest exposure", "  Eyes adjust to the dark", "Ambient light", "  Follows the game's light", "  Shadow colour", "Sky brightness (as seen)", "Sky light (on the level)", "Moonlight", "  Moon direction", "  Moon height", "Sunlight (Thief 2 missions)",
+   "God rays (volumetric)", "  God ray strength", "Mission fog", "  Fog lit by the lamps", "  Lit fog quality", "Smoke and steam", "Garrett's shadow and reflection", "  His legs seen looking down", "  Guards notice his shadow", "  Test mirror", "Bloom", "VSync", "Frame rate limit", "FPS counter", "Light gem and guards", "  Light gem brightness", "  Light gem falloff", "  Light gem response", "Light brightness", "Darkest exposure", "  Eyes adjust to the dark", "Ambient light", "  Follows the game's light", "  Shadow colour", "Sky brightness (as seen)", "Sky light (on the level)", "Moonlight", "  Moon direction", "  Moon height", "Sunlight (Thief 2 missions)", "  Its shadows",
    "Light size (soft shadows)", "Surface roughness", "Model shading", "Model faces", "  Still models drawn once", "Torches and lamps", "Lamp and torch light", "Lamp reach", "Lights in walls", "Lamp glow", "Flame glow", "Materials", "Bumps", "Crevices", "Texture detail", "Parallax depth", "Polished reflections", "Water", "  Under water: brighter", "Traced sound (Steam Audio)", "  Headphone 3D sound (HRTF)",
    "Debug view", "Freeze scene (test)", "Back faces (test)", "Light sampling (test)", "Blink nearest light (test)", "Performance log", "Inspect centre of view", "Skip to next mission (test)", "Reset to defaults",
 };
@@ -4772,6 +4775,8 @@ std::string row_value(int row)
       }
       snprintf(buf, sizeof(buf), "%d deg up", g_cfg.moonHeight);
       return buf;
+   case kRowSunHalf:
+      return g_cfg.sunHalf ? "Every other frame (cheaper)" : "Every frame";
    case kRowSun:
       if (g_cfg.sun <= 0.0f) return "Off";
       if (!g_sun.on) {
@@ -5048,6 +5053,7 @@ void change_row(int row, int dir)
    case kRowSun: g_cfg.sun = g_cfg.sun <= 0.0f && dir > 0 ? 0.25f
                              : (g_cfg.sun <= 0.25f && dir < 0 ? 0.0f : step_mul(g_cfg.sun, dir, 0.25f, 4.0f));
       break;
+   case kRowSunHalf: g_cfg.sunHalf = !g_cfg.sunHalf; break;
    case kRowFog: g_cfg.fog = (g_cfg.fog + dir + 4) % 4; break;
    case kRowFogLit: g_cfg.fogLit = !g_cfg.fogLit; break;
    case kRowFogQuality: g_cfg.fogQuality = (g_cfg.fogQuality - 1 + dir + 3) % 3 + 1; break;
@@ -6116,7 +6122,10 @@ void draw_frame(bool sceneDrawn)
       .maxBounceShadows = 2,
       .indirectBounces = (g_cfg.gi == 1 || g_cfg.gi == 3) ? 1u : 2u,
       .indirectLegacyBounceWeight = true,
-      .cellWorldSize = 1.0f,
+      // (unread by the shaders: over 1.5 asks RtRaygenDirect for the sky
+      // light's shadow rays every other frame, in 8x8 tiles -- the moon's
+      // 3.4 ms at Reflections in Red's pond)
+      .cellWorldSize = g_cfg.sunHalf && sky_light_on() ? 2.0f : 1.0f,
       // How strongly the denoiser throws away what it has gathered where the
       // lighting changed. It notices a change for one frame only (after that
       // the place is dark and there is nothing to compare); at Blood RT's
