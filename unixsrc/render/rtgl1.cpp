@@ -3078,6 +3078,62 @@ void mirror_textures_clear()
    mirror_world_regive(-1);
 }
 
+// The film over untextured water lit by the game's lights at each vertex
+// (see upload_world): its colour, the water's, in the vertices' colours.
+void water_film_light(WorldGroup &g)
+{
+   const float top = std::max({g_waterRgb[0], g_waterRgb[1], g_waterRgb[2], 1.0f});
+   float hue[3];
+   for (int k = 0; k < 3; ++k)
+      hue[k] = 0.35f + 0.65f * g_waterRgb[k] / top;
+   struct Near {
+      float pos[3], rgb[3], dir[3], reach, inner, outer;
+   };
+   std::vector<Near> near;
+   for (const PendingLight &l : g_lastLights) {
+      const RgFloat3D lp = to_rt(l.pos);
+      const float reach = l.radius > 0.0f ? l.radius * kMetersPerUnit : 12.0f;
+      float d2 = 0.0f;
+      for (int k = 0; k < 3; ++k) {
+         const float d = std::max({g.bmin[k] - lp.data[k], 0.0f, lp.data[k] - g.bmax[k]});
+         d2 += d * d;
+      }
+      if (d2 >= reach * reach || lp.data[2] < g.bmin[2] - 0.05f)
+         continue;
+      Near n{};
+      for (int k = 0; k < 3; ++k) {
+         n.pos[k] = lp.data[k];
+         n.rgb[k] = l.rgb[k] / 255.0f;
+         n.dir[k] = l.dir[k];
+      }
+      n.reach = reach;
+      n.inner = l.inner;
+      n.outer = l.outer;
+      near.push_back(n);
+   }
+   for (RgPrimitiveVertex &v : g.verts) {
+      float lit[3] = {0.0f, 0.0f, 0.0f};
+      for (const Near &n : near) {
+         const float dx = n.pos[0] - v.position[0], dy = n.pos[1] - v.position[1], dz = n.pos[2] - v.position[2];
+         const float d = std::sqrt(dx * dx + dy * dy + dz * dz);
+         if (d >= n.reach || dz <= 0.0f)
+            continue;
+         float f = (1.0f - d / n.reach) * (dz / std::max(d, 1e-3f));   // falling off; from above
+         if (n.outer > -1.0f && n.inner > n.outer) {
+            // (a spot: its cone, toward the vertex)
+            const float c = -(n.dir[0] * dx + n.dir[1] * dy + n.dir[2] * dz) / std::max(d, 1e-3f);
+            f *= std::clamp((c - n.outer) / (n.inner - n.outer), 0.0f, 1.0f);
+         }
+         for (int k = 0; k < 3; ++k)
+            lit[k] += n.rgb[k] * f;
+      }
+      const float L = std::min((lit[0] + lit[1] + lit[2]) / 3.0f, 1.5f);
+      // (the rasterizer takes vertex colours as sRGB: rasterizedVertexColorGamma)
+      auto enc = [](float linear) { return std::pow(std::clamp(linear, 0.0f, 1.0f), 1.0f / 2.2f); };
+      v.color = pack_color(enc(hue[0] * L * 0.12f), enc(hue[1] * L * 0.12f), enc(hue[2] * L * 0.12f), 1.0f);
+   }
+}
+
 void upload_world()
 {
    if (!g_worldValid)
@@ -3224,21 +3280,21 @@ void upload_world()
             // a water surface with no texture of its own (texture 0, as
             // Black Parade's canals, where the mission has no other water to
             // borrow one from): the game draws none -- what is under it,
-            // hazed by its depth (below), shows the water. Over it, a faint
-            // film, mostly see-through: a third of the way to a very dark
-            // green, so the waterline shows and the bed under it still does.
-            // (Drawn unlit, as see-through surfaces are: so dark it stays
-            // dark however the eyes adapt. The path tracer's own water showed
-            // as a flat grey sheet; as a mirror it showed the world's
-            // unfinished undersides, only ever meant to be seen from the
-            // other side; drawn solid, a black slab over the canal's bed.)
+            // hazed by its depth (below), shows the water. Over it, a film,
+            // mostly see-through, the water's dark green: it takes 40% of
+            // what is under it away, and gives back the water's colour as
+            // lit by the lamps around (each vertex by the game's lights,
+            // no shadows) -- a sheen under a lamp, only the darkening where
+            // none reaches. (See-through surfaces are drawn unlit, and a
+            // colour of their own glowed in the darkest canal as the eyes
+            // adapted. The path tracer's own water showed as a flat grey
+            // sheet; as a mirror it showed the world's unfinished
+            // undersides; drawn solid, a black slab over the canal's bed.)
             if (g_underwater)
                continue;   // (from under it: the water's own haze)
             flags |= RG_MESH_PRIMITIVE_TRANSLUCENT;
-            const float top = std::max({g_waterRgb[0], g_waterRgb[1], g_waterRgb[2], 1.0f});
-            for (int k = 0; k < 3; ++k)
-               tint[k] = 0.012f * (0.4f + 0.6f * g_waterRgb[k] / top);
-            alpha = 0.32f;
+            water_film_light(g);
+            alpha = 0.4f;
          } else if (g_cfg.water == 1) {
             flags |= RG_MESH_PRIMITIVE_WATER;    // RTGL1's reflective/refractive water
          } else if (g_cfg.water == 0) {
