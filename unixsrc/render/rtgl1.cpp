@@ -168,7 +168,7 @@ struct Settings {
    int playerBody = 1;        // Garrett's own model: his shadow, and him in mirrors and water (unseen by the camera)
    int shadowAlert = 0;       // the guards notice his shadow (g_PlayerShadowAlert, objlight.c)
    int testMirror = 0;        // inspecting a wall makes its texture a mirror (to see Garrett whole)
-   bool fogLit = false;       // the mission's fog lit by the lamps in it (a grain as the view moves), or flat as the game's
+   bool fogLit = true;        // the mission's fog lit by the lamps in it, or flat as the game's (smooth, no glow)
    float lightSoft = 1.0f;    // a strong lamp's light is a bigger source: no white spot on the wall next to it (0 off)  // a torch's body casts shadows (only its cup lets the flame's light out)
    bool steadyFaces = true;   // models' faces seen or shadow-only by a fixed rule, not by the view
    bool lightFix = true;      // lights moved out of the walls they sit in
@@ -247,7 +247,7 @@ void load_settings()
       else if (k == "sun") g_cfg.sun = std::clamp(value, 0.0f, 4.0f);
       else if (k == "metalfx_denoiser") g_cfg.mfxDenoise = value != 0;
       else if (k == "fog") g_cfg.fog = std::clamp(int(value), 0, 3);
-      else if (k == "fog_lit") g_cfg.fogLit = value != 0;
+      else if (k == "fog_lamps") g_cfg.fogLit = value != 0;
       else if (k == "materials") g_cfg.materials = value != 0;
       else if (k == "bump") g_cfg.bump = std::clamp(value, 0.0f, 4.0f);
       else if (k == "parallax") g_cfg.parallax = std::clamp(value, 0.0f, 0.1f);
@@ -343,7 +343,7 @@ void save_settings()
    fprintf(f, "volumetric_smoke = %.2f\n", g_cfg.smoke);
    fprintf(f, "player_body = %d\n", g_cfg.playerBody == 2 ? 1 : g_cfg.playerBody);
    fprintf(f, "shadow_alert = %d\n", g_cfg.shadowAlert);
-   fprintf(f, "fog_lit = %d\n", int(g_cfg.fogLit));
+   fprintf(f, "fog_lamps = %d\n", int(g_cfg.fogLit));
    fclose(f);
 }
 
@@ -4299,7 +4299,7 @@ std::string row_value(int row)
    case kRowFog:
       return g_cfg.fog == 0 ? "Off" : g_cfg.fog == 1 ? "Light" : g_cfg.fog == 3 ? "Thick" : "As the mission";
    case kRowFogLit:
-      return g_cfg.fogLit ? "On (glows round lamps; grainy as the view moves)" : "Off (flat, as the game's: smooth)";
+      return g_cfg.fogLit ? "On (glows round the lamps)" : "Off (flat, as the game's)";
    case kRowBloom: return g_cfg.bloom ? "On" : "Off";
    case kRowVsync: return g_cfg.vsync ? "On" : frame_gen_on() ? "On (for frame generation)" : "Off";
    case kRowFps: return g_cfg.fps ? "On" : "Off";
@@ -5479,7 +5479,14 @@ void draw_frame(bool sceneDrawn)
       .volumetricFar = volFar,
       .ambientColor = volAmbient,
       .scaterring = volNear,
-      .assymetry = 0.6f,
+      // Forward scattering (the glow toward a light ahead) -- for the moon's
+      // shafts, one light from one side. In a haze lit by every lamp, the
+      // light each cell is lit by is a different lamp each frame, picked at
+      // random, and its direction weighed the cell's (smoothed) light by
+      // up to 16x, each frame anew: the haze's light, steady, came out as a
+      // swarming blotchy grain as the view moved (Malazar's Tower's fog).
+      // Even every way there: the light as smooth as its history makes it.
+      .assymetry = lampHaze ? 0.0f : 0.6f,
       .useIlluminationVolume = false,
       .fallbackSourceColor = {{0, 0, 0}},
       .fallbackSourceDirection = {{0, 0, -1}},
