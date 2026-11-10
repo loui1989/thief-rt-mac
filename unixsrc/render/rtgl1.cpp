@@ -1565,6 +1565,8 @@ double g_uploadLibrarySecs = 0;   // time inside rgUploadMeshPrimitive (the "cap
 // what is being given now is it -- unseen by the camera (it is inside it),
 // but casting his shadow and seen in mirrors, glass and water
 uint32_t g_viewerObj = 0, g_viewerFrame = 0;
+// objects the game drew with nothing captured, when (RenderRTObjectWanted)
+std::unordered_map<uint32_t, uint32_t> g_emptyOut;
 // and what he holds that the double's model has not (his blackjack)
 uint32_t g_viewerItem = 0, g_viewerItemFrame = 0;
 bool g_uploadViewer = false;
@@ -1607,7 +1609,10 @@ struct CaptureParts {
    double reused = 0;   // models the game did not draw again: as they were (RenderRTObjectReuse)
    double halfRate = 0;   // of them, far moving ones given as last frame's (every other frame)
    double nearSame = 0;  // captures taken as unchanged to within 2 mm (same_within)
-   double prep[5] = {};              // RenderRTPrepMark's parts
+   double prep[8] = {};              // RenderRTPrepMark's parts
+   // the models drawn out of view (RenderRTObjectWanted): never captured, moved
+   // since, and not asked for again (they came empty a moment ago)
+   double outNew = 0, outMoved = 0, outEmpty = 0;
 } g_capParts;
 // What each model cost this report's frames (its capture's end, and making
 // its faces steady when captured anew), for the performance log's costliest
@@ -5307,9 +5312,12 @@ void perf_frame(double t)
               cp.draws * ms, cp.drawCalls / n, cp.ends * ms, cp.lights * ms, cp.world * ms, cp.models * ms,
               cp.faces * ms, cp.match * ms, cp.fresh / n, cp.nearSame / n, cp.reused / n, cp.halfRate / n);
       fprintf(f, "  more parts (ms per frame): inside the path tracer's library %.2f; models' ends hashing %.2f; "
-                 "rt prep: world %.2f, lights found %.2f, their reach %.2f, objects' lights %.2f, models out of view %.2f\n",
+                 "rt prep: world %.2f, lights found %.2f, their reach %.2f, objects' lights %.2f, models out of view %.2f "
+                 "(finding them %.2f, drawing them %.2f: %.1f a frame, %.1f never captured and %.1f moved, %.1f not asked for, "
+                 "empty a moment ago; Garrett's body double %.2f)\n",
               g_uploadLibrarySecs * 1000.0 / n, cp.hashes * ms, cp.prep[0] * ms, cp.prep[1] * ms, cp.prep[2] * ms,
-              cp.prep[3] * ms, cp.prep[4] * ms);
+              cp.prep[3] * ms, (cp.prep[4] + cp.prep[5] + cp.prep[6]) * ms, cp.prep[5] * ms, cp.prep[4] * ms,
+              (cp.outNew + cp.outMoved) / n, cp.outNew / n, cp.outMoved / n, cp.outEmpty / n, cp.prep[6] * ms);
       // when the models cost a lot: which
       if ((cp.ends + cp.faces + cp.match) * ms > 4.0 && !g_objCost.empty()) {
          std::vector<std::pair<double, uint32_t>> top;
@@ -7016,7 +7024,7 @@ void RenderRTPrepBegin(void)
 }
 void RenderRTPrepMark(int part)
 {
-   if (s_prepDepth <= 0 || part < 0 || part >= 5)
+   if (s_prepDepth <= 0 || part < 0 || part >= 8)
       return;
    const auto now = std::chrono::steady_clock::now();
    g_capParts.prep[part] += std::chrono::duration<double>(now - s_prepMark).count();
@@ -8048,8 +8056,18 @@ int RenderRTObjectWanted(uint32_t obj)
    if (!g_inScene)
       return 0;
    auto it = g_objects.find(obj);
-   if (it == g_objects.end())
+   if (it == g_objects.end()) {
+      // (one the game drew with nothing in it -- an empty model, one it
+      // bailed out of: not again for a second; asked for every frame, a few
+      // such took the frame's whole budget of models out of view)
+      auto e = g_emptyOut.find(obj);
+      if (e != g_emptyOut.end() && g_frameNumber - e->second < 60) {
+         ++g_capParts.outEmpty;
+         return 0;
+      }
+      ++g_capParts.outNew;
       return 1;
+   }
    const CachedObject &c = it->second;
    if (c.frame == g_frameNumber)
       return 0;   // drawn this frame
@@ -8065,6 +8083,8 @@ int RenderRTObjectWanted(uint32_t obj)
    // made ready anew every frame cost milliseconds a frame in a crowd.
    if (moved && g_frameNumber - c.frame < 3)
       return 0;
+   if (moved)
+      ++g_capParts.outMoved;
    return moved ? 1 : 0;
 }
 
@@ -8312,6 +8332,12 @@ void RenderRTObjectEnd(void)
    }
    if (g_currentCapture.empty()) {
       ++g_emptyCaptures;
+      // (not known: not asked for out of view again for a moment)
+      if (g_objects.find(obj) == g_objects.end()) {
+         if (g_emptyOut.size() > 4096)
+            g_emptyOut.clear();
+         g_emptyOut[obj] = g_frameNumber;
+      }
       // logged once a model: first those never captured at all, then (the
       // interesting ones) models captured before that now come empty
       static std::unordered_set<uint32_t> s_emptyLogged, s_lostLogged;

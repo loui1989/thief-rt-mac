@@ -3207,8 +3207,38 @@ extern "C" void RenderRTGameDrawExtraObjects(void)
    if (!g_lgd3d || !RenderRTCaptureDraws())
       return;
    player = PlayerObjectExists() ? PlayerObject() : OBJ_NULL;
-   for (ObjID obj = 1; obj < gMaxObjID && budget > 0; ++obj)
+   // The objects round the camera that could be drawn here, found again every
+   // 16 frames or when the camera has gone 15 ft (a few feet more round than
+   // drawn): going through every object of the mission each frame -- 8000 of
+   // them in Reflections in Red -- for the few near.
+   static std::vector<ObjID> s_near;
+   static unsigned s_calls = 0;
+   static mxs_vector s_nearAt;
+   static int s_nearMax = -1;
+   const float kNear = kRadius + 25.0f;
+   if (s_calls++ % 16 == 0 || s_nearMax != gMaxObjID ||
+       mx_dist2_vec(&portal_camera_loc, &s_nearAt) > 15.0f * 15.0f)
    {
+      s_near.clear();
+      s_nearAt = portal_camera_loc;
+      s_nearMax = gMaxObjID;
+      for (ObjID obj = 1; obj < gMaxObjID; ++obj)
+      {
+         if (!ObjectExists(obj) || !ObjHasRefs(obj))
+            continue;
+         Position *pos = ObjPosGet(obj);
+         if (!pos || mx_dist2_vec(&pos->loc.vec, &portal_camera_loc) > kNear * kNear)
+            continue;
+         const int type = rendobj_type(obj);
+         if (type == OM_TYPE_MD || type == OM_TYPE_MESH)
+            s_near.push_back(obj);
+      }
+   }
+   RenderRTPrepMark(5);
+   for (ObjID obj : s_near)
+   {
+      if (budget <= 0)
+         break;
       if (obj == player || !ObjectExists(obj) || !ObjHasRefs(obj))
          continue;
       Position *pos = ObjPosGet(obj);
@@ -3225,9 +3255,12 @@ extern "C" void RenderRTGameDrawExtraObjects(void)
       model_funcs *ptmf = rendobj_get_model_funcs(obj, &idx);
       if (!ptmf || !ptmf->render)
          continue;
+      RenderRTPrepMark(5);
       rendobj_core_render_object(obj, OBJ_NO_SPLIT, idx, NULL, ptmf->render, ptmf);
+      RenderRTPrepMark(4);
       --budget;
    }
+   RenderRTPrepMark(5);
    // Garrett himself, every frame: his body double (plycbllm.cpp), a thief
    // of the game's walking as he walks, for his shadow and his reflection.
    // The ray tracer keeps it from the camera.
@@ -3259,6 +3292,7 @@ extern "C" void RenderRTGameDrawExtraObjects(void)
             rendobj_core_render_object(item, OBJ_NO_SPLIT, iidx, NULL, pimf->render, pimf);
       }
    }
+   RenderRTPrepMark(6);
 }
 
 // Every object within radius (feet) of a point, as the game sees it, for the
