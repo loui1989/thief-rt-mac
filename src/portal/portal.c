@@ -1724,6 +1724,8 @@ unsigned portal_sound_world(void (*fn)(void *user, int n, const float *xyz,
 extern void *lgd3d_rt_texture_for_bitmap(grs_bitmap *bm);
 extern void *portal_rt_water_texture(r3s_texture tex);
 extern float hw_water_tex_scale;
+extern int GetWaterBankForFlow(int idx);             // h2ocolor.cpp
+extern const void *GetWaterColorForBank(int bank);   // (an sRGBA: its rgb bytes first)
 extern void objlight_rt_submit(void);
 
 static bool portal_rt_is_sky(int texture_id)
@@ -2077,6 +2079,77 @@ static void portal_rt_submit_world(void)
             }
          }
       }
+      // Each water cell's surface: the height of its openings onto the air
+      // above it (or, a cell deep under, of the water cells over it) -- the
+      // depth of what is under water, which the path tracer hazes by it,
+      // the water's own surface being drawn only where it has a texture
+      // (as the game draws it: an untextured one not at all)
+      static float *water_top = NULL;
+      static int water_top_n = 0;
+      if (water_top_n < wr_num_cells) {
+         free(water_top);
+         water_top = (float *)malloc(sizeof(float) * (wr_num_cells > 0 ? wr_num_cells : 1));
+         water_top_n = water_top ? wr_num_cells : 0;
+      }
+      if (water_top) {
+         int pass, any = 0;
+         for (c = 0; c < wr_num_cells; ++c) {
+            PortalCell *r = WR_CELL(c);
+            int p, voff = 0;
+            water_top[c] = -1e30f;
+            if (!r || r->medium != 2)
+               continue;
+            ++any;
+            for (p = 0; p < r->num_polys; voff += r->poly_list[p].num_vertices, ++p) {
+               PortalPolygonCore *pc = &r->poly_list[p];
+               PortalCell *d;
+               float z = 0;
+               int i;
+               if (p < r->num_polys - r->num_portal_polys || pc->destination >= wr_num_cells)
+                  continue;
+               d = WR_CELL(pc->destination);
+               if (!d || d->medium == 2 || pc->num_vertices < 3)
+                  continue;
+               for (i = 0; i < pc->num_vertices; ++i)
+                  z += r->vpool[r->vertex_list[voff + i]].z;
+               z /= pc->num_vertices;
+               if (z > water_top[c])
+                  water_top[c] = z;
+            }
+         }
+         if (any) {
+            // the water's colour (the mission's, as the game hazes it with)
+            for (c = 0; c < wr_num_cells; ++c) {
+               PortalCell *r = WR_CELL(c);
+               if (r && r->medium == 2) {
+                  const unsigned char *rgb =
+                     (const unsigned char *)GetWaterColorForBank(GetWaterBankForFlow(r->motion_index));
+                  if (rgb)
+                     RenderRTWorldWaterColor(rgb[0], rgb[1], rgb[2]);
+                  break;
+               }
+            }
+         }
+         for (pass = 0; pass < 16 && any; ++pass) {
+            int changed = 0;
+            for (c = 0; c < wr_num_cells; ++c) {
+               PortalCell *r = WR_CELL(c);
+               int p;
+               if (!r || r->medium != 2)
+                  continue;
+               for (p = r->num_polys - r->num_portal_polys; p < r->num_polys; ++p) {
+                  const int d = r->poly_list[p].destination;
+                  if (d < wr_num_cells && WR_CELL(d) && WR_CELL(d)->medium == 2 &&
+                      water_top[d] > water_top[c]) {
+                     water_top[c] = water_top[d];
+                     changed = 1;
+                  }
+               }
+            }
+            if (!changed)
+               break;
+         }
+      }
       const int game_light = RenderRTLightmapWanted();
       memset(portal_rt_texture_seen, 0, sizeof(portal_rt_texture_seen));
       portal_rt_max_texture_id = -1;
@@ -2187,6 +2260,16 @@ static void portal_rt_submit_world(void)
                int page;
                if (portal_rt_lm_polygon(c, p, r, ri, anchor, voff, n, lmuv, &page))
                   RenderRTWorldPolygonLight(page, n, lmuv);
+            }
+            if (!(flags & kRenderRTWorldWater) && r->medium == 2 && water_tex < 0 && water_top &&
+                water_top[c] > -1e29f) {
+               // (how far under the water's surface it lies, in feet)
+               float z = 0;
+               for (i = 0; i < n; ++i)
+                  z += xyz[i * 3 + 2];
+               z /= n;
+               if (water_top[c] - z > 0.0f)
+                  RenderRTWorldPolygonUnderWater(water_top[c] - z);
             }
             RenderRTWorldPolygon(tid, flags, n, xyz, uv);
             if (!(flags & kRenderRTWorldSky) && !portal_rt_is_sky(tid) &&

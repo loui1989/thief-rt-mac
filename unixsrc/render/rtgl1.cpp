@@ -1195,6 +1195,7 @@ int g_lightEventFrames = 0;   // a light just put out or lit: the denoiser lets 
 std::vector<PendingLight> g_fadingOut;   // left the traced set, still fading out
 std::vector<PendingLight> g_frozenLights;  // while g_freeze
 bool g_underwater = false;
+float g_waterRgb[3] = {56.0f, 107.0f, 97.0f};   // the mission's water colour (RenderRTWorldWaterColor)
 // the mission's fog for this frame (a fog zone's, eased): colour 0-255 and the
 // distance in feet at which it is opaque, 0 none (portal.c, fogzone.h)
 float g_fogRgb[3] = { 0, 0, 0 };
@@ -2973,6 +2974,7 @@ struct WorldGroup {
    bool shown = false;               // given to the path tracer last frame
    bool given = false;               // given to it since the world was made (unchanged since)
    int lmPage = -1;                  // the game's light: its lightmaps' page of the atlas
+   int underWater = 0;               // under water: 0 not, else (its depth in 0.25 m steps) + 1
    std::vector<RgFloat2D> lmuv;      // and where on it, a u,v for each vertex
 };
 constexpr float kWorldChunk = 24.0f;      // meters
@@ -3105,6 +3107,15 @@ void upload_world()
    const RgColor4DPacked32 lmParams =
       pack_color(1.0f - 0.45f * cool, 1.0f - 0.25f * cool, 1.0f, float(followBits * 16 + greyBits) / 255.0f);
    int lmStat[6] = {};
+   // (seen from under the water, what is under it is not hazed by its depth:
+   // the camera's own water does that -- given again as that changes)
+   static bool s_hazedFromAbove = true;
+   if (s_hazedFromAbove == g_underwater) {
+      s_hazedFromAbove = !g_underwater;
+      for (WorldGroup &g : g_world)
+         if (g.underWater > 0)
+            g.given = false;
+   }
    const RgFloat3D cam = to_rt(g_camera.pos);
    // the view's cone (a little wider than the screen): far land in view outdoors, which
    // the game's walk through the cells may not reach -- an island across the void
@@ -3212,16 +3223,13 @@ void upload_world()
          if (!tex) {
             // a water surface with no texture of its own (texture 0, as
             // Black Parade's canals, where the mission has no other water to
-            // borrow one from): dark, murky water -- a traced surface, lit as
-            // the walls are. (The path tracer's own water showed as a flat
-            // grey sheet -- whatever the water setting; as a see-through
-            // colour it was drawn unlit, the same grey glow in the darkest
-            // canal, brightened with the eyes. As a mirror it showed the
-            // world's unfinished undersides and gaps, only ever meant to be
-            // seen from the other side: broken geometry "in" the water.)
-            tint[0] = 0.035f;
-            tint[1] = 0.055f;
-            tint[2] = 0.05f;
+            // borrow one from): not drawn, as the game draws none -- what is
+            // under it hazed by its depth (below) is all the water shows.
+            // (The path tracer's own water showed as a flat grey sheet; as a
+            // mirror it showed the world's unfinished undersides, only ever
+            // meant to be seen from the other side; as a dark surface, a
+            // black slab where the game shows the canal's bed.)
+            continue;
          } else if (g_cfg.water == 1) {
             flags |= RG_MESH_PRIMITIVE_WATER;    // RTGL1's reflective/refractive water
          } else if (g_cfg.water == 0) {
@@ -3231,6 +3239,16 @@ void upload_world()
             if (!tex || !tex->hasAlpha)
                alpha = g_cfg.waterAlpha;
          }
+      }
+      if (g.underWater > 0 && !g_underwater) {
+         // under the water, seen from above it: hazed by its depth, toward
+         // the water's colour -- each metre lets through 40-80% (the most of
+         // the water's own strongest colour), a shallow bed clear, a deep
+         // one dark and coloured as the water
+         const float depthM = (g.underWater - 0.5f) * 0.25f;
+         const float top = std::max({g_waterRgb[0], g_waterRgb[1], g_waterRgb[2], 1.0f});
+         for (int k = 0; k < 3; ++k)
+            tint[k] *= std::max(std::pow(0.40f + 0.40f * g_waterRgb[k] / top, depthM), 0.06f);
       }
       const char *texName = texture_name(tex);
       // smooth, polished surfaces (marble, glazed tile, metal): sharp traced
@@ -7895,6 +7913,20 @@ void RenderRTLightmapRect(int page, int x, int y, int w, int h, const unsigned c
 
 void RenderRTWorldCell(int cell) { g_worldCell = cell; }
 
+int g_nextUnderWater = 0;
+void RenderRTWorldWaterColor(int r, int g, int b)
+{
+   if (r + g + b > 0) {
+      g_waterRgb[0] = float(r);
+      g_waterRgb[1] = float(g);
+      g_waterRgb[2] = float(b);
+   }
+}
+void RenderRTWorldPolygonUnderWater(float depth)
+{
+   g_nextUnderWater = std::clamp(int(depth * kMetersPerUnit / 0.25f) + 1, 1, 15);
+}
+
 void RenderRTWorldPolygonFacing(float nx, float ny, float nz)
 {
    g_nextFacing[0] = nx;
@@ -7909,6 +7941,8 @@ void RenderRTWorldPolygon(int textureId, int flags, int count, const float *xyz,
    g_nextFacingSet = false;
    const int lmPage = (g_nextLmPage >= 0 && int(g_nextLmUv.size()) == count) ? g_nextLmPage : -1;
    g_nextLmPage = -1;
+   const int underWater = g_nextUnderWater;
+   g_nextUnderWater = 0;
    if (count < 3)
       return;
    // its block of the mission, by its first corner
@@ -7916,13 +7950,15 @@ void RenderRTWorldPolygon(int textureId, int flags, int count, const float *xyz,
    auto block = [](float v) { return uint64_t(std::clamp(int(std::floor(v / kWorldChunk)) + 4096, 0, 8191)); };
    const uint64_t chunk = block(p0.data[0]) | (block(p0.data[1]) << 13) | (block(p0.data[2]) << 26);
    // (and by the page of the game's light its lightmaps are on)
-   const uint64_t key = (uint64_t(uint32_t(textureId) & 0xffffu) << 48) | (uint64_t(flags & 0x0f) << 44) |
-                        (uint64_t(lmPage + 1) << 39) | chunk;
+   const uint64_t key = ((uint64_t(uint32_t(textureId) & 0xffffu) << 48) | (uint64_t(flags & 0x0f) << 44) |
+                         (uint64_t(lmPage + 1) << 39) | chunk) ^
+                        (uint64_t(underWater) * 0x9e3779b97f4a7c15ull);   // (and by its depth under water)
    auto found = g_worldIndex.find(key);
    if (found == g_worldIndex.end()) {
       found = g_worldIndex.emplace(key, g_world.size()).first;
       g_world.push_back(WorldGroup{textureId, flags, {}, {}});
       g_world.back().lmPage = lmPage;
+      g_world.back().underWater = underWater;
    }
    WorldGroup &g = g_world[found->second];
    if (lmPage >= 0)
