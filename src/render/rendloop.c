@@ -452,8 +452,10 @@ static void rt_sky_stars(void)
    r3_end_block();
    r3_end_object();
 }
+extern BOOL lgd3d_punt_buffer;
 static void rt_capture_sky_face(void)
 {
+   BOOL puntWas;
    static grs_canvas *s_canvas = NULL;
    static int s_size = 0;
    static const mxs_angvec kFaceAng[6] = {
@@ -489,6 +491,13 @@ static void rt_capture_sky_face(void)
       corners[i * 3 + 2] = vecs[i].z;
    }
    lgd3d_set_offsets(0, 0);
+   // each polygon drawn at once, not gathered with the next ones: the path
+   // tracer takes the sky's polygons whole as each is drawn (RenderRTSkyPoly),
+   // and a batch drawn later came with only the last one's points -- the rest
+   // of it lost (the sky in pieces, holes between them)
+   lgd3d_render_flush();
+   puntWas = lgd3d_punt_buffer;
+   lgd3d_punt_buffer = TRUE;
    RenderRTSkyFaceBegin(face, corners);
    if (SkyRendererUseEnhanced())
       SkyRendererRender();
@@ -496,6 +505,7 @@ static void rt_capture_sky_face(void)
       rt_sky_stars();
    lgd3d_render_flush();
    RenderRTSkyFaceEnd();
+   lgd3d_punt_buffer = puntWas;
    r3_end_frame();
    gr_pop_canvas();
 }
