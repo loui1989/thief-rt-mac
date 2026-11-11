@@ -133,6 +133,7 @@ struct Settings {
    int gi = 0;                // bounce light: 0 two bounces at half rate (as Blood RT),
                               // 1 one bounce, 2 two bounces, 3 one bounce at half rate
    bool volumetric = false;   // haze lit by every light
+   bool thinSeeThrough = true;   // see-through models' faces thinned for the rays (thin_see_through)
    bool sunHalf = false;      // the mission's sun's (moon's) shadow rays every other frame, in tiles (cheaper:
                               // 1-2 fps at Reflections in Red's pond, and it flickered -- off)
    bool moonShafts = false;   // god rays: the haze lit by the moon alone (cheap), when volumetric is off
@@ -248,6 +249,7 @@ void load_settings()
       else if (k == "volumetric") g_cfg.volumetric = value != 0;
       else if (k == "moon_shafts") g_cfg.moonShafts = value != 0;
       else if (k == "sun_shadow_half") g_cfg.sunHalf = value != 0;
+      else if (k == "thin_see_through") g_cfg.thinSeeThrough = value != 0;
       else if (k == "god_ray_strength") g_cfg.shafts = std::clamp(value, 0.1f, 8.0f);
       else if (k == "moon") g_cfg.moon = std::clamp(value, 0.0f, 8.0f);
       else if (k == "moon_azimuth") g_cfg.moonAzimuth = value < 0 ? -1 : int(value) % 360;
@@ -348,6 +350,7 @@ void save_settings()
    fprintf(f, "dark_adapt = %d\n", g_cfg.darkAdapt);
    fprintf(f, "sun = %.2f\n", g_cfg.sun);
    fprintf(f, "sun_shadow_half = %d\n", int(g_cfg.sunHalf));
+   fprintf(f, "thin_see_through = %d\n", int(g_cfg.thinSeeThrough));
    fprintf(f, "underwater_brighter = %.1f\n", g_cfg.underwaterLift);
    fprintf(f, "frame_generation = %d\n", int(g_cfg.frameGen));
    fprintf(f, "moon_shafts = %d\ngod_ray_strength = %.2f\nmoon = %.2f\nmoon_azimuth = %d\nmoon_height = %d\nmetalfx_denoiser = %d\n",
@@ -1627,6 +1630,12 @@ bool upload(uint64_t id, const RgMeshPrimitiveInfo &prim, bool firstPerson = fal
 }
 
 // ---- captured objects -------------------------------------------------------
+
+// what thin_see_through did to the models' captures (triangles, summed over
+// the performance log's window)
+struct ThinStats {
+   double twins = 0, opaque = 0, clear = 0, mixed = 0;
+} g_thin;
 
 // A triangle list lgd3d drew for the main view, in RTGL1 terms.
 // Where the ray tracer's capture time goes, for the performance log (the
@@ -4718,7 +4727,7 @@ const char *kUpscaleNames[] = {"Off",
 enum UiRow {
    kRowUpscale, kRowScale, kRowOutput, kRowDynres, kRowBounces, kRowReach, kRowLights, kRowLightFade, kRowCandidates, kRowNeighbours, kRowLightCull, kRowResponse, kRowFlicker, kRowVolumetric, kRowShafts, kRowFog, kRowFogLit, kRowFogQuality, kRowSmoke, kRowPlayerBody, kRowPlayerLegs, kRowShadowAlert, kRowTestMirror, kRowBloom, kRowVsync, kRowFrameCap,
    kRowFps, kRowDetection, kRowGemScale, kRowGemMatch, kRowGemEase, kRowLight, kRowExposure, kRowDarkAdapt, kRowAmbient, kRowAmbientFollow, kRowShadowCool, kRowSkySeen, kRowSky, kRowMoon, kRowMoonDir, kRowMoonHeight, kRowSun, kRowSunHalf, kRowLightSize, kRowRough, kRowSmooth, kRowSteady, kRowReuseModels, kRowFixtures, kRowFixtureLight, kRowSmallLamps, kRowLightFix, kRowGlow, kRowFlameGlow, kRowMaterials, kRowBump, kRowCrevice, kRowTexDetail, kRowParallax, kRowPolish, kRowWater, kRowUnderwater, kRowTracedSound, kRowHrtf,
-   kRowDebug, kRowFreeze, kRowTraceTest, kRowBackFaces, kRowReuse, kRowBlink, kRowPerf, kRowInspect, kRowSkipMission, kRowReset, kRowCount
+   kRowDebug, kRowThinSeeThrough, kRowFreeze, kRowTraceTest, kRowBackFaces, kRowReuse, kRowBlink, kRowPerf, kRowInspect, kRowSkipMission, kRowReset, kRowCount
 };
 
 const char *kRowLabels[kRowCount] = {
@@ -4726,7 +4735,7 @@ const char *kRowLabels[kRowCount] = {
    "Lights coming into range", "Lights tried per pixel", "  Lights shared with neighbours", "Lights behind walls", "Light changes", "Light flicker",
    "God rays (volumetric)", "  God ray strength", "Mission fog", "  Fog lit by the lamps", "  Lit fog quality", "Smoke and steam", "Garrett's shadow and reflection", "  His legs seen looking down", "  Guards notice his shadow", "  Test mirror", "Bloom", "VSync", "Frame rate limit", "FPS counter", "Light gem and guards", "  Light gem brightness", "  Light gem falloff", "  Light gem response", "Light brightness", "Darkest exposure", "  Eyes adjust to the dark", "Ambient light", "  Follows the game's light", "  Shadow colour", "Sky brightness (as seen)", "Sky light (on the level)", "Moonlight", "  Moon direction", "  Moon height", "Sunlight (Thief 2 missions)", "  Its shadows",
    "Light size (soft shadows)", "Surface roughness", "Model shading", "Model faces", "  Still models drawn once", "Torches and lamps", "Lamp and torch light", "Lamp reach", "Lights in walls", "Lamp glow", "Flame glow", "Materials", "Bumps", "Crevices", "Texture detail", "Parallax depth", "Polished reflections", "Water", "  Under water: brighter", "Traced sound (Steam Audio)", "  Headphone 3D sound (HRTF)",
-   "Debug view", "Freeze scene (test)", "Tracing layout (test)", "Back faces (test)", "Light sampling (test)", "Blink nearest light (test)", "Performance log", "Inspect centre of view", "Skip to next mission (test)", "Reset to defaults",
+   "Debug view", "See-through faces for the rays", "Freeze scene (test)", "Tracing layout (test)", "Back faces (test)", "Light sampling (test)", "Blink nearest light (test)", "Performance log", "Inspect centre of view", "Skip to next mission (test)", "Reset to defaults",
 };
 
 // rows that do something when chosen rather than having a value
@@ -4888,6 +4897,8 @@ std::string row_value(int row)
       return kModes[std::clamp(g_freezeMode, 0, 3)];
    }
    case kRowTraceTest: return kTraceTestNames[std::clamp(g_traceTest, 0, 5)];
+   case kRowThinSeeThrough:
+      return g_cfg.thinSeeThrough ? "Thinned (faster)" : "As drawn";
    case kRowBackFaces: return g_dropBackFaces ? "Dropped" : "Shadows only";
    case kRowBlink: return g_blinkTest ? "On" : "Off";
    case kRowFrameCap:
@@ -5149,6 +5160,7 @@ void change_row(int row, int dir)
    case kRowTraceTest:
       set_trace_test((g_traceTest + dir + 6) % 6);
       return;   // not saved
+   case kRowThinSeeThrough: g_cfg.thinSeeThrough = !g_cfg.thinSeeThrough; break;
    case kRowFreeze: {
       g_freezeMode = (g_freezeMode + dir + 4) % 4;
       g_freeze = g_freezeMode == 1 || g_freezeMode == 2;
@@ -5442,6 +5454,10 @@ void perf_frame(double t)
               g_uploadLibrarySecs * 1000.0 / n, cp.hashes * ms, cp.prep[0] * ms, cp.prep[1] * ms, cp.prep[2] * ms,
               cp.prep[3] * ms, (cp.prep[4] + cp.prep[5] + cp.prep[6]) * ms, cp.prep[5] * ms, cp.prep[4] * ms,
               (cp.outNew + cp.outMoved) / n, cp.outNew / n, cp.outMoved / n, cp.outEmpty / n, cp.prep[6] * ms);
+      fprintf(f, "  see-through faces of models captured (triangles a frame): %s; twins given for their shadow left out %.0f, "
+                 "traced as solid %.0f, wholly clear left out %.0f, asked of their texture %.0f\n",
+              g_cfg.thinSeeThrough ? "thinned" : "as drawn", g_thin.twins / n, g_thin.opaque / n, g_thin.clear / n,
+              g_thin.mixed / n);
       // when the models cost a lot: which
       if ((cp.ends + cp.faces + cp.match) * ms > 4.0 && !g_objCost.empty()) {
          std::vector<std::pair<double, uint32_t>> top;
@@ -5508,6 +5524,7 @@ void perf_frame(double t)
    g_perf.clients.clear();
    g_perf.wait = g_perf.draw = g_perf.capture = g_perf.prep = 0;
    g_capParts = CaptureParts{};
+   g_thin = ThinStats{};
    g_objCost.clear();
    g_uploadLibrarySecs = 0;
    g_perf.models = g_perf.prims = g_perf.tris = g_perf.kept = g_perf.lights = 0;
@@ -8476,6 +8493,159 @@ int RenderRTObjectReuse(uint32_t obj)
    return 1;
 }
 
+// See-through (alpha tested) faces cost the rays most of their time out of
+// doors: a ray that meets one asks its texture whether it passes, and at
+// Reflections in Red's pond (69 such pieces, 24000 triangles: leaves,
+// bushes, grass, vines) tracing them as solid took the frame from 25 to 20 ms
+// on the graphics card. Two things make them fewer, in a model's capture,
+// before anything else sees it:
+//  - a two-sided part is two coincident faces, one each way; the one turned
+//    away from the camera is given for its shadow only -- but the rays see
+//    the other from both sides already (RTGL1's faces are two-sided unless
+//    said otherwise), so it only made every shadow ray through a leaf ask
+//    twice. It goes. (Tree02: 532 triangles, 266 of them such twins.)
+//  - each see-through face is looked at against its texture: wholly opaque
+//    where it lies (a trunk, a leaf's middle) it is traced as solid; wholly
+//    clear (an empty corner of a leaf card) it is left out; only the rest is
+//    asked.
+// (the alpha test: avg(rgb) * a + a >= 0.5 -- opaque for certain at a >= 0.5,
+// clear for certain below 0.235)
+namespace {
+std::unordered_map<uint64_t, uint8_t> g_alphaClass;   // 0 clear, 1 opaque, 2 mixed, by texture and corners
+
+uint8_t alpha_class(const RtTexture &tex, const RgPrimitiveVertex *v, float colorAlpha)
+{
+   const int w = tex.width, h = tex.height;
+   if (w <= 0 || h <= 0 || tex.rgba.size() < size_t(w) * size_t(h) * 4)
+      return 2;
+   float px[3], py[3];
+   for (int k = 0; k < 3; ++k) {
+      px[k] = v[k].texCoord[0] * float(w) - 0.5f;
+      py[k] = v[k].texCoord[1] * float(h) - 0.5f;
+   }
+   const float minx = std::min({px[0], px[1], px[2]}) - 1.5f, maxx = std::max({px[0], px[1], px[2]}) + 1.5f;
+   const float miny = std::min({py[0], py[1], py[2]}) - 1.5f, maxy = std::max({py[0], py[1], py[2]}) + 1.5f;
+   if (!(maxx - minx < 4096.0f && maxy - miny < 4096.0f) || (maxx - minx) * (maxy - miny) > 262144.0f)
+      return 2;   // (too big a stretch of texture to look at)
+   // the edges, as distances in texels (positive inside, either winding)
+   float area = (px[1] - px[0]) * (py[2] - py[0]) - (px[2] - px[0]) * (py[1] - py[0]);
+   const float sgn = area < 0 ? -1.0f : 1.0f;
+   float ea[3], eb[3], ec[3];
+   for (int k = 0; k < 3; ++k) {
+      const int k1 = (k + 1) % 3;
+      float ax = px[k1] - px[k], ay = py[k1] - py[k];
+      float len = std::sqrt(ax * ax + ay * ay);
+      if (len < 1e-6f)
+         len = 1e-6f;
+      // inward normal, scaled to texels
+      ea[k] = -ay * sgn / len;
+      eb[k] = ax * sgn / len;
+      ec[k] = -(ea[k] * px[k] + eb[k] * py[k]);
+   }
+   const uint8_t *rgba = tex.rgba.data();
+   const float ca = std::clamp(colorAlpha, 0.0f, 1.0f);
+   const int opaqueAt = ca > 0.0f ? int(std::ceil(127.5f / ca)) : 256;   // a * ca >= 0.5
+   const int clearBelow = int(60.0f / std::max(ca, 1e-3f));
+   bool anyOpaque = false, anyClear = false, any = false;
+   const int x0 = int(std::floor(minx)), x1 = int(std::ceil(maxx)), y0 = int(std::floor(miny)), y1 = int(std::ceil(maxy));
+   for (int y = y0; y <= y1; ++y)
+      for (int x = x0; x <= x1; ++x) {
+         // a texel within a texel and a half of the face (bilinear reach)
+         bool in = true;
+         for (int k = 0; k < 3 && in; ++k)
+            in = ea[k] * float(x) + eb[k] * float(y) + ec[k] >= -1.5f;
+         if (!in)
+            continue;
+         const int tx = ((x % w) + w) % w, ty = ((y % h) + h) % h;
+         const int a = rgba[(size_t(ty) * size_t(w) + size_t(tx)) * 4 + 3];
+         any = true;
+         if (a >= opaqueAt)
+            anyOpaque = true;
+         else if (a < clearBelow)
+            anyClear = true;
+         else
+            return 2;
+         if (anyOpaque && anyClear)
+            return 2;
+      }
+   if (!any)
+      return 2;
+   return anyOpaque ? 1 : 0;
+}
+
+void thin_see_through(std::vector<CapturedPrim> &cap)
+{
+   // the twins: faces given for their shadow only that coincide with a face
+   // given whole (the same corners and texture coordinates)
+   std::unordered_set<uint64_t> whole;
+   bool anyShadowOnly = false;
+   for (const CapturedPrim &p : cap) {
+      if (p.sprite || (p.flags & RG_MESH_PRIMITIVE_TRANSLUCENT))
+         continue;
+      if (p.flags & RG_MESH_PRIMITIVE_SHADOW_ONLY) {
+         anyShadowOnly = true;
+         continue;
+      }
+      const uint64_t th = texture_hash(p.texture);
+      for (size_t i = 0; i + 2 < p.verts.size(); i += 3)
+         whole.insert(triangle_key(th, &p.verts[i]));
+   }
+   std::vector<CapturedPrim> out;
+   out.reserve(cap.size() + 4);
+   for (CapturedPrim &p : cap) {
+      const bool shadowOnly = (p.flags & RG_MESH_PRIMITIVE_SHADOW_ONLY) != 0;
+      const bool alpha = (p.flags & RG_MESH_PRIMITIVE_ALPHA_TESTED) && !p.sprite && p.tex && !p.tex->rgba.empty();
+      if (p.sprite || (p.flags & RG_MESH_PRIMITIVE_TRANSLUCENT) || (!alpha && !(shadowOnly && anyShadowOnly))) {
+         out.push_back(std::move(p));
+         continue;
+      }
+      const uint64_t th = texture_hash(p.texture);
+      const float colorAlpha = float((p.color >> 24) & 0xffu) / 255.0f;
+      std::vector<RgPrimitiveVertex> solid, asked;
+      for (size_t i = 0; i + 2 < p.verts.size(); i += 3) {
+         const RgPrimitiveVertex *v = &p.verts[i];
+         if (shadowOnly && !whole.empty() && whole.count(triangle_key(th, v))) {
+            g_thin.twins += 1;
+            continue;
+         }
+         uint8_t cls = 2;
+         if (alpha) {
+            uint64_t key = (uint64_t(p.texSerial) * 0x9E3779B97F4A7C15ull) ^ triangle_key(0, v) ^ (uint64_t((p.color >> 24) & 0xffu) << 56);
+            auto it = g_alphaClass.find(key);
+            if (it == g_alphaClass.end()) {
+               if (g_alphaClass.size() > (1u << 20))
+                  g_alphaClass.clear();
+               it = g_alphaClass.emplace(key, alpha_class(*p.tex, v, colorAlpha)).first;
+            }
+            cls = it->second;
+         }
+         if (cls == 0) {
+            g_thin.clear += 1;
+            continue;
+         }
+         auto &dst = cls == 1 ? solid : asked;
+         (cls == 1 ? g_thin.opaque : g_thin.mixed) += 1;
+         dst.insert(dst.end(), v, v + 3);
+      }
+      if (solid.empty() && asked.empty())
+         continue;
+      if (!solid.empty()) {
+         CapturedPrim q = p;   // (a copy: its look, its texture)
+         q.verts = std::move(solid);
+         q.flags &= ~RgMeshPrimitiveFlags(RG_MESH_PRIMITIVE_ALPHA_TESTED);
+         out.push_back(std::move(q));
+      }
+      if (!asked.empty()) {
+         p.verts = std::move(asked);
+         out.push_back(std::move(p));
+      }
+   }
+   // (all of it left out: kept as it was -- an empty capture means something else)
+   if (!out.empty())
+      cap.swap(out);
+}
+}   // namespace
+
 void RenderRTObjectEnd(void)
 {
    CaptureTimer timer;
@@ -8538,6 +8708,8 @@ void RenderRTObjectEnd(void)
                           g_currentWhole ? "whole" : "in pieces");
       return;
    }
+   if (g_cfg.thinSeeThrough)
+      thin_see_through(g_currentCapture);
    CachedObject &c = g_objects[obj];
    if (c.frame != g_frameNumber && !g_currentWhole && c.whole && !c.prims.empty() && c.posed) {
       // Only a piece of a model this time (drawn split across cells, each
