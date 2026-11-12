@@ -8240,6 +8240,43 @@ void RenderRTDrawWorld(int primitive, const sRenderBackendVertex *v, const float
          slot = (slot + 1) & 0x0fffffffu;
       upload_captured(0x300000000ull + uint64_t(slot), p);
    };
+   // A flat cut-out or see-through face of an object (a poster, a notice, a
+   // stain) stood a hair off its plane, toward the side it is seen from, by
+   // an amount of its own (0.4 to 6.4 mm, by the object): posters pasted
+   // over one another on a wall lie in one plane, and the game draws the
+   // last of them over the rest, where the rays met both at once and showed
+   // a speckled mix of the two, as if see-through (The Black Parade's
+   // broadsides). Never for the world's own faces, sprites or shadow casters.
+   if (g_currentObject && !sprite && !g_RenderRTShadowOnly && prim.verts.size() >= 3 &&
+       (prim.flags & (RG_MESH_PRIMITIVE_ALPHA_TESTED | RG_MESH_PRIMITIVE_TRANSLUCENT))) {
+      const float *a = prim.verts[0].position, *b = prim.verts[1].position, *c = prim.verts[2].position;
+      float n[3] = {(b[1] - a[1]) * (c[2] - a[2]) - (b[2] - a[2]) * (c[1] - a[1]),
+                    (b[2] - a[2]) * (c[0] - a[0]) - (b[0] - a[0]) * (c[2] - a[2]),
+                    (b[0] - a[0]) * (c[1] - a[1]) - (b[1] - a[1]) * (c[0] - a[0])};
+      const float nl = std::sqrt(n[0] * n[0] + n[1] * n[1] + n[2] * n[2]);
+      bool flat = nl > 1e-8f;
+      if (flat) {
+         for (float &x : n)
+            x /= nl;
+         for (const RgPrimitiveVertex &v : prim.verts) {
+            const float d = (v.position[0] - a[0]) * n[0] + (v.position[1] - a[1]) * n[1] +
+                            (v.position[2] - a[2]) * n[2];
+            if (std::fabs(d) > 0.002f) {
+               flat = false;
+               break;
+            }
+         }
+      }
+      if (flat) {
+         const RgFloat3D cam = to_rt(g_camera.pos);
+         const float side = (cam.data[0] - a[0]) * n[0] + (cam.data[1] - a[1]) * n[1] + (cam.data[2] - a[2]) * n[2];
+         const uint32_t hsh = g_currentObject * 2654435761u;
+         const float off = (side >= 0.0f ? 1.0f : -1.0f) * 0.0004f * float(1 + (hsh >> 28));
+         for (RgPrimitiveVertex &v : prim.verts)
+            for (int k = 0; k < 3; ++k)
+               v.position[k] += n[k] * off;
+      }
+   }
    const bool solidUntextured = !name && !(prim.flags & RG_MESH_PRIMITIVE_TRANSLUCENT);
    if (!solidUntextured) {
       emit(std::move(prim));
