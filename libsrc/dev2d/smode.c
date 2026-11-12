@@ -14,6 +14,9 @@
 #include <grdev.h>
 #include <mode.h>
 
+#include <stdio.h>
+#include <stdlib.h>
+
 #define fix_three_fourths fix_make(0, 0xc000)
 
 void (*grd_set_mode_callback)()=NULL;
@@ -40,6 +43,9 @@ int gr_set_mode(int mode, uint flags)
    grd_cap->h = grd_mode_info[mode].h;
    gr_set_screen_mode(mode, flags);
    gr_init_device(&grd_info);
+   if (getenv("DARK_DEBUG_MODE"))
+      fprintf(stderr, "gr_set_mode(%d): table %dx%d, cap %dx%d\n", mode,
+              grd_mode_info[mode].w, grd_mode_info[mode].h, grd_cap->w, grd_cap->h);
    grd_cap->aspect = (grd_cap->w * fix_three_fourths)/grd_cap->h;
    if (grd_set_mode_callback!=NULL)
       grd_set_mode_callback();

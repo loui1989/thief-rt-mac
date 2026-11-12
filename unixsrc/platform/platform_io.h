@@ -38,6 +38,18 @@
 #include <pthread.h>
 #pragma pack(8)
 #include <dlfcn.h>
+#if defined(__cplusplus) && !defined(__APPLE__)
+// (libstdc++, unlike macOS's libc++, keeps parts of its containers compiled
+// into the shared library -- the red-black tree's rebalancing, the hash
+// tables' rehash policy -- at natural packing: a std::map declared under
+// -fpack-struct=1 has its nodes laid out differently from the library's,
+// and the first rebalance corrupts it. Declared here, at natural packing.)
+#pragma pack(8)
+// (only these: <string> must come after scrpttyp.h's "string" macro where
+// the script code expects it)
+#include <map>
+#include <set>
+#endif
 #pragma pack(pop)
 #include <types.h>
 #if defined(__APPLE__) && defined(__aarch64__)

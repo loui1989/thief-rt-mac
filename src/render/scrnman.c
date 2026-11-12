@@ -566,6 +566,7 @@ BOOL ScrnInit3d(void)
       lgd3ds_device_info *info;
 
       if (num_devices <= 0) {
+         fprintf(stderr, "ScrnInit3d: no 3d devices\n");
          Warning(("No direct 3d devices available."));
          return FALSE;
       }
@@ -629,12 +630,15 @@ BOOL ScrnInit3d(void)
 
 
       // note that flags may be changed during this call, so we check afterwards
-      if (lgd3d_init(info) == FALSE)
+      if (lgd3d_init(info) == FALSE) {
+         fprintf(stderr, "ScrnInit3d: lgd3d_init failed\n");
          return FALSE;
+      }
 
       // make sure our lightmap method is confirmed.
       if (!(info->flags & LGD3DF_MULTITEXTURE_COLOR))
       {
+         fprintf(stderr, "ScrnInit3d: no multitexture colour\n");
          lgd3d_shutdown();
          // set error message?
          return FALSE;

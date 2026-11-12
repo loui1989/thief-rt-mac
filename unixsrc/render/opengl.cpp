@@ -1001,7 +1001,10 @@ bool DarkRenderOpen(int width, int height, const char *title)
       SDL_WINDOW_OPENGL | SDL_WINDOW_RESIZABLE | SDL_WINDOW_ALLOW_HIGHDPI);
    if (g_window) set_window_icon();
    if (g_window) g_context = SDL_GL_CreateContext(g_window);
-   if (!g_window || !g_context) { DarkRenderClose(); return false; }
+   if (!g_window || !g_context) {
+      fprintf(stderr, "OpenGL: no %s: %s\n", g_window ? "context" : "window", SDL_GetError());
+      DarkRenderClose(); return false;
+   }
    SDL_GL_MakeCurrent(g_window, g_context);
    // Loading panels force a present for small progress-dial updates.  Do not
    // serialize hundreds of those updates to WSLg's compositor refresh.  The
