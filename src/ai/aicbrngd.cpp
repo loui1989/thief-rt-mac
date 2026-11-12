@@ -59,6 +59,8 @@
 // for ranged combat change.
 #include <aicbrmpr.h>
 
+#include <rand.h>   // (DARK_RAND_MAX)
+
 // Must be last header
 #include <dbmem.h>
 
@@ -454,7 +456,7 @@ cAIAction * cAIRangedSubcombat::CheckSuggestDamageAction(const cAIActions & prev
          g_pAIRangedAudioResponse->Get(GetID(),&audio);
 
          float dmg=m_fDamage, var;
-         var=((2.0f*Rand()-RAND_MAX)/(RAND_MAX+1.0f))*audio->el[2];
+         var=((2.0f*Rand()-DARK_RAND_MAX)/(DARK_RAND_MAX+1.0f))*audio->el[2];
          dmg+=var;
          if (dmg>audio->el[0])
          {

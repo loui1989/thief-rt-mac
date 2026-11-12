@@ -1,3 +1,4 @@
+#include <stdlib.h>
 #include <stdio.h>
 /*
 @Copyright Looking Glass Studios, Inc.
@@ -175,6 +176,11 @@ static porthw_texture *init_texture(int texture_index)
    porthw_texture *texture = &texture_list[texture_index];
    texture->bm = gr_alloc_bitmap(LM_BITMAP_TYPE, LM_FLAGS, TEX_SIZE, TEX_SIZE);
    texture->bits = texture->bm->bits;
+   if (getenv("DARK_DEBUG_LM_FILL")) {   // (testing: a page's untouched texels magenta)
+      int i;
+      for (i = 0; i < TEX_SIZE * TEX_SIZE; i++)
+         ((ushort *)texture->bits)[i] = 0xf81f;
+   }
    {
       // (a light map page made where a freed image's bitmap was kept the
       // image's full colour picture with it, and the walls lit by that page

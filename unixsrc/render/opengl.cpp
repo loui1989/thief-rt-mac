@@ -28,6 +28,7 @@
 #include <cmath>
 #include <thread>
 #include <string>
+#include <unistd.h>
 #include <platform_services.h>
 #pragma pack(pop)
 
@@ -1394,8 +1395,32 @@ static void present_legacy_frame(const void *pixels, int width, int height,
       const char *path = getenv("DARK_RENDER_CAPTURE");
       const char *frameText = getenv("DARK_RENDER_CAPTURE_FRAME");
       int frame = frameText ? std::max(atoi(frameText), 1) : 1;
-      if (!g_captureComplete && path && *path && g_hardwareFrameCount >= static_cast<unsigned>(frame))
-         g_captureComplete = capture_frame(path);
+      // DARK_RENDER_CAPTURE_COUNT=n: n frames in a row from that one, each to
+      // the path with -1, -2 ... before its extension (catching a flicker)
+      const char *countText = getenv("DARK_RENDER_CAPTURE_COUNT");
+      const int count = countText ? std::max(atoi(countText), 1) : 1;
+      if (!g_captureComplete && path && *path && g_hardwareFrameCount >= static_cast<unsigned>(frame)) {
+         if (count <= 1)
+            g_captureComplete = capture_frame(path);
+         else {
+            static int taken = 0;
+            std::string one(path);
+            const size_t dot = one.rfind('.');
+            const std::string tag = "-" + std::to_string(++taken);
+            one.insert(dot == std::string::npos ? one.size() : dot, tag);
+            capture_frame(one.c_str());
+            if (taken >= count)
+               g_captureComplete = 1;
+         }
+         // DARK_RENDER_CAPTURE_QUIT=1: the game closes once its pictures are
+         // taken (a test script's runs one after another)
+         const char *quit = getenv("DARK_RENDER_CAPTURE_QUIT");
+         if (g_captureComplete && quit && atoi(quit) != 0) {
+            fprintf(stderr, "OpenGL: pictures taken; closing (DARK_RENDER_CAPTURE_QUIT)\n");
+            fflush(nullptr);
+            _exit(0);
+         }
+      }
    }
    g_presentPending = true;
 }

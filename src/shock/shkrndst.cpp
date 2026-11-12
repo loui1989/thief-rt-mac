@@ -52,7 +52,7 @@ eReactionResult ShockSourceRandomizeFilter(sStimEvent* event, void* data)
       float randMag;
       if (_g_pSourceRandomizeProperty->Get(pair.obj,&randMag))
       {
-         float add = (2.*randMag*(float(Rand()/float(RAND_MAX))))-randMag;
+         float add = (2.*randMag*(float(Rand()/float(DARK_RAND_MAX))))-randMag;
          event->intensity += add; 
          if (event->intensity<0)
             event->intensity = 0;

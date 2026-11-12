@@ -101,6 +101,8 @@
 #include <weapcb.h>
 #include <weapon.h>
 
+#include <rand.h>   // (DARK_RAND_MAX)
+
 // Must be last header
 #include <dbmem.h>
 
@@ -427,7 +429,7 @@ STDMETHODIMP_(void) cAIHtoHSubcombat::OnDamage(const sDamageMsg *pMsg, ObjID rea
 
    // add random
       float dmg=(float)ouch->amount, var;
-   var=((2.0f*Rand()-RAND_MAX)/(RAND_MAX+1.0f))*audio->el[2];
+   var=((2.0f*Rand()-DARK_RAND_MAX)/(DARK_RAND_MAX+1.0f))*audio->el[2];
    dmg+=var;
    _HTHWatchPrint4("AudioResponse raw %g use %g parms %g %g\n",(float)ouch->amount,dmg,audio->el[0],audio->el[1]);
    if (dmg>audio->el[0])
@@ -443,7 +445,7 @@ STDMETHODIMP_(void) cAIHtoHSubcombat::OnDamage(const sDamageMsg *pMsg, ObjID rea
       }
    }
          dmg=(float)ouch->amount;
-   var=((2.0f*Rand()-RAND_MAX)/(RAND_MAX+1.0f))*motion->el[2];
+   var=((2.0f*Rand()-DARK_RAND_MAX)/(DARK_RAND_MAX+1.0f))*motion->el[2];
    dmg+=var;
    _HTHWatchPrint4("MotionResponse raw %g use %g parms %g %g\n",(float)ouch->amount,dmg,motion->el[0],motion->el[1]);
    if (dmg>motion->el[0])

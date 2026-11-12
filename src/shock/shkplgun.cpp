@@ -1049,7 +1049,7 @@ void cPlayerGun::SetControls(void)
          }
          if (m_bob==m_bobTarget)
          {
-            m_bobTarget = (float(Rand())/float(RAND_MAX))*pAnimParams->m_bobAmplitude;
+            m_bobTarget = (float(Rand())/float(DARK_RAND_MAX))*pAnimParams->m_bobAmplitude;
             ConfigSpew("BobSpew", ("Setting bob target to %g\n", m_bobTarget));
          }
       }

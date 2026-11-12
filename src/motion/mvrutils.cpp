@@ -285,7 +285,7 @@ int MvrRandomIntInRange(int low, int high)
 {
    int r;
 
-   r = low + (1 + high - low) * Rand() / (RAND_MAX+1);
+   r = low + (1 + high - low) * Rand() / (DARK_RAND_MAX+1);
    if (r > high) r = high;
    return r;
 }

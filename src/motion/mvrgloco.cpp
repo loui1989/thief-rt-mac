@@ -264,7 +264,7 @@ cGroundLocoManeuver::cGroundLocoManeuver(IMotor *pMotor, cMotionCoordinator *pCo
       timeWarp*=tw;
    if(m_pGaitData->noise)
    {
-      float noise=(2*m_pGaitData->noise*Rand())/RAND_MAX;
+      float noise=(2*m_pGaitData->noise*Rand())/DARK_RAND_MAX;
       timeWarp=(1.0f-m_pGaitData->noise+noise)*timeWarp; // since 0<=noise<=2*m_pGaitData->noise;
    }
 

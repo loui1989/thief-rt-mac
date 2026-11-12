@@ -231,7 +231,7 @@ void cPlayerGunModel::SetControls(void)
             break;
          }
          if (m_bob==m_bobTarget)
-            m_bobTarget = (float(UnrecordedRand())/float(RAND_MAX))*bobAmplitude;
+            m_bobTarget = (float(UnrecordedRand())/float(DARK_RAND_MAX))*bobAmplitude;
       }
       break;
    case kPlayerGunStationary:

@@ -498,6 +498,8 @@ static void apply_quickstart_transform(void)
    facing.ty = quickstart_degrees_to_ang(pitch);
    facing.tz = quickstart_degrees_to_ang(heading);
    ObjPosUpdate(gPlayerObj, &location, &facing);
+   fprintf(stderr, "quickstart: player at (%.1f, %.1f, %.1f), facing %.0f,%.0f,%.0f\n",
+           location.x, location.y, location.z, pitch, heading, roll);
    applied = TRUE;
 }
 #endif

@@ -171,8 +171,15 @@ void AnimLightFlagCells(sAnimLight *light, ObjID obj )
    set_object_light(index, intensity);
 #endif
 
-   portal_anim_light_intensity[index]
-      = (uchar) (intensity * (255.0 / light->max_brightness));
+   // (a light brighter than its maximum -- 4% over in Reflections in Red --
+   // wrapped round to nearly dark: 265 stored as 9, the walls it lights
+   // flickering black as it passed its top)
+   {
+      const double level = light->max_brightness > 0
+         ? intensity * (255.0 / light->max_brightness) : 0.0;
+      portal_anim_light_intensity[index]
+         = (uchar) (level >= 255.0 ? 255 : level > 0.0 ? (int) level : 0);
+   }
 
    num_cells = light->num_cells_reached;
    light_to_cell = &g_aAnimLightToCell[light->first_light_to_cell];
@@ -323,7 +330,7 @@ BOOL AnimLightUpdateTimer(sAnimLight *light, long time_change)
             interval = light->time_rising_ms;
          else
             interval = light->time_falling_ms;
-         randfactor = (1.0f - FLICKER_FACTOR) + ((FLICKER_FACTOR * 2) * (float)Rand() / (float) RAND_MAX);
+         randfactor = (1.0f - FLICKER_FACTOR) + ((FLICKER_FACTOR * 2) * (float)Rand() / (float) DARK_RAND_MAX);
          interval = (int)(interval * randfactor);
          //mprintf("randfactor %f, interval %d\n",randfactor,interval);
          time += interval;
@@ -378,7 +385,7 @@ BOOL AnimLightUpdateTimer(sAnimLight *light, long time_change)
          if (changed_state) {
             range = light->max_brightness - light->min_brightness;
             brightness = light->min_brightness
-               + (float) Rand() * (1.0f / (float) RAND_MAX) * range;
+               + (float) Rand() * (1.0f / (float) DARK_RAND_MAX) * range;
          } else
             brightness = old_brightness;
          break;
@@ -399,7 +406,7 @@ BOOL AnimLightUpdateTimer(sAnimLight *light, long time_change)
          if (changed_state) {
             range = light->max_brightness - light->min_brightness;
 
-            change = (float) (Rand() - 16384) * (1.0f / (float) RAND_MAX)
+            change = (float) (Rand() - 16384) * (1.0f / (float) DARK_RAND_MAX)
                    * (range * RAND_VARIATION);
 
             brightness = old_brightness + change;

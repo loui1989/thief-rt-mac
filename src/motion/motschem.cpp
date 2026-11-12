@@ -34,7 +34,7 @@ BOOL cMotionSchema::GetRandomMotion(int *pMotID) const
    {
       int id=RandRange(0,size-1);
 #ifdef OLD_WAY
-      int id= (size*Rand())/(RAND_MAX+1);
+      int id= (size*Rand())/(DARK_RAND_MAX+1);
       if(id>=size)
          id=size-1;
 #endif
@@ -52,7 +52,7 @@ BOOL cMotionSchema::GetRandomMotionInRange(int min, int max, int *pMotID) const
       return FALSE;
    int id=RandRange(min,max);
 #ifdef OLD_WAY
-   int id= min + (((max-min+1)*Rand())/(RAND_MAX+1));
+   int id= min + (((max-min+1)*Rand())/(DARK_RAND_MAX+1));
 #endif
    Assert_(id<=max);
    *pMotID = m_MotRunHandleList[id];

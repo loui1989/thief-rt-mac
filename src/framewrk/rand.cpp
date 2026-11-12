@@ -168,5 +168,5 @@ int UnrecordedRand(void)
       fInited = TRUE;
    }
    OneMoreRand();
-   return rand();
+   return rand() & DARK_RAND_MAX;   // (15 bits, as Rand(): rand.h)
 }
