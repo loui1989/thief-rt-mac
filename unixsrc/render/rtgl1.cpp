@@ -134,8 +134,11 @@ struct Settings {
                               // 1 one bounce, 2 two bounces, 3 one bounce at half rate
    bool volumetric = false;   // haze lit by every light
    bool thinSeeThrough = true;   // see-through models' faces thinned for the rays (thin_see_through)
-   bool sunHalf = false;      // the mission's sun's (moon's) shadow rays every other frame, in tiles (cheaper:
-                              // 1-2 fps at Reflections in Red's pond, and it flickered -- off)
+   // the mission's sun's (moon's) shadow rays: 0 at every pixel; 1 a pixel of each 2x2
+   // block a frame, in a pass of their own, smoothed (RTGL1 0033, ThiefSunShadow); 2 every
+   // other frame in tiles (cheaper:
+                              // 1-2 fps at Reflections in Red's pond, and it flickered)
+   int sunShadows = 1;
    bool moonShafts = false;   // god rays: the haze lit by the moon alone (cheap), when volumetric is off
    float shafts = 1.0f;       // god rays' strength (the haze's light, times this)
    float moon = 0.0f;         // moonlight through the sky's openings, times its base (0 off: its
@@ -248,7 +251,7 @@ void load_settings()
       else if (k == "gi") g_cfg.gi = std::clamp(int(value), 0, 3);
       else if (k == "volumetric") g_cfg.volumetric = value != 0;
       else if (k == "moon_shafts") g_cfg.moonShafts = value != 0;
-      else if (k == "sun_shadow_half") g_cfg.sunHalf = value != 0;
+      else if (k == "sun_shadows") g_cfg.sunShadows = std::clamp(int(value), 0, 2);
       else if (k == "thin_see_through") g_cfg.thinSeeThrough = value != 0;
       else if (k == "god_ray_strength") g_cfg.shafts = std::clamp(value, 0.1f, 8.0f);
       else if (k == "moon") g_cfg.moon = std::clamp(value, 0.0f, 8.0f);
@@ -349,7 +352,7 @@ void save_settings()
    fprintf(f, "texture_detail = %d\n", g_cfg.texDetail);
    fprintf(f, "dark_adapt = %d\n", g_cfg.darkAdapt);
    fprintf(f, "sun = %.2f\n", g_cfg.sun);
-   fprintf(f, "sun_shadow_half = %d\n", int(g_cfg.sunHalf));
+   fprintf(f, "sun_shadows = %d\n", g_cfg.sunShadows);
    fprintf(f, "thin_see_through = %d\n", int(g_cfg.thinSeeThrough));
    fprintf(f, "underwater_brighter = %.1f\n", g_cfg.underwaterLift);
    fprintf(f, "frame_generation = %d\n", int(g_cfg.frameGen));
@@ -3489,6 +3492,27 @@ void set_trace_test(int test)
    fprintf(stderr, "RT: tracing layout test: %s%s\n", kTraceTestNames[test], fn ? "" : " (not in this library)");
 }
 
+// The half-size moon shadow pass (RTGL1 0033, rgThiefSunShadowPass): asked for
+// each frame it is wanted -- off when not (no sky light, another setting); false
+// if the library has no such pass (then the moon's shadow is traced as before)
+bool sun_shadow_pass(bool on)
+{
+   using Fn = void (*)(int);
+   static Fn fn = nullptr;
+   static bool looked = false;
+   static int was = -1;
+   if (!looked && g_lib) {
+      fn = reinterpret_cast<Fn>(dlsym(g_lib, "rgThiefSunShadowPass"));
+      looked = true;
+      fprintf(stderr, "RT: half-size moon shadow pass %s\n", fn ? "in the library" : "not in this library");
+   }
+   if (fn && int(on) != was) {
+      fn(on ? 1 : 0);
+      was = int(on);
+   }
+   return fn != nullptr && on;
+}
+
 RepeatPrimitivesFn repeat_primitives_fn()
 {
    static int s = -1;
@@ -4809,7 +4833,8 @@ std::string row_value(int row)
       snprintf(buf, sizeof(buf), "%d deg up", g_cfg.moonHeight);
       return buf;
    case kRowSunHalf:
-      return g_cfg.sunHalf ? "Every other frame (cheaper)" : "Every frame";
+      return g_cfg.sunShadows == 1 ? "Half size, smoothed (cheaper)"
+           : g_cfg.sunShadows == 2 ? "Every other frame (flickers)" : "Every pixel";
    case kRowSun:
       if (g_cfg.sun <= 0.0f) return "Off";
       if (!g_sun.on) {
@@ -5089,7 +5114,7 @@ void change_row(int row, int dir)
    case kRowSun: g_cfg.sun = g_cfg.sun <= 0.0f && dir > 0 ? 0.25f
                              : (g_cfg.sun <= 0.25f && dir < 0 ? 0.0f : step_mul(g_cfg.sun, dir, 0.25f, 4.0f));
       break;
-   case kRowSunHalf: g_cfg.sunHalf = !g_cfg.sunHalf; break;
+   case kRowSunHalf: g_cfg.sunShadows = (g_cfg.sunShadows + dir + 3) % 3; break;
    case kRowFog: g_cfg.fog = (g_cfg.fog + dir + 4) % 4; break;
    case kRowFogLit: g_cfg.fogLit = !g_cfg.fogLit; break;
    case kRowFogQuality: g_cfg.fogQuality = (g_cfg.fogQuality - 1 + dir + 3) % 3 + 1; break;
@@ -6162,16 +6187,18 @@ void draw_frame(bool sceneDrawn)
       --g_lightEventFrames;
    int renderW = 0, renderH = 0;
    render_size(renderW, renderH);
+   const bool sunPass = sun_shadow_pass(sky_light_on() && g_cfg.sunShadows == 1);
    auto illum = RgDrawFrameIlluminationParams{
       .sType = RG_STRUCTURE_TYPE_DRAW_FRAME_ILLUMINATION_PARAMS,
       .pNext = &volumetric,
       .maxBounceShadows = 2,
       .indirectBounces = (g_cfg.gi == 1 || g_cfg.gi == 3) ? 1u : 2u,
       .indirectLegacyBounceWeight = true,
-      // (unread by the shaders: over 1.5 asks RtRaygenDirect for the sky
-      // light's shadow rays every other frame, in 8x8 tiles -- the moon's
-      // 3.4 ms at Reflections in Red's pond)
-      .cellWorldSize = g_cfg.sunHalf && sky_light_on() ? 2.0f : 1.0f,
+      // (unread by RTGL1's own shaders: +2 asks RtRaygenDirect for the sky
+      // light's shadow rays every other frame, in 8x8 tiles; +4 to read them
+      // from the half-size pass -- the moon's 3.4 ms at Reflections in Red's pond)
+      // (+4: RtRaygenDirect reads the moon's shadow from the half-size pass)
+      .cellWorldSize = 1.0f + (sky_light_on() && g_cfg.sunShadows == 2 ? 2.0f : 0.0f) + (sunPass ? 4.0f : 0.0f),
       // How strongly the denoiser throws away what it has gathered where the
       // lighting changed. It notices a change for one frame only (after that
       // the place is dark and there is nothing to compare); at Blood RT's
