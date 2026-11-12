@@ -6768,7 +6768,7 @@ void inspect_view()
             if (g != g_lightGiven.end())
                out("    traced as a %s of %.0f lumens, %.2f m across%s%s%s\n", g->second.sphere ? "sphere" : "spot",
                    g->second.lumens, 2.0f * g->second.radius, g->second.fixture ? "; a lamp's (fixture)" : "",
-                   g->second.flame ? ", a flame's" : "", g->second.lampSpot ? ", its spot made a sphere" : "");
+                   g->second.flame ? ", a flame's" : "", g->second.lampSpot ? ", its spot made a sphere falling off as the game's" : "");
          }
          char anim[256];
          if (L.id < 0x10000u && ObjAnimLightDescribe(int(L.id), anim, sizeof(anim)))
@@ -9664,6 +9664,14 @@ void upload_light(const PendingLight &L)
       };
       ext = &spot;
    } else {
+      // A lamp hung over the street, its light pointing down: it falls off
+      // as the game's lights do -- 1/distance, from a metre out to four --
+      // not 1/distance squared (Thief's RTGL1: alpha 0xFE in its colour,
+      // patch 0034). Traced as a real light, a lamp 3.7 m up lit the wall
+      // beside its lantern and left the street under it dark, however
+      // bright it was made: the screen's exposure followed the wall.
+      if (lampSpot)
+         color = (color & 0x00ffffffu) | (0xfeu << 24);
       sphere = RgLightSphericalEXT{
          .sType = RG_STRUCTURE_TYPE_LIGHT_SPHERICAL_EXT,
          .pNext = nullptr,
