@@ -275,7 +275,10 @@ if(DARK_BUILD_ENGINE)
   # The RTGL1 path tracer (macOS, Metal): DARK_RTGL1_INCLUDE names the folder
   # that holds RTGL1/RTGL1.h. The library itself is loaded at run time.
   set(DARK_RTGL1_INCLUDE "" CACHE PATH "RTGL1 include folder (enables the ray tracer)")
-  if(APPLE AND DARK_RTGL1_INCLUDE AND EXISTS "${DARK_RTGL1_INCLUDE}/RTGL1/RTGL1.h")
+  # (DARK_RT_ANY_PLATFORM: the same build elsewhere -- Linux -- to test the
+  # macOS binary's OpenGL renderer, the ray tracer compiled in but not run)
+  option(DARK_RT_ANY_PLATFORM "Compile the ray tracer in off macOS (testing)" OFF)
+  if((APPLE OR DARK_RT_ANY_PLATFORM) AND DARK_RTGL1_INCLUDE AND EXISTS "${DARK_RTGL1_INCLUDE}/RTGL1/RTGL1.h")
     set(DARK_RT ON)
     target_compile_definitions(dark_engine_config INTERFACE DARK_RT=1)
     message(STATUS "Ray tracing renderer: RTGL1 (${DARK_RTGL1_INCLUDE})")
