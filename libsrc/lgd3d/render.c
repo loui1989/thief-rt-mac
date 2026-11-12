@@ -152,22 +152,55 @@ int lgd3d_is_zcompare_on(void)
     return zcompare;
 }
 
+// An object's own z bias (the Z-Bias property, Renderer > Z-Bias: decals
+// kept off the wall they lie on), on top of zbias while it is drawn
+static double zbias_pushed = 0.0;
+
+// The depth written, from zbias (and an object's own): a small bias -- the
+// objects' few bits of a 16-bit z-buffer, a decal's -- draws the object as
+// if a little nearer, by a fraction of its distance, not by a fixed step of
+// depth: a step of depth is next to nothing near the camera and tens of feet
+// far off (the depth's steps grow as the distance squared), so across a
+// courtyard every object drew in front of the walls behind it (Reflections
+// in Red: the trees behind the castle, through it). A big one (1.0: drawn in
+// front of everything) as before.
+static void update_z(void)
+{
+   const double base = z_far / (z_far - z_near);
+   const double b = zbias + zbias_pushed;
+   if (b >= 0.01 || b <= -0.01) {
+      z1 = base - b;
+      z2 = z_near * base;
+   } else {
+      // the objects' 4/65536 (rendobj.cpp g_obj_zbias): an eighth of a
+      // percent nearer -- a hair at arm's length, a foot at 800 feet
+      double f = b * 20.0;
+      if (f > 0.05) f = 0.05;
+      if (f < -0.05) f = -0.05;
+      z1 = base;
+      z2 = z_near * base / (1.0 - f);
+   }
+}
+
 double lgd3d_set_zbias(double new_bias)
 {
    double old_bias = zbias;
-   z1 += old_bias - new_bias;
    zbias = new_bias;
+   update_z();
    return old_bias;
 }
 
 void lgd3d_push_zbias_i(int nZBias)
 {
-    // TODO
+   // (D3D's z bias, 0 to 16: in the objects' units, a 16-bit z-buffer's)
+   zbias_pushed = nZBias * (1.0 / 65536.0);
+   update_z();
 }
 
 void lgd3d_pop_zbias(void)
 {
-    // TODO
+   zbias_pushed = 0.0;
+   update_z();
 }
 
 
@@ -176,8 +209,7 @@ void lgd3d_set_znearfar(double znear, double zfar)
    z_near = znear;
    z_far = zfar;
    inv_z_far = 1.0 / z_far;
-   z1 = (zfar / (zfar - znear)) - zbias;
-   z2 = znear * z1;
+   update_z();
 }
 
 static float x_offset = 0.0f;

@@ -551,6 +551,11 @@ void cam_render_scene(Position *pos, float zoom)
          gr_clear(254);
 
    lgd3d_z_normal = !g_zbuffer;
+   // (the OpenGL renderer's depth out to 4096 feet: render.cpp)
+   if (g_lgd3d && g_zbuffer && !RenderRTActive()) {
+      extern void RenderUseFarDepth(void);
+      RenderUseFarDepth();
+   }
 
    // before we render anything, determine our screen flash,
    // so we'll have a fighting chance of doing it right in software

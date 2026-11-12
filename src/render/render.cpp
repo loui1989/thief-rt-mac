@@ -74,6 +74,20 @@ void SetZNearFar(double z_near, double z_far)
    starfield_set_z((float)(z_far*0.95));
 }
 
+// The OpenGL renderer (not the path tracer, which keeps no depth of the
+// game's): the depth buffer's far end out to 4096 feet. At the original 256
+// (78 m) everything farther was at the very end of the depth, all of it
+// equally far: what was drawn last won, and the objects (biased a little
+// nearer) drew over every wall past it -- the trees behind Reflections in
+// Red's castle in front of it. (24-bit depth from 1 foot: a few hundredths
+// of a foot apart at 1000 feet.)
+EXTERN void RenderUseFarDepth(void)
+{
+   static const double kFar = 4096.0;
+   if (zfar < kFar)
+      SetZNearFar(znear, kFar);
+}
+
 r3s_texture texture_lookup(int n);
 static void init_color_tables(void);
 
