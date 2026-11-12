@@ -1220,6 +1220,9 @@ constexpr uint32_t kWindowLightIds = 0x01000000u;   // lit windows' lights (buil
 // lights a lamp's glowing glass (or a flame's bowl) was seen at: a lamp, so
 // it lights its surroundings as well as the cone the mapper gave it
 std::unordered_set<uint32_t> g_fixtureLights;
+// how each light was last given to the path tracer, for the inspector
+struct LightGiven { float lumens = 0, radius = 0; bool sphere = true, fixture = false, flame = false, lampSpot = false; };
+std::unordered_map<uint32_t, LightGiven> g_lightGiven;
 // A lamp model whose glass glows by a light inside it (lamp glow): that
 // light's place, by object -- its lantern lets the light out (the passes)
 std::unordered_map<uint32_t, std::array<float, 3>> g_lampLightAt;
@@ -2874,11 +2877,13 @@ void upload_objects()
                }
             }
          // A lamp too big for that (a street lamp, its post and all) whose
-         // glass glows by the light in its lantern: the lantern -- what is
-         // within 45 cm of the light -- lets it out, the post still casts its
-         // shadow. Black Parade's lamps: the light sat in the lantern's top,
-         // the plate under the glass shadowed the street below it, and only
-         // the walls round it were lit, through the panes.
+         // glass glows by the light in its lantern: the lamp's head -- what
+         // is within 80 cm of the light -- lets it out, the post still casts
+         // its shadow. Black Parade's lamps: the light sat in the roof of the
+         // lantern, above the metre-wide hood it hangs from and the plate
+         // under its glass; they shadowed the street below, and only the
+         // walls round it were lit, through the panes. (45 cm let the plate
+         // through, not the hood's brim.)
          if (!c.passLight) {
             const auto lamp = g_lampLightAt.find(obj);
             if (lamp != g_lampLightAt.end()) {
@@ -2888,7 +2893,7 @@ void upload_objects()
                if (in) {
                   c.passLight = true;
                   flameInside = true;
-                  flameReach = 0.45f;
+                  flameReach = 0.8f;
                   for (int k = 0; k < 3; ++k)
                      flameAt[k] = lamp->second[k];
                }
@@ -6758,6 +6763,13 @@ void inspect_view()
              "%s inner %.3f outer %.3f dir (%.2f %.2f %.2f)%s\n",
              L.id, p.data[0], p.data[1], p.data[2], dist, L.rgb[0], L.rgb[1], L.rgb[2], L.radius,
              L.inner >= 0 ? "spot" : "point", L.inner, L.outer, L.dir[0], L.dir[1], L.dir[2], fixed);
+         {
+            const auto g = g_lightGiven.find(L.id);
+            if (g != g_lightGiven.end())
+               out("    traced as a %s of %.0f lumens, %.2f m across%s%s%s\n", g->second.sphere ? "sphere" : "spot",
+                   g->second.lumens, 2.0f * g->second.radius, g->second.fixture ? "; a lamp's (fixture)" : "",
+                   g->second.flame ? ", a flame's" : "", g->second.lampSpot ? ", its spot made a sphere" : "");
+         }
          char anim[256];
          if (L.id < 0x10000u && ObjAnimLightDescribe(int(L.id), anim, sizeof(anim)))
             out("    %s\n", anim);
@@ -9661,6 +9673,15 @@ void upload_light(const PendingLight &L)
          .radius = radius,
       };
       ext = &sphere;
+   }
+   {
+      LightGiven &g = g_lightGiven[L.id];
+      g.lumens = lumens;
+      g.radius = radius;
+      g.sphere = ext == &sphere;
+      g.fixture = fixture;
+      g.flame = g_flameLights.count(L.id) != 0;
+      g.lampSpot = lampSpot;
    }
    auto info = RgLightInfo{
       .sType = RG_STRUCTURE_TYPE_LIGHT_INFO,
