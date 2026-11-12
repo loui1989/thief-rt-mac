@@ -30,6 +30,7 @@
 #include <simman.h>
 #include <dspchdef.h>
 #include <simdef.h>
+#include <simtime.h>
 #include <playrobj.h>
 
 #include <objedit.h>
@@ -39,6 +40,7 @@
 
 #include <traitman.h>
 #include <stdio.h>
+#include <stdlib.h>
 
 // include these last
 #include <initguid.h>
@@ -130,14 +132,60 @@ static BOOL combine_loot(ObjID targ, ObjID src)
 // stolen, the objective still open), so the engine checks them too, on
 // every piece of loot the player takes and as the game resumes. (Only
 // ever completing one -- never undoing what the script has set.)
+// What the player carried as the mission began (a purse the mission gives
+// to spend: Reflections in Red's 2000 to 3500 gold), kept in the mission's
+// quest data so a saved game keeps it: the loot objectives count what was
+// taken since, not that -- its loot objective, 1500 to 3250, came up done
+// as the mission began. Begun as the simulation starts (with what the
+// player holds then), and added to by what reaches the player before its
+// clock first moves (the purse, given at sim time 0).
+static const char *const kLootBaseVars[5] = {"drkloot_base_total", "drkloot_base_gold", "drkloot_base_gems",
+                                             "drkloot_base_goods", "drkloot_base_special"};
+
+static void add_loot_base(const sLootProp *loot)
+{
+   AutoAppIPtr(QuestData);
+   int total = 0;
+   for (int i = 0; i < kLootSpecial; i++)
+      total += loot->count[i];
+   const int add[5] = {total, loot->count[kLootGold], loot->count[kLootGems], loot->count[kLootArt], 0};
+   for (int k = 0; k < 5; k++)
+   {
+      if (!pQuestData->Exists(kLootBaseVars[k]))
+         pQuestData->Create(kLootBaseVars[k], 0, kQuestDataMission);
+      if (k < 4)
+         pQuestData->Set(kLootBaseVars[k], pQuestData->Get(kLootBaseVars[k]) + add[k]);
+      else
+         pQuestData->Set(kLootBaseVars[k], pQuestData->Get(kLootBaseVars[k]) | loot->count[kLootSpecial]);
+   }
+   fprintf(stderr, "Loot: %d carried as the mission begins (not counted for its loot objectives)\n", total);
+}
+
 static void check_loot_goals(const sLootProp *loot)
 {
    if (!loot)
       return;
    AutoAppIPtr(QuestData);
+   if (!pQuestData->Exists(kLootBaseVars[0]))
+      return;   // (before the mission's start is known: nothing taken yet)
    int total = 0;
    for (int i = 0; i < kLootSpecial; i++)
       total += loot->count[i];
+   sLootProp taken = *loot;
+   total -= pQuestData->Get(kLootBaseVars[0]);
+   if (total < 0)
+      total = 0;
+   {
+      const int idx[3] = {kLootGold, kLootGems, kLootArt};
+      for (int k = 0; k < 3; k++)
+      {
+         taken.count[idx[k]] -= pQuestData->Get(kLootBaseVars[k + 1]);
+         if (taken.count[idx[k]] < 0)
+            taken.count[idx[k]] = 0;
+      }
+      taken.count[kLootSpecial] &= ~pQuestData->Get(kLootBaseVars[4]);
+   }
+   loot = &taken;
    for (int n = 0; n < 32; n++)
    {
       char name[64];
@@ -191,7 +239,7 @@ static void check_loot_goals(const sLootProp *loot)
          met = FALSE;
       if (!met || !asks)
          continue;
-      fprintf(stderr, "Loot: objective %d met (loot %d: gold %d, gems %d, goods %d) -- completed\n", n, total,
+      fprintf(stderr, "Loot: objective %d met (loot taken %d: gold %d, gems %d, goods %d) -- completed\n", n, total,
               loot->count[kLootGold], loot->count[kLootGems], loot->count[kLootArt]);
       sprintf(name, "goal_state_%d", n);
       pQuestData->Set(name, 1);
@@ -201,6 +249,7 @@ static void check_loot_goals(const sLootProp *loot)
 // the player's own loot (the one item it all combines into: the most of it)
 static void check_player_loot_goals(void)
 {
+   AutoAppIPtr(QuestData);
    if (!PlayerObjectExists())
       return;
    sLootProp best;
@@ -224,6 +273,16 @@ static void check_player_loot_goals(void)
       }
    }
    pContainSys->IterEnd(iter);
+   if (!pQuestData->Exists(kLootBaseVars[0]))
+   {
+      // the mission's start: what the player carries now is not taken
+      const int base[5] = {bestTotal > 0 ? bestTotal : 0, best.count[kLootGold], best.count[kLootGems],
+                           best.count[kLootArt], best.count[kLootSpecial]};
+      for (int k = 0; k < 5; k++)
+         pQuestData->Create(kLootBaseVars[k], base[k], kQuestDataMission);
+      fprintf(stderr, "Loot: the mission begins with %d loot carried (not counted for its objectives)\n", base[0]);
+      return;
+   }
    if (bestTotal >= 0)
       check_loot_goals(&best);
 }
@@ -235,7 +294,8 @@ static BOOL loot_combine_CB(eContainsEvent event, ObjID targ, ObjID src, eContai
       combine_loot(targ,src);
       sLootProp* prop;
       AutoAppIPtr(ContainSys);
-      if (PlayerObjectExists() && pContainSys->Contains(PlayerObject(), targ) && gpLootProp->Get(targ, &prop))
+      if (PlayerObjectExists() && pContainSys->Contains(PlayerObject(), targ) && gpLootProp->Get(targ, &prop) &&
+          GetSimTime() > 0)
          check_loot_goals(prop);
    }
    else if (event == kContainAdd)
@@ -247,7 +307,10 @@ static BOOL loot_combine_CB(eContainsEvent event, ObjID targ, ObjID src, eContai
          if (IsPlayerObj(targ))
          {
             InvUIRefreshObj(src);
-            check_loot_goals(prop);
+            if (GetSimTime() == 0)
+               add_loot_base(prop);   // (given as the mission begins)
+            else
+               check_loot_goals(prop);
          }
       }
    }
@@ -294,6 +357,23 @@ static void sim_cb(const sDispatchMsg* msg, const sDispatchListenerDesc* desc)
          {
             AutoAppIPtr(QuestData);
             pQuestData->Set(MONEY_QVAR,0);
+            // the loot objectives' count begins (what the player holds now
+            // was not taken in this mission)
+            for (int k = 0; k < 5; k++)
+               if (!pQuestData->Exists(kLootBaseVars[k]))
+                  pQuestData->Create(kLootBaseVars[k], 0, kQuestDataMission);
+            if (PlayerObjectExists())
+            {
+               AutoAppIPtr(ContainSys);
+               sContainIter *iter = pContainSys->IterStart(PlayerObject());
+               for (; !iter->finished; pContainSys->IterNext(iter))
+               {
+                  sLootProp *prop;
+                  if (gpLootProp->Get(iter->containee, &prop))
+                     add_loot_base(prop);
+               }
+               pContainSys->IterEnd(iter);
+            }
          }
          break;
 
