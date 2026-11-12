@@ -9545,9 +9545,7 @@ float light_gain(const PendingLight &L)
       g *= g_cfg.smallLamps * std::sqrt(std::clamp(lamp_reach(L), 25.0f, 72.0f) / 25.0f);
    if (flame)
       g *= 0.6f;
-   const float dl = std::sqrt(L.dir[0] * L.dir[0] + L.dir[1] * L.dir[1] + L.dir[2] * L.dir[2]);
-   if (fixture && L.inner >= 0.0f && !flame && dl > 0.0f && L.dir[2] / dl < -0.7f && L.outer < 0.8f)
-      g *= 0.6f;
+   // (a hanging lamp's wide spot is no longer made a dimmer sphere: upload_light)
    return g;
 }
 
@@ -9630,7 +9628,12 @@ void upload_light(const PendingLight &L)
    // spotlight aimed at a painting, Black Parade's opera -- stays a beam;
    // made a sphere, it lit the whole room)
    const float dl = std::sqrt(dir[0] * dir[0] + dir[1] * dir[1] + dir[2] * dir[2]);
-   const bool lampSpot = fixture && L.inner >= 0.0f && !g_flameLights.count(L.id) &&
+   // (Off again: made one light all round, a sphere 1.7 m across, Black
+   // Parade's street lamps -- wide spots, 45 degrees -- lit the walls by
+   // their lanterns and hardly the street under them, where the same lamps
+   // in The Assassins, narrower spots and so left spots, lit a clear pool
+   // on the cobbles. A spot it stays, at its full strength, as there.)
+   const bool lampSpot = false && fixture && L.inner >= 0.0f && !g_flameLights.count(L.id) &&
                          dl > 0.0f && dir[2] / dl < -0.7f && L.outer < 0.8f;
    if (lampSpot)
       lumens *= 0.6f;
