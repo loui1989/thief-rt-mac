@@ -1220,6 +1220,9 @@ constexpr uint32_t kWindowLightIds = 0x01000000u;   // lit windows' lights (buil
 // lights a lamp's glowing glass (or a flame's bowl) was seen at: a lamp, so
 // it lights its surroundings as well as the cone the mapper gave it
 std::unordered_set<uint32_t> g_fixtureLights;
+// A lamp model whose glass glows by a light inside it (lamp glow): that
+// light's place, by object -- its lantern lets the light out (the passes)
+std::unordered_map<uint32_t, std::array<float, 3>> g_lampLightAt;
 // of those, a flame's (a torch's, a brazier's): warm, and flickering
 std::unordered_set<uint32_t> g_flameLights;
 // lights moved out of walls (see fix_light_position)
@@ -1738,6 +1741,7 @@ struct CachedObject {
    // light out, the rest cast shadows (split: the near ones first)
    bool flameInside = false;
    float flameAt[3] = {};
+   float flameReach = 0.12f;   // what lets the light out: within this of it (m)
    // a flat thing flush on a wall (a plaque, a poster): moved off it a little
    // (wall_offset), found again only when it moves
    bool wallChecked = false;
@@ -2836,6 +2840,7 @@ void upload_objects()
       c.passLight = false;
       bool flameInside = false;
       float flameAt[3] = {};
+      float flameReach = 0.12f;
       if (g_cfg.fixturesPass) {
          const float ext = std::max({c.bmax[0] - c.bmin[0], c.bmax[1] - c.bmin[1], c.bmax[2] - c.bmin[2]});
          // A big lamp with its own light inside it -- a chandelier, 2 m from
@@ -2868,13 +2873,35 @@ void upload_objects()
                   break;
                }
             }
+         // A lamp too big for that (a street lamp, its post and all) whose
+         // glass glows by the light in its lantern: the lantern -- what is
+         // within 45 cm of the light -- lets it out, the post still casts its
+         // shadow. Black Parade's lamps: the light sat in the lantern's top,
+         // the plate under the glass shadowed the street below it, and only
+         // the walls round it were lit, through the panes.
+         if (!c.passLight) {
+            const auto lamp = g_lampLightAt.find(obj);
+            if (lamp != g_lampLightAt.end()) {
+               bool in = true;
+               for (int k = 0; k < 3 && in; ++k)
+                  in = lamp->second[k] > c.bmin[k] - 0.15f && lamp->second[k] < c.bmax[k] + 0.15f;
+               if (in) {
+                  c.passLight = true;
+                  flameInside = true;
+                  flameReach = 0.45f;
+                  for (int k = 0; k < 3; ++k)
+                     flameAt[k] = lamp->second[k];
+               }
+            }
+         }
       }
-      if (flameInside != c.flameInside ||
+      if (flameInside != c.flameInside || flameReach != c.flameReach ||
           (flameInside && (std::fabs(flameAt[0] - c.flameAt[0]) > 0.02f ||
                            std::fabs(flameAt[1] - c.flameAt[1]) > 0.02f ||
                            std::fabs(flameAt[2] - c.flameAt[2]) > 0.02f)))
          c.splitValid = false;
       c.flameInside = flameInside;
+      c.flameReach = flameReach;
       for (int k = 0; k < 3; ++k)
          c.flameAt[k] = flameAt[k];
       size_t tris = 0;
@@ -3037,7 +3064,7 @@ void upload_objects()
                   for (int k = 0; k < 3 && !close; ++k) {
                      const float *v = p.verts[t + k].position;
                      const float dx = v[0] - c.flameAt[0], dy = v[1] - c.flameAt[1], dz = v[2] - c.flameAt[2];
-                     close = dx * dx + dy * dy + dz * dz < 0.12f * 0.12f;
+                     close = dx * dx + dy * dy + dz * dz < c.flameReach * c.flameReach;
                   }
                   CapturedPrim &to = (close || p.sprite) ? n : f;
                   to.verts.insert(to.verts.end(), p.verts.begin() + t, p.verts.begin() + t + 3);
@@ -8210,6 +8237,8 @@ void RenderRTDrawWorld(int primitive, const sRenderBackendVertex *v, const float
                // the glass lets its light out: a street lamp's light sits
                // inside its lantern, and the panes kept the street dark
                prim.flags |= RG_MESH_PRIMITIVE_NO_SHADOW;
+               if (g_currentObject)
+                  g_lampLightAt[g_currentObject] = {l.data[0], l.data[1], l.data[2]};
                // (g_lightPositions is in the order of g_pendingLights)
                if (li < g_pendingLights.size())
                   g_fixtureLights.insert(g_pendingLights[li].id);
