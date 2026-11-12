@@ -9526,13 +9526,6 @@ float flame_noise(double t, uint32_t seed)
    return at(int64_t(f)) * (1.0f - w) + at(int64_t(f) + 1) * w;
 }
 
-// A lamp's reach for its boost (upload_light): its radius, a small lamp's
-// 25 feet when it has none
-static float lamp_reach(const PendingLight &L)
-{
-   return L.radius > 0.0f ? L.radius : 25.0f;
-}
-
 // How much more light the path tracer gives a light than one of the
 // level's strength (as upload_light reckons it: the lamps', the flames'),
 // for the light gem
@@ -9541,8 +9534,8 @@ float light_gain(const PendingLight &L)
    const bool fixture = g_fixtureLights.count(L.id) != 0;
    const bool flame = g_flameLights.count(L.id) != 0;
    float g = g_cfg.light * (fixture ? g_cfg.fixtureLight : 1.0f);
-   if (fixture && !flame)
-      g *= g_cfg.smallLamps * std::sqrt(std::clamp(lamp_reach(L), 25.0f, 72.0f) / 25.0f);
+   if (fixture && !flame && L.radius > 0.0f)
+      g *= g_cfg.smallLamps * std::sqrt(std::clamp(L.radius, 25.0f, 72.0f) / 25.0f);
    if (flame)
       g *= 0.6f;
    // (a hanging lamp's wide spot is no longer made a dimmer sphere: upload_light)
@@ -9573,12 +9566,12 @@ void upload_light(const PendingLight &L)
    // falling as 1/distance squared and given no more than a wall lamp of
    // its brightness, lit the ceiling round it and not much further. (As the
    // square root of its reach over 25 feet, to 72: 1.4x at 48 feet.)
-   // (A lamp the mapper gave no reach -- radius 0, Dark's "as far as it goes"
-   // -- as a small one: it had none of this, a third of a wall lamp of its
-   // brightness, and Black Parade's street lamps lit hardly a patch under
-   // them. Not more: a reach of 0 is also every light left at the default.)
-   if (fixture && !g_flameLights.count(L.id))
-      lumens *= g_cfg.smallLamps * std::sqrt(std::clamp(lamp_reach(L), 25.0f, 72.0f) / 25.0f);
+   // (Not one the mapper gave no reach, radius 0: tried as a small lamp, it
+   // doubled every such wall lamp and lit the dark far from any -- and the
+   // street lamps it was for were dark for another reason, their wide spots
+   // made spheres: lampSpot below.)
+   if (fixture && !g_flameLights.count(L.id) && L.radius > 0.0f)
+      lumens *= g_cfg.smallLamps * std::sqrt(std::clamp(L.radius, 25.0f, 72.0f) / 25.0f);
    uint32_t color = pack_color(L.rgb[0] / peak, L.rgb[1] / peak, L.rgb[2] / peak, 1);
    float flamePos[3] = {L.pos[0], L.pos[1], L.pos[2]};
    if (g_flameLights.count(L.id)) {
