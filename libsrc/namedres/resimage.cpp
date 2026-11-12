@@ -237,7 +237,7 @@ static void NoteImageInfo(const grs_bitmap* bm, IStore* pStore, const char* name
 	// Without it HDMOD's 512-pixel frames were laid at 512 against the first
 	// frame's 128 -- every other frame of Black Parade's instrument dials
 	// magnified four times over, a flicker between the dials and plain metal.
-	if (!info->hasMaterial && dot)
+	if (!info->hasMaterial)
 	{
 		char* us = strrchr(mtl, '_');
 		const char* d = us ? us + 1 : nullptr;
