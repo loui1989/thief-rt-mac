@@ -302,6 +302,18 @@ extern "C" void ResImageCopyAttachments(const void* from, const void* to, int w,
 	}
 }
 
+// A bitmap the engine makes itself (a light map page: portal/porthw.c) at
+// an address a freed image's bitmap may have had: whatever was noted for
+// that address is not its picture. Nonzero if something was (only forgotten,
+// not freed: what it pointed at went with the old bitmap).
+extern "C" int ResTrueColorDrop(const void* bitmap)
+{
+	const int had = ResTrueColorFind(bitmap) != nullptr;
+	ResTrueColorForget(bitmap);
+	ResImageInfoForget(bitmap);
+	return had;
+}
+
 extern "C" void ResImageFreeCopyAttachments(const void* bitmap)
 {
 	const unsigned char* rgba = ResTrueColorFind(bitmap);

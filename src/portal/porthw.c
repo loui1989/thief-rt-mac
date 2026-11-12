@@ -1,3 +1,4 @@
+#include <stdio.h>
 /*
 @Copyright Looking Glass Studios, Inc.
 1996,1997,1998,1999,2000 Unpublished Work.
@@ -174,6 +175,17 @@ static porthw_texture *init_texture(int texture_index)
    porthw_texture *texture = &texture_list[texture_index];
    texture->bm = gr_alloc_bitmap(LM_BITMAP_TYPE, LM_FLAGS, TEX_SIZE, TEX_SIZE);
    texture->bits = texture->bm->bits;
+   {
+      // (a light map page made where a freed image's bitmap was kept the
+      // image's full colour picture with it, and the walls lit by that page
+      // showed the picture's light -- glaring, or black, changing as the
+      // pages were reused: the OpenGL renderer's flickering shadows)
+      extern int ResTrueColorDrop(const void *bitmap);
+      static int told = 0;
+      if (ResTrueColorDrop(texture->bm) && told++ < 10)
+         fprintf(stderr, "porthw: light map page %d made where an image was: its picture dropped\n",
+                 texture_index);
+   }
 #if defined(RGB_LIGHTING) && !defined(RGB_888)
    if (g_lgd3d)
    {
@@ -328,7 +340,9 @@ static void porthw_alloc_lightmap(PortalLightMap *lt, short *ptr)
    w = lt->w;
    h = lt->h;
    if ((w > LM_MAX_SIZE) || (h > LM_MAX_SIZE)) {
-      Warning(("Lightmap size out of range: w=%i h=%i\n",w,h));
+      static int told = 0;
+      if (told++ < 20)
+         fprintf(stderr, "porthw: light map %dx%d over %d: not cached\n", w, h, LM_MAX_SIZE);
       return;
    }
    if (h<32)

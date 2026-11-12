@@ -8242,7 +8242,7 @@ void RenderRTDrawWorld(int primitive, const sRenderBackendVertex *v, const float
    };
    // A flat cut-out or see-through face of an object (a poster, a notice, a
    // stain) stood a hair off its plane, toward the side it is seen from, by
-   // an amount of its own (0.4 to 6.4 mm, by the object): posters pasted
+   // an amount of its own (0.15 to 9.6 mm, by the object): posters pasted
    // over one another on a wall lie in one plane, and the game draws the
    // last of them over the rest, where the rays met both at once and showed
    // a speckled mix of the two, as if see-through (The Black Parade's
@@ -8271,7 +8271,7 @@ void RenderRTDrawWorld(int primitive, const sRenderBackendVertex *v, const float
          const RgFloat3D cam = to_rt(g_camera.pos);
          const float side = (cam.data[0] - a[0]) * n[0] + (cam.data[1] - a[1]) * n[1] + (cam.data[2] - a[2]) * n[2];
          const uint32_t hsh = g_currentObject * 2654435761u;
-         const float off = (side >= 0.0f ? 1.0f : -1.0f) * 0.0004f * float(1 + (hsh >> 28));
+         const float off = (side >= 0.0f ? 1.0f : -1.0f) * 0.00015f * float(1 + (hsh >> 26));
          for (RgPrimitiveVertex &v : prim.verts)
             for (int k = 0; k < 3; ++k)
                v.position[k] += n[k] * off;
@@ -8731,6 +8731,84 @@ void thin_see_through(std::vector<CapturedPrim> &cap)
 }
 }   // namespace
 
+// A poster's board (The Black Parade's "repsign": a picture with torn,
+// see-through edges on the front of a thin box): the box's faces parallel
+// to the picture and just behind it, as the camera sees them -- its back,
+// against the wall -- are not seen (the game culls them, facing away), so
+// they only cast shadows. Seen, they were a grey frame round the picture
+// wherever its edges are clear.
+void poster_backs(std::vector<CapturedPrim> &prims)
+{
+   struct Plane { float n[3], d; };
+   std::vector<Plane> planes;
+   const RgFloat3D cam = to_rt(g_camera.pos);
+   for (const CapturedPrim &p : prims) {
+      if (p.sprite || p.verts.size() < 3 || (p.flags & RG_MESH_PRIMITIVE_SHADOW_ONLY) ||
+          !(p.flags & (RG_MESH_PRIMITIVE_ALPHA_TESTED | RG_MESH_PRIMITIVE_TRANSLUCENT)))
+         continue;
+      const float *a = p.verts[0].position, *b = p.verts[1].position, *c = p.verts[2].position;
+      float n[3] = {(b[1] - a[1]) * (c[2] - a[2]) - (b[2] - a[2]) * (c[1] - a[1]),
+                    (b[2] - a[2]) * (c[0] - a[0]) - (b[0] - a[0]) * (c[2] - a[2]),
+                    (b[0] - a[0]) * (c[1] - a[1]) - (b[1] - a[1]) * (c[0] - a[0])};
+      const float l = std::sqrt(n[0] * n[0] + n[1] * n[1] + n[2] * n[2]);
+      if (l < 1e-8f)
+         continue;
+      for (float &x : n)
+         x /= l;
+      // facing the camera
+      if ((cam.data[0] - a[0]) * n[0] + (cam.data[1] - a[1]) * n[1] + (cam.data[2] - a[2]) * n[2] < 0.0f)
+         for (float &x : n)
+            x = -x;
+      planes.push_back({{n[0], n[1], n[2]}, n[0] * a[0] + n[1] * a[1] + n[2] * a[2]});
+   }
+   if (planes.empty())
+      return;
+   std::vector<CapturedPrim> backs;
+   for (CapturedPrim &q : prims) {
+      if (q.sprite || (q.flags & (RG_MESH_PRIMITIVE_SHADOW_ONLY | RG_MESH_PRIMITIVE_ALPHA_TESTED |
+                                  RG_MESH_PRIMITIVE_TRANSLUCENT)))
+         continue;
+      std::vector<RgPrimitiveVertex> keep;
+      CapturedPrim back;
+      for (size_t t = 0; t + 2 < q.verts.size(); t += 3) {
+         const float *a = q.verts[t].position, *b = q.verts[t + 1].position, *c = q.verts[t + 2].position;
+         float n[3] = {(b[1] - a[1]) * (c[2] - a[2]) - (b[2] - a[2]) * (c[1] - a[1]),
+                       (b[2] - a[2]) * (c[0] - a[0]) - (b[0] - a[0]) * (c[2] - a[2]),
+                       (b[0] - a[0]) * (c[1] - a[1]) - (b[1] - a[1]) * (c[0] - a[0])};
+         const float l = std::sqrt(n[0] * n[0] + n[1] * n[1] + n[2] * n[2]);
+         bool behind = false;
+         if (l > 1e-8f)
+            for (const Plane &pl : planes) {
+               if (std::fabs((n[0] * pl.n[0] + n[1] * pl.n[1] + n[2] * pl.n[2]) / l) < 0.98f)
+                  continue;
+               bool all = true;
+               for (int k = 0; k < 3 && all; ++k) {
+                  const float *v = q.verts[t + k].position;
+                  const float s = v[0] * pl.n[0] + v[1] * pl.n[1] + v[2] * pl.n[2] - pl.d;
+                  all = s < -0.0001f && s > -0.05f;
+               }
+               if (all) {
+                  behind = true;
+                  break;
+               }
+            }
+         auto &to = behind ? back.verts : keep;
+         to.insert(to.end(), q.verts.begin() + t, q.verts.begin() + t + 3);
+      }
+      if (back.verts.empty())
+         continue;
+      CapturedPrim s = q;
+      s.verts = std::move(back.verts);
+      s.flags = RG_MESH_PRIMITIVE_SHADOW_ONLY;
+      backs.push_back(std::move(s));
+      q.verts = std::move(keep);
+   }
+   for (CapturedPrim &s : backs)
+      prims.push_back(std::move(s));
+   prims.erase(std::remove_if(prims.begin(), prims.end(), [](const CapturedPrim &p) { return p.verts.empty(); }),
+               prims.end());
+}
+
 void RenderRTObjectEnd(void)
 {
    CaptureTimer timer;
@@ -8758,6 +8836,7 @@ void RenderRTObjectEnd(void)
       g_currentCapture.clear();
       return;
    }
+   poster_backs(g_currentCapture);
    // Nothing of the model reached the capture this time (a piece of a model
    // split across cells that its cell clipped away, a draw that bailed
    // out): that says nothing about the model, so what is known of it stays.
