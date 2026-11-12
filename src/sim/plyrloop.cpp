@@ -505,6 +505,24 @@ static void apply_quickstart_transform(void)
 #endif
 
 
+// Where the player's camera is, for the log (the OpenGL test captures): in
+// feet, as quickstart_pos takes it, and degrees, as quickstart_angles does
+extern "C" void PlayerDescribeCamera(char *buf, int size)
+{
+   Camera *cam = PlayerCamera();
+   mxs_vector pos;
+   mxs_angvec ang;
+   if (!buf || size <= 0)
+      return;
+   buf[0] = 0;
+   if (!cam)
+      return;
+   CameraGetLocation(cam, &pos, &ang);
+   snprintf(buf, size, "camera at %.1f,%.1f,%.1f facing %.0f,%.0f,%.0f",
+            pos.x, pos.y, pos.z, ang.ty * (360.0f / 65536.0f),
+            ang.tz * (360.0f / 65536.0f), ang.tx * (360.0f / 65536.0f));
+}
+
 ////////////////////////////////////////////////////////////
 // SIM LISTENER
 //

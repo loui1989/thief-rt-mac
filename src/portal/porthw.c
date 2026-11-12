@@ -40,7 +40,11 @@ struct porthw_elem {
    int next_elem;
    char u0, v0;         // offset within texture
    uchar flags;         // are we dynamic?
-   uchar texture_index;
+   // its page: 16 bits. A byte held the original's 256 pages; a big view
+   // (Reflections in Red's castle grounds) needs more, and the 257th page's
+   // light maps were drawn from the 1st's -- other walls' light, or none
+   // yet written: patches of wrong light, flickering as pages were reused
+   ushort texture_index;
 };
 
 struct porthw_strip {
@@ -239,10 +243,14 @@ static int get_free_texture(void)
    {
       max_textures += max_textures>>2;
       Warning(("get_free_texture(): growing texture_list to %i entries...\n", max_textures));
-#ifndef SHIP
-      if (max_textures > 256)
-         Warning(("porthw: get_free_texture(): Scene has more textures than we can use!\n"));
-#endif
+      {
+         static int reported = 0;
+         if (max_textures > 256 && !reported) {
+            reported = 1;
+            fprintf(stderr, "porthw: over 256 light map pages in use at once (%d): more than the original could address\n",
+                    max_textures);
+         }
+      }
       texture_list = (porthw_texture *)Realloc(texture_list, max_textures * sizeof(porthw_texture));
       retval = num_textures++;
       texture = init_texture(retval);

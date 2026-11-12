@@ -136,6 +136,26 @@ static int hw_hlog(grs_bitmap *bm)
    return hw_tex_log2(bm->h);
 }
 
+// The same at mip level `level` (bm: that level's bitmap, the level-0 one
+// `level` before it). A smaller level has no .mtl noted for it, and was laid
+// at its own size: an HD replacement's (512 for a terrain_scale of 128)
+// halves still four times its original's, magnified that much whenever the
+// distance picked one -- until the next level down.
+static int hw_wlog_at(grs_bitmap *bm, int level)
+{
+   int tw, th;
+   if (level > 0 && bm->type != BMT_FLAT8 && ResImageTerrainScale(bm - level, &tw, &th))
+      return hw_tex_log2(tw) - level;
+   return hw_wlog(bm);
+}
+static int hw_hlog_at(grs_bitmap *bm, int level)
+{
+   int tw, th;
+   if (level > 0 && bm->type != BMT_FLAT8 && ResImageTerrainScale(bm - level, &tw, &th))
+      return hw_tex_log2(th) - level;
+   return hw_hlog(bm);
+}
+
 extern BOOL g_zbuffer;
 extern int max_draw_polys;
 extern bool show_lightmap;
@@ -717,6 +737,7 @@ void draw_surface_lgd3d(PortalPolygonCore *poly, PortalPolygonRenderInfo *render
    }
 
    if (portal_clip_num) { // only true if it's the sky
+      hw.mip_level = 0;   // (its texture's level 0: hw_wlog_at)
       n = portbg_clip_sky(n, final, &final);
    } else {
       desired_mip = compute_mip(render, &cur_cell->plane_list[poly->planeid]);
@@ -808,8 +829,8 @@ void draw_surface_lgd3d(PortalPolygonCore *poly, PortalPolygonRenderInfo *render
          info.v0 = two_to_n(-hw.tex->hlog - 1);
       } else {
          int mip_log = 6 - hw.mip_level;
-         info.scale_u = two_to_n(mip_log - hw_wlog(hw.tex));
-         info.scale_v = two_to_n(mip_log - hw_hlog(hw.tex));
+         info.scale_u = two_to_n(mip_log - hw_wlog_at(hw.tex, hw.mip_level));
+         info.scale_v = two_to_n(mip_log - hw_hlog_at(hw.tex, hw.mip_level));
          info.u0 = info.v0 = 0.0;
       }
       info.scale_u /= portal_worldrep_texture_scale;
@@ -819,8 +840,8 @@ void draw_surface_lgd3d(PortalPolygonCore *poly, PortalPolygonRenderInfo *render
 
    if (hw.lm != NULL) {
       int pix_per_lm = 4 - hw.mip_level;
-      int log_scale_u = hw_wlog(hw.tex) - pix_per_lm;
-      int log_scale_v = hw_hlog(hw.tex) - pix_per_lm;
+      int log_scale_u = hw_wlog_at(hw.tex, hw.mip_level) - pix_per_lm;
+      int log_scale_v = hw_hlog_at(hw.tex, hw.mip_level) - pix_per_lm;
 // This is necessary because wlog is actually log2(row), _not_ log2(w)
 // Shoot me now; it's my own fault. -kevin
 #ifdef RGB_LIGHTING
@@ -1070,6 +1091,7 @@ void draw_surface_multitexture(PortalPolygonCore *poly, PortalPolygonRenderInfo 
    }
 
    if (portal_clip_num) { // only true if it's the sky
+      hw.mip_level = 0;   // (its texture's level 0: hw_wlog_at)
       n = portbg_clip_sky(n, final, &final);
    } else {
       desired_mip = compute_mip(render, &cur_cell->plane_list[poly->planeid]);
@@ -1160,8 +1182,8 @@ void draw_surface_multitexture(PortalPolygonCore *poly, PortalPolygonRenderInfo 
          info.v0 = two_to_n(-hw.tex->hlog - 1);
       } else {
          int mip_log = 6 - hw.mip_level;
-         info.scale_u = two_to_n(mip_log - hw_wlog(hw.tex));
-         info.scale_v = two_to_n(mip_log - hw_hlog(hw.tex));
+         info.scale_u = two_to_n(mip_log - hw_wlog_at(hw.tex, hw.mip_level));
+         info.scale_v = two_to_n(mip_log - hw_hlog_at(hw.tex, hw.mip_level));
          info.u0 = info.v0 = 0.0;
       }
       info.scale_u /= portal_worldrep_texture_scale;
@@ -1171,8 +1193,8 @@ void draw_surface_multitexture(PortalPolygonCore *poly, PortalPolygonRenderInfo 
 
    if (hw.lm != NULL) {
       int pix_per_lm = 4 - hw.mip_level;
-      int log_scale_u = hw_wlog(hw.tex) - pix_per_lm;
-      int log_scale_v = hw_hlog(hw.tex) - pix_per_lm;
+      int log_scale_u = hw_wlog_at(hw.tex, hw.mip_level) - pix_per_lm;
+      int log_scale_v = hw_hlog_at(hw.tex, hw.mip_level) - pix_per_lm;
 // This is necessary because wlog is actually log2(row), _not_ log2(w)
 // Shoot me now; it's my own fault. -kevin
 #ifdef RGB_LIGHTING
@@ -1379,6 +1401,7 @@ void draw_surface_texture_only(PortalPolygonCore *poly, PortalPolygonRenderInfo 
    }
 
    if (portal_clip_num) { // only true if it's the sky
+      hw.mip_level = 0;   // (its texture's level 0: hw_wlog_at)
       n = portbg_clip_sky(n, final, &final);
    } else {
       desired_mip = compute_mip(render, &cur_cell->plane_list[poly->planeid]);
@@ -1462,8 +1485,8 @@ void draw_surface_texture_only(PortalPolygonCore *poly, PortalPolygonRenderInfo 
          info.v0 = two_to_n(-hw.tex->hlog - 1);
       } else {
          int mip_log = 6 - hw.mip_level;
-         info.scale_u = two_to_n(mip_log - hw_wlog(hw.tex));
-         info.scale_v = two_to_n(mip_log - hw_hlog(hw.tex));
+         info.scale_u = two_to_n(mip_log - hw_wlog_at(hw.tex, hw.mip_level));
+         info.scale_v = two_to_n(mip_log - hw_hlog_at(hw.tex, hw.mip_level));
          info.u0 = info.v0 = 0.0;
       }
       info.scale_u /= portal_worldrep_texture_scale;

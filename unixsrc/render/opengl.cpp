@@ -29,6 +29,8 @@
 #include <thread>
 #include <string>
 #include <unistd.h>
+
+extern "C" void PlayerDescribeCamera(char *buf, int size);   // (plyrloop.cpp)
 #include <platform_services.h>
 #pragma pack(pop)
 
@@ -1400,8 +1402,12 @@ static void present_legacy_frame(const void *pixels, int width, int height,
       const char *countText = getenv("DARK_RENDER_CAPTURE_COUNT");
       const int count = countText ? std::max(atoi(countText), 1) : 1;
       if (!g_captureComplete && path && *path && g_hardwareFrameCount >= static_cast<unsigned>(frame)) {
-         if (count <= 1)
+         if (count <= 1) {
+            char where[128];
             g_captureComplete = capture_frame(path);
+            PlayerDescribeCamera(where, sizeof(where));
+            fprintf(stderr, "OpenGL: picture taken (%s)\n", where);
+         }
          else {
             static int taken = 0;
             std::string one(path);
@@ -1409,6 +1415,11 @@ static void present_legacy_frame(const void *pixels, int width, int height,
             const std::string tag = "-" + std::to_string(++taken);
             one.insert(dot == std::string::npos ? one.size() : dot, tag);
             capture_frame(one.c_str());
+            {
+               char where[128];
+               PlayerDescribeCamera(where, sizeof(where));
+               fprintf(stderr, "OpenGL: picture %d (%s)\n", taken, where);
+            }
             if (taken >= count)
                g_captureComplete = 1;
          }

@@ -232,6 +232,33 @@ static void NoteImageInfo(const grs_bitmap* bm, IStore* pStore, const char* name
 	if (dot) *dot = 0;
 	strncat(mtl, ".mtl", sizeof(mtl) - strlen(mtl) - 1);
 	ParseMaterialFile(pStore, mtl, info, 0);
+	// An animated texture's frames (dal02_1 .. dal02_15) have no material file
+	// of their own: their base's (dal02.mtl) gives the size they are laid at.
+	// Without it HDMOD's 512-pixel frames were laid at 512 against the first
+	// frame's 128 -- every other frame of Black Parade's instrument dials
+	// magnified four times over, a flicker between the dials and plain metal.
+	if (!info->hasMaterial && dot)
+	{
+		char* us = strrchr(mtl, '_');
+		const char* d = us ? us + 1 : nullptr;
+		bool digits = d && *d;
+		for (const char* c = d; digits && c && *c && *c != '.'; ++c)
+			digits = *c >= '0' && *c <= '9';
+		if (digits)
+		{
+			sResImageInfo base = {};
+			base.tileU = base.tileV = 1.0f;
+			strcpy(us, ".mtl");
+			ParseMaterialFile(pStore, mtl, &base, 0);
+			if (base.hasMaterial)
+			{
+				info->terrainScaleW = base.terrainScaleW;
+				info->terrainScaleH = base.terrainScaleH;
+				info->tileU = base.tileU;
+				info->tileV = base.tileV;
+			}
+		}
+	}
 	ResImageInfoRegister(bm, info);
 }
 
