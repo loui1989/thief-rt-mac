@@ -150,14 +150,33 @@ static void check_loot_goals(const sLootProp *loot)
       sprintf(name, "goal_visible_%d", n);
       if (pQuestData->Exists(name) && !pQuestData->Get(name))
          continue;
+      // (one for another difficulty)
+      if (pQuestData->Exists("difficulty"))
+      {
+         const int diff = pQuestData->Get("difficulty");
+         sprintf(name, "goal_min_diff_%d", n);
+         if (pQuestData->Exists(name) && diff < pQuestData->Get(name))
+            continue;
+         sprintf(name, "goal_max_diff_%d", n);
+         if (pQuestData->Exists(name) && diff > pQuestData->Get(name))
+            continue;
+      }
       static const char *const kinds[4] = {"loot", "gold", "gems", "goods"};
       const int have[4] = {total, loot->count[kLootGold], loot->count[kLootGems], loot->count[kLootArt]};
       BOOL met = TRUE;
+      // (an objective that asks for nothing yet -- its amounts not set, or
+      // set by the mission's own scripts later -- is not met by nothing:
+      // Reflections in Red's loot objective came up done as the mission began)
+      BOOL asks = FALSE;
       for (int k = 0; k < 4 && met; k++)
       {
          sprintf(name, "goal_%s_%d", kinds[k], n);
-         if (pQuestData->Exists(name) && pQuestData->Get(name) > have[k])
-            met = FALSE;
+         if (pQuestData->Exists(name) && pQuestData->Get(name) > 0)
+         {
+            asks = TRUE;
+            if (pQuestData->Get(name) > have[k])
+               met = FALSE;
+         }
       }
       int specials = 0;
       sprintf(name, "goal_specials_%d", n);
@@ -166,9 +185,11 @@ static void check_loot_goals(const sLootProp *loot)
       sprintf(name, "goal_special_%d", n);
       if (pQuestData->Exists(name) && pQuestData->Get(name) > 0)
          specials |= 1 << (pQuestData->Get(name) - 1);
+      if (specials)
+         asks = TRUE;
       if ((loot->count[kLootSpecial] & specials) != specials)
          met = FALSE;
-      if (!met)
+      if (!met || !asks)
          continue;
       fprintf(stderr, "Loot: objective %d met (loot %d: gold %d, gems %d, goods %d) -- completed\n", n, total,
               loot->count[kLootGold], loot->count[kLootGems], loot->count[kLootArt]);
