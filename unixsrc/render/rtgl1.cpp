@@ -8167,7 +8167,20 @@ void RenderRTDrawWorld(int primitive, const sRenderBackendVertex *v, const float
 
    // A light fixture's bulb, flame or glass sits at the light it carries and
    // is drawn self-lit (full white): make it glow, so lamps are seen to be lit.
-   if (!sprite && !g_RenderRTShadowOnly && g_cfg.glow > 0.0f && allWhite && !g_lightPositions.empty() && name) {
+   // (Not a see-through face with a picture that is partly clear -- a soot
+   // mark, a stain, a decal on the wall by a torch: RTGL1 adds a see-through
+   // face's glow over all of it, its clear parts too, and the soot mark
+   // behind a torch at Reflections in Red's cemetery gate was a glaring
+   // orange block over the view whenever one came near it.)
+   const bool clearGlass = (prim.flags & RG_MESH_PRIMITIVE_TRANSLUCENT) && tex && (tex->cutout || tex->soft);
+   if (clearGlass && g_cfg.glow > 0.0f && allWhite && name && !sprite && !g_RenderRTShadowOnly) {
+      static std::unordered_set<std::string> s_told;
+      if (s_told.insert(name).second)
+         fprintf(stderr, "RT: lamp glow: %s (object %u) is see-through and partly clear: not made to glow\n",
+                 name, unsigned(g_currentObject));
+   }
+   if (!sprite && !g_RenderRTShadowOnly && g_cfg.glow > 0.0f && allWhite && !clearGlass &&
+       !g_lightPositions.empty() && name) {
       float c[3] = {0, 0, 0};
       for (const RgPrimitiveVertex &d : prim.verts)
          for (int k = 0; k < 3; ++k)
@@ -8186,6 +8199,14 @@ void RenderRTDrawWorld(int primitive, const sRenderBackendVertex *v, const float
             const float dx = l.data[0] - c[0], dy = l.data[1] - c[1], dz = l.data[2] - c[2];
             if (dx * dx + dy * dy + dz * dz < 0.5f * 0.5f) {
                prim.emissive = std::max(prim.emissive, g_cfg.glow);
+               {
+                  static std::unordered_set<std::string> s_glowTold;
+                  if (s_glowTold.insert(name).second)
+                     fprintf(stderr, "RT: lamp glow: %s (object %u, %s, %.2f m across) glows by its light\n", name,
+                             unsigned(g_currentObject),
+                             (prim.flags & RG_MESH_PRIMITIVE_TRANSLUCENT) ? "see-through" : "solid",
+                             2.0f * std::sqrt(extent));
+               }
                // the glass lets its light out: a street lamp's light sits
                // inside its lantern, and the panes kept the street dark
                prim.flags |= RG_MESH_PRIMITIVE_NO_SHADOW;
