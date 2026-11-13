@@ -175,7 +175,8 @@ struct Settings {
    float heatHaze = 1.0f;     // the air over torches and fires shimmers (0 off)
    float smoke = 1.0f;        // smoke and steam particles as volumetric smoke, at this density (0: flat sprites)
    int playerBody = 1;        // Garrett's own model: his shadow, and him in mirrors and water (unseen by the camera)
-   bool playerLegs = true;    // ...his legs and feet seen by the camera too, looking down
+   bool playerLegs = false;   // ...him seen too: his legs and feet looking down, and him in mirrors and
+                              // water (off: his shadow only -- the player's call, Nov 2026)
    int shadowAlert = 0;       // the guards notice his shadow (g_PlayerShadowAlert, objlight.c)
    int testMirror = 0;        // inspecting a wall makes its texture a mirror (to see Garrett whole)
    bool fogLit = true;        // the mission's fog lit by the lamps in it, or flat as the game's (smooth, no glow)
@@ -296,7 +297,7 @@ void load_settings()
       else if (k == "volumetric_smoke") g_cfg.smoke = std::clamp(value, 0.0f, 4.0f);
       // (the test, the double shown ahead of you, is never kept: on)
       else if (k == "player_body") g_cfg.playerBody = std::clamp(int(value), 0, 1);
-      else if (k == "player_legs") g_cfg.playerLegs = value != 0;
+      else if (k == "player_seen") g_cfg.playerLegs = value != 0;   // (player_legs, on by default before, read no more)
       else if (k == "shadow_alert") g_cfg.shadowAlert = std::clamp(int(value), 0, 1);
       else if (k == "light_soft") g_cfg.lightSoft = std::clamp(value, 0.0f, 4.0f);
       else if (k == "light_fix") g_cfg.lightFix = value != 0;
@@ -364,7 +365,7 @@ void save_settings()
    fprintf(f, "gem_ease_s = %.2f\n", g_cfg.gemEase);
    fprintf(f, "volumetric_smoke = %.2f\n", g_cfg.smoke);
    fprintf(f, "player_body = %d\n", g_cfg.playerBody == 2 ? 1 : g_cfg.playerBody);
-   fprintf(f, "player_legs = %d\n", int(g_cfg.playerLegs));
+   fprintf(f, "player_seen = %d\n", int(g_cfg.playerLegs));
    fprintf(f, "shadow_alert = %d\n", g_cfg.shadowAlert);
    fprintf(f, "fog_lamps = %d\n", int(g_cfg.fogLit));
    fprintf(f, "fog_quality = %d\n", g_cfg.fogQuality);
@@ -2339,8 +2340,12 @@ void upload_captured(uint64_t id, const CapturedPrim &p, bool passLight = false,
    // (Garrett's own body: the camera is inside it, every face of it turned
    // away and taken as shadow-only -- it is all there is of him, for the
    // mirrors too)
+   // (Not seen at all -- "Garrett himself seen" off: every face of him
+   // shadow-only, nothing of him in mirrors or water, only his shadow.)
    const RgMeshPrimitiveFlags own =
-      g_uploadViewer ? p.flags & ~RgMeshPrimitiveFlags(RG_MESH_PRIMITIVE_SHADOW_ONLY) : p.flags;
+      !g_uploadViewer ? p.flags
+      : g_cfg.playerLegs ? p.flags & ~RgMeshPrimitiveFlags(RG_MESH_PRIMITIVE_SHADOW_ONLY)
+                         : p.flags | RgMeshPrimitiveFlags(RG_MESH_PRIMITIVE_SHADOW_ONLY);
    const bool opaque = !(own & (RG_MESH_PRIMITIVE_TRANSLUCENT | RG_MESH_PRIMITIVE_SHADOW_ONLY)) && !p.sprite;
    const float ambient = opaque ? ambient_emissive() : 0.0f;
    // the object the player can pick up or use, lit up as the game lights it
@@ -4792,7 +4797,7 @@ enum UiRow {
 const char *kRowLabels[kRowCount] = {
    "Upscaler", "Render resolution", "Output resolution", "Dynamic resolution", "Bounce light", "Light reach", "Lights traced",
    "Lights coming into range", "Lights tried per pixel", "  Lights shared with neighbours", "Lights behind walls", "Light changes", "Light flicker",
-   "God rays (volumetric)", "  God ray strength", "Mission fog", "  Fog lit by the lamps", "  Lit fog quality", "Smoke and steam", "Garrett's shadow and reflection", "  His legs seen looking down", "  Guards notice his shadow", "  Test mirror", "Bloom", "VSync", "Frame rate limit", "FPS counter", "Light gem and guards", "  Light gem brightness", "  Light gem falloff", "  Light gem response", "Light brightness", "Darkest exposure", "  Eyes adjust to the dark", "  Deep shadows (display)", "Ambient light", "  Follows the game's light", "  Shadow colour", "Sky brightness (as seen)", "Sky light (on the level)", "Moonlight", "  Moon direction", "  Moon height", "Sunlight (Thief 2 missions)", "  Its shadows",
+   "God rays (volumetric)", "  God ray strength", "Mission fog", "  Fog lit by the lamps", "  Lit fog quality", "Smoke and steam", "Garrett's shadow and reflection", "  Garrett himself seen", "  Guards notice his shadow", "  Test mirror", "Bloom", "VSync", "Frame rate limit", "FPS counter", "Light gem and guards", "  Light gem brightness", "  Light gem falloff", "  Light gem response", "Light brightness", "Darkest exposure", "  Eyes adjust to the dark", "  Deep shadows (display)", "Ambient light", "  Follows the game's light", "  Shadow colour", "Sky brightness (as seen)", "Sky light (on the level)", "Moonlight", "  Moon direction", "  Moon height", "Sunlight (Thief 2 missions)", "  Its shadows",
    "Light size (soft shadows)", "Surface roughness", "Model shading", "Model faces", "  Still models drawn once", "Torches and lamps", "Lamp and torch light", "Lamp reach", "Lights in walls", "Lamp glow", "Flame glow", "Materials", "Bumps", "Crevices", "Texture detail", "Parallax depth", "Polished reflections", "Water", "  Under water: brighter", "Traced sound (Steam Audio)", "  Headphone 3D sound (HRTF)",
    "Debug view", "See-through faces for the rays", "Freeze scene (test)", "Tracing layout (test)", "Back faces (test)", "Light sampling (test)", "Blink nearest light (test)", "Performance log", "Inspect centre of view", "Skip to next mission (test)", "Reset to defaults",
 };
@@ -4882,7 +4887,7 @@ std::string row_value(int row)
       return g_cfg.playerBody == 2 ? "Shown ahead of you (test)" : g_cfg.playerBody ? "On" : "Off (as the game)";
    case kRowPlayerLegs:
       if (g_cfg.playerBody != 1) return "Off (needs his shadow on)";
-      return g_cfg.playerLegs ? "On (from the waist down)" : "Off (shadow only)";
+      return g_cfg.playerLegs ? "On (legs looking down; in mirrors and water)" : "Off (his shadow only)";
    case kRowShadowAlert:
       return g_cfg.shadowAlert ? "On (suspicious; searching when near)" : "Off (as the game)";
    case kRowTestMirror:
@@ -7706,7 +7711,8 @@ void upload_player_body()
    auto prim = RgMeshPrimitiveInfo{
       .sType = RG_STRUCTURE_TYPE_MESH_PRIMITIVE_INFO,
       .pNext = nullptr,
-      .flags = RgMeshPrimitiveFlags(RG_MESH_PRIMITIVE_FORCE_EXACT_NORMALS),
+      .flags = RgMeshPrimitiveFlags(RG_MESH_PRIMITIVE_FORCE_EXACT_NORMALS) |
+               (g_cfg.playerLegs ? 0u : RgMeshPrimitiveFlags(RG_MESH_PRIMITIVE_SHADOW_ONLY)),
       .primitiveIndexInMesh = 0,
       .pVertices = v.data(),
       .vertexCount = uint32_t(v.size()),
