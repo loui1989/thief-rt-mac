@@ -557,6 +557,17 @@ BOOL CDECL cIBInputMapper::StaticTrapHandler(uiEvent* p_event, Region*, void*)
 	return g_IB_input_mapper->TrapHandler(p_event);
 }
 
+// Caps lock shifts the letters only, as on a typewriter. Taken as Shift
+// for every key, it turned 1 2 3 4 into ! @ # $ -- bound to nothing: with
+// caps lock left on, the weapon keys (and all the number keys) did nothing.
+static bool caps_shifts(short scancode)
+{
+	if (scancode < 0 || scancode >= KB_CNV_TBLSIZE)
+		return false;
+	const uchar c = (uchar)kb_cnv_table[scancode][0];
+	return !(kb_cnv_table[scancode][0] & 0x4000) && c >= 'a' && c <= 'z';
+}
+
 BOOL cIBInputMapper::TrapHandler(uiEvent* p_event)
 {
 	char bind_control[128] = {};
@@ -566,7 +577,7 @@ BOOL cIBInputMapper::TrapHandler(uiEvent* p_event)
 	case UI_EVENT_KBD_RAW: {
 		auto* key_event = reinterpret_cast<uiRawKeyEvent*>(p_event);
 		uint mask = 0;
-		auto shifted = !!(m_mod_states & MASK_CAPS_LOCK) ^ !!(m_mod_states & MASK_LSHIFT) ^ !!(m_mod_states & MASK_RSHIFT);
+		auto shifted = (!!(m_mod_states & MASK_CAPS_LOCK) && caps_shifts(key_event->scancode)) ^ !!(m_mod_states & MASK_LSHIFT) ^ !!(m_mod_states & MASK_RSHIFT);
 		int strip_shift = 0;
 		switch (key_event->scancode)
 		{
@@ -1032,11 +1043,19 @@ int cIBInputMapper::ProcessRawKey(short scancode, BOOL action, int polling)
 		return ProcessRawMod("caps_lock", 0, TRUE);
 		break;
 	default:
+	{
+		// (caps lock left out for a key it doesn't shift: caps_shifts)
+		const uint mods = m_mod_states;
+		if (!caps_shifts(scancode))
+			m_mod_states &= ~MASK_CAPS_LOCK;
 		auto shifted = !!(m_mod_states & MASK_CAPS_LOCK) != !!(m_mod_states & MASK_SHIFT);
 		int strip_shift = 0;
 		auto control = GetRawControl(scancode, shifted, &strip_shift);
 		if (control == nullptr)
+		{
+			m_mod_states = mods;
 			return 0;
+		}
 
 		auto down = g_input_down.Find(control);
 		if (down)
@@ -1046,8 +1065,10 @@ int cIBInputMapper::ProcessRawKey(short scancode, BOOL action, int polling)
 			else
 				*down = action;
 		}
-		return AttachMods(control, action, strip_shift);
-		break;
+		const int ret = AttachMods(control, action, strip_shift);
+		m_mod_states = mods;
+		return ret;
+	}
 	}
 }
 
