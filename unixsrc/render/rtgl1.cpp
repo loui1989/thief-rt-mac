@@ -1989,6 +1989,10 @@ void compute_normals(CapturedPrim *prims, size_t count)
 // threw its history away: characters and horses flickered and blotched as
 // they walked (frozen models: steady). pose: the game's (feet, fixang), or
 // null for a model holding still.
+}   // namespace
+extern "C" void poster_backs(std::vector<CapturedPrim> &prims);   // (below, among the extern "C")
+namespace {
+
 void steady_faces(CachedObject &c, const float *pose = nullptr)
 {
    PartTimer partTimer(g_capParts.faces);
@@ -2216,6 +2220,11 @@ void steady_faces(CachedObject &c, const float *pose = nullptr)
       prims.push_back(std::move(e.second));
    for (CapturedPrim &p : keep)
       prims.push_back(std::move(p));
+   // a poster's board behind it again only a shadow: the board kept as seen
+   // here -- the game draws it facing the camera, so it counts as a face
+   // ever seen -- undid poster_backs' work, and Black Parade's broadsides
+   // had their grey board round the torn edges after all
+   poster_backs(prims);
    c.prims = std::move(prims);
 }
 
