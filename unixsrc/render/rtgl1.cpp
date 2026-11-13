@@ -165,6 +165,7 @@ struct Settings {
    int neighbours = 5;        // the lamps chosen by this many pixels round each one weighed again (ReSTIR's spatial reuse)
    int evMin = 3;             // eye adaptation's darkest exposure (EV; Blood RT 5, RTGL1 0)
    int darkAdapt = 2;         // the eyes getting used to the dark: up to this many stops brighter (0 off)
+   float contrast = 0.1f;     // the tonemapper's contrast (RTGL1's 0.1): more for a display whose blacks are grey (an LCD)
    int response = 0;          // how fast lighting changes show: 0 calm (Blood RT), 1 quick, 2 instant
    bool rtDetection = true;   // the light gem and the guards go by the ray-traced light
    bool bloom = true;         // the glow around bright light (~0.8 ms at 4K output)
@@ -279,6 +280,7 @@ void load_settings()
       else if (k == "window_light") g_cfg.windowLight = std::clamp(float(value), 0.0f, 4.0f);
       else if (k == "ev_min") g_cfg.evMin = std::clamp(int(value), 0, 7);
       else if (k == "dark_adapt") g_cfg.darkAdapt = std::clamp(int(value), 0, 3);
+      else if (k == "contrast") g_cfg.contrast = std::clamp(value, 0.0f, 1.0f);
       else if (k == "light_response") g_cfg.response = std::clamp(int(value), 0, 2);
       else if (k == "rt_detection") g_cfg.rtDetection = value != 0;
       else if (k == "bloom") g_cfg.bloom = value != 0;
@@ -351,6 +353,7 @@ void save_settings()
    fprintf(f, "sky_seen = %.2f\n", g_cfg.skySeen);
    fprintf(f, "texture_detail = %d\n", g_cfg.texDetail);
    fprintf(f, "dark_adapt = %d\n", g_cfg.darkAdapt);
+   fprintf(f, "contrast = %.2f\n", g_cfg.contrast);
    fprintf(f, "sun = %.2f\n", g_cfg.sun);
    fprintf(f, "sun_shadows = %d\n", g_cfg.sunShadows);
    fprintf(f, "thin_see_through = %d\n", int(g_cfg.thinSeeThrough));
@@ -4782,14 +4785,14 @@ const char *kUpscaleNames[] = {"Off",
 
 enum UiRow {
    kRowUpscale, kRowScale, kRowOutput, kRowDynres, kRowBounces, kRowReach, kRowLights, kRowLightFade, kRowCandidates, kRowNeighbours, kRowLightCull, kRowResponse, kRowFlicker, kRowVolumetric, kRowShafts, kRowFog, kRowFogLit, kRowFogQuality, kRowSmoke, kRowPlayerBody, kRowPlayerLegs, kRowShadowAlert, kRowTestMirror, kRowBloom, kRowVsync, kRowFrameCap,
-   kRowFps, kRowDetection, kRowGemScale, kRowGemMatch, kRowGemEase, kRowLight, kRowExposure, kRowDarkAdapt, kRowAmbient, kRowAmbientFollow, kRowShadowCool, kRowSkySeen, kRowSky, kRowMoon, kRowMoonDir, kRowMoonHeight, kRowSun, kRowSunHalf, kRowLightSize, kRowRough, kRowSmooth, kRowSteady, kRowReuseModels, kRowFixtures, kRowFixtureLight, kRowSmallLamps, kRowLightFix, kRowGlow, kRowFlameGlow, kRowMaterials, kRowBump, kRowCrevice, kRowTexDetail, kRowParallax, kRowPolish, kRowWater, kRowUnderwater, kRowTracedSound, kRowHrtf,
+   kRowFps, kRowDetection, kRowGemScale, kRowGemMatch, kRowGemEase, kRowLight, kRowExposure, kRowDarkAdapt, kRowContrast, kRowAmbient, kRowAmbientFollow, kRowShadowCool, kRowSkySeen, kRowSky, kRowMoon, kRowMoonDir, kRowMoonHeight, kRowSun, kRowSunHalf, kRowLightSize, kRowRough, kRowSmooth, kRowSteady, kRowReuseModels, kRowFixtures, kRowFixtureLight, kRowSmallLamps, kRowLightFix, kRowGlow, kRowFlameGlow, kRowMaterials, kRowBump, kRowCrevice, kRowTexDetail, kRowParallax, kRowPolish, kRowWater, kRowUnderwater, kRowTracedSound, kRowHrtf,
    kRowDebug, kRowThinSeeThrough, kRowFreeze, kRowTraceTest, kRowBackFaces, kRowReuse, kRowBlink, kRowPerf, kRowInspect, kRowSkipMission, kRowReset, kRowCount
 };
 
 const char *kRowLabels[kRowCount] = {
    "Upscaler", "Render resolution", "Output resolution", "Dynamic resolution", "Bounce light", "Light reach", "Lights traced",
    "Lights coming into range", "Lights tried per pixel", "  Lights shared with neighbours", "Lights behind walls", "Light changes", "Light flicker",
-   "God rays (volumetric)", "  God ray strength", "Mission fog", "  Fog lit by the lamps", "  Lit fog quality", "Smoke and steam", "Garrett's shadow and reflection", "  His legs seen looking down", "  Guards notice his shadow", "  Test mirror", "Bloom", "VSync", "Frame rate limit", "FPS counter", "Light gem and guards", "  Light gem brightness", "  Light gem falloff", "  Light gem response", "Light brightness", "Darkest exposure", "  Eyes adjust to the dark", "Ambient light", "  Follows the game's light", "  Shadow colour", "Sky brightness (as seen)", "Sky light (on the level)", "Moonlight", "  Moon direction", "  Moon height", "Sunlight (Thief 2 missions)", "  Its shadows",
+   "God rays (volumetric)", "  God ray strength", "Mission fog", "  Fog lit by the lamps", "  Lit fog quality", "Smoke and steam", "Garrett's shadow and reflection", "  His legs seen looking down", "  Guards notice his shadow", "  Test mirror", "Bloom", "VSync", "Frame rate limit", "FPS counter", "Light gem and guards", "  Light gem brightness", "  Light gem falloff", "  Light gem response", "Light brightness", "Darkest exposure", "  Eyes adjust to the dark", "  Deep shadows (display)", "Ambient light", "  Follows the game's light", "  Shadow colour", "Sky brightness (as seen)", "Sky light (on the level)", "Moonlight", "  Moon direction", "  Moon height", "Sunlight (Thief 2 missions)", "  Its shadows",
    "Light size (soft shadows)", "Surface roughness", "Model shading", "Model faces", "  Still models drawn once", "Torches and lamps", "Lamp and torch light", "Lamp reach", "Lights in walls", "Lamp glow", "Flame glow", "Materials", "Bumps", "Crevices", "Texture detail", "Parallax depth", "Polished reflections", "Water", "  Under water: brighter", "Traced sound (Steam Audio)", "  Headphone 3D sound (HRTF)",
    "Debug view", "See-through faces for the rays", "Freeze scene (test)", "Tracing layout (test)", "Back faces (test)", "Light sampling (test)", "Blink nearest light (test)", "Performance log", "Inspect centre of view", "Skip to next mission (test)", "Reset to defaults",
 };
@@ -4919,6 +4922,10 @@ std::string row_value(int row)
    case kRowDarkAdapt:
       if (g_cfg.darkAdapt <= 0) return "Off";
       snprintf(buf, sizeof(buf), "Up to %dx brighter (now %.1fx)", 1 << g_cfg.darkAdapt, std::exp2(g_darkAdapted));
+      return buf;
+   case kRowContrast:
+      if (g_cfg.contrast <= 0.1f + 1e-3f) return "As made (0.1)";
+      snprintf(buf, sizeof(buf), "%.1f: darker shadows, for a display with grey blacks", g_cfg.contrast);
       return buf;
    case kRowExposure:
       snprintf(buf, sizeof(buf), "EV %d%s", g_cfg.evMin, g_cfg.evMin == 5 ? " (Blood RT)" : g_cfg.evMin == 0 ? " (brightest)" : "");
@@ -5186,6 +5193,7 @@ void change_row(int row, int dir)
       break;
    case kRowExposure: g_cfg.evMin = std::clamp(g_cfg.evMin + dir, 0, 7); break;
    case kRowDarkAdapt: g_cfg.darkAdapt = std::clamp(g_cfg.darkAdapt + dir, 0, 3); break;
+   case kRowContrast: g_cfg.contrast = std::clamp(std::round((g_cfg.contrast + 0.1f * dir) * 10.0f) / 10.0f, 0.1f, 0.8f); break;
    case kRowAmbientFollow: g_cfg.ambientFollow = std::clamp(std::round((g_cfg.ambientFollow + 0.1f * dir) * 10.0f) / 10.0f, 0.0f, 1.0f); break;
    case kRowShadowCool: g_cfg.shadowCool = std::clamp(std::round((g_cfg.shadowCool + 0.1f * dir) * 10.0f) / 10.0f, 0.0f, 1.0f); break;
    case kRowAmbient: g_cfg.ambient = g_cfg.ambient <= 0.0f && dir > 0 ? 0.25f
@@ -6339,7 +6347,8 @@ void draw_frame(bool sceneDrawn)
       // night sight: a little less colour, evenly (a sixth gone when fully used to the dark)
       .saturation = {{-0.08f * g_darkAdapted, -0.08f * g_darkAdapted, -0.08f * g_darkAdapted}},
       .crosstalk = {{1.0f, 1.0f, 1.0f / 16.0f}},
-      .contrast = 0.1f,
+      // (more for a display whose blacks are grey -- an LCD: "Deep shadows")
+      .contrast = g_cfg.contrast,
       .hdrBrightness = 1.0f,
       .hdrContrast = 0.1f,
       .hdrSaturation = {{0.25f, 0.25f, 0.25f}},
