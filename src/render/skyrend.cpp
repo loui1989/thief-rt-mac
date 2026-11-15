@@ -5,6 +5,7 @@
 
 // $Header: r:/t2repos/thief2/src/render/skyrend.cpp,v 1.11 2000/02/19 12:35:46 toml Exp $
 
+#include <stdio.h>
 #include <skyrend.h>
 #ifdef DARK_RT
 #include <render_rt.h>
@@ -109,12 +110,25 @@ void SkyRendererTerm()
 }
 
 
+BOOL SkyDomeChanged();      // skyobj.cpp
+BOOL CloudDeckChanged();    // cloudobj.cpp
+
 void SkyRendererRender()
 {
    if (!g_lgd3d)
       return;
 
    int i = 0;
+
+   // A new mission's sky, loaded after the sky was made from the last
+   // one's (the mode not left between them): all of it made again. The
+   // cloud deck drawn with the old mission's grid and the new one's glow
+   // crashed The Black Parade on its next mission's first frame.
+   if (bDidInit && (SkyDomeChanged() || CloudDeckChanged()))
+   {
+      fprintf(stderr, "Sky: the mission's sky changed - all of it made again\n");
+      SkyRendererTerm();
+   }
 
    // Make sure we're inited:
    SkyRendererInit();

@@ -26,6 +26,8 @@
 
 #include <math.h>
 #include <stdlib.h>
+#include <stdio.h>
+#include <string.h>
 
 #include <cloudobj.h>
 #include <missiondiag.h>
@@ -725,14 +727,18 @@ static inline void ComputeGrid()
                {
                   bHasPointInRange = TRUE;
 
+                  // (both tests, each time: with "else", a subtile that was
+                  // the first found and the furthest right never counted as
+                  // the furthest right -- the glow grid one column short,
+                  // and drawing that column read past its end)
                   if (x < nMinGlowX)
                      nMinGlowX = x;
-                  else if (x > nMaxGlowX)
+                  if (x > nMaxGlowX)
                      nMaxGlowX = x;
 
                   if (y < nMinGlowY)
                      nMinGlowY = y;
-                  else if (y > nMaxGlowY)
+                  if (y > nMaxGlowY)
                      nMaxGlowY = y;
                }
             }
@@ -1024,6 +1030,12 @@ void cCloudDeck::AppInit()
 
 
 static BOOL bDidGameInit = FALSE;
+// the mission's cloud deck as it was when the grid was made (Render: rebuilt
+// when it changes -- The Black Parade's next mission's deck, loaded after
+// the deck was made from the last one's, was drawn with the old mission's
+// grid and its new glow: a crash on the first frame)
+static sMissionCloudObj s_InitParms;
+static BOOL s_bInitTried = FALSE;
 
 static tSimTime nLastTime = 0;
 static int nPalIx = 0;
@@ -1056,9 +1068,20 @@ static BOOL TestValues()
 
 // Tesselate.
 // Call after mission parms are loaded.
+// the mission's cloud deck not the one the grid was made from (skyrend.cpp:
+// the whole sky made again then)
+BOOL CloudDeckChanged()
+{
+   const sMissionCloudObj &cur = g_CloudObj;
+   return s_bInitTried && memcmp(&cur, &s_InitParms, sizeof(s_InitParms)) != 0;
+}
+
 void cCloudDeck::Init()
 {
    int i;
+
+   s_InitParms = g_CloudObj;
+   s_bInitTried = TRUE;
 
    if (!g_CloudObj.bUseCloudDeck || !SkyRendererUseEnhanced())
       return;
@@ -1106,6 +1129,9 @@ void cCloudDeck::Init()
    ComputeUVs();
    ComputeTJoints();
 
+   fprintf(stderr, "Sky: cloud deck %d x %d tiles of %d, glow %d tiles a side over subtiles %d-%d x %d-%d (%d points)\n",
+           g_CloudObj.nNumTilesPerSide, g_CloudObj.nNumTilesPerSide, g_CloudObj.nNumSubTiles,
+           g_CloudObj.nGlowTiles, nMinGlowX, nMaxGlowX, nMinGlowY, nMaxGlowY, nTotalGlowPoints);
    bDidGameInit = TRUE;
 }
 
@@ -1448,7 +1474,20 @@ void cCloudDeck::Render()
    float fVOffset;
    tSimTime nCurrentTime;
 
-   if (!g_lgd3d || !bDidGameInit)
+   if (!g_lgd3d)
+      return;
+
+   // The mission's cloud deck changed under us: made again from the new
+   // values (or dropped, if the new mission has none)
+   const sMissionCloudObj &cur = g_CloudObj;
+   if (s_bInitTried && memcmp(&cur, &s_InitParms, sizeof(s_InitParms)) != 0)
+   {
+      fprintf(stderr, "Sky: the mission's cloud deck changed - rebuilding it\n");
+      Term();
+      Init();
+   }
+
+   if (!bDidGameInit || !pRes)
       return;
 
    ////////////////////////////////////////////////////

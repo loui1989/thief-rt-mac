@@ -539,6 +539,13 @@ float cSky::GetSkyDist(mxs_vector *pDir)
 
 EXTERN BOOL r3d_do_setup;
 
+// the mission's sky not the one the dome was made from (skyrend.cpp)
+BOOL SkyDomeChanged()
+{
+   const sMissionSkyObj &cur = g_SkyObj;
+   return bDidGameInit && memcmp(&cur, &s_InitParms, sizeof(s_InitParms)) != 0;
+}
+
 void cSky::Render()
 {
    if (!g_lgd3d || !bDidGameInit)
