@@ -1188,7 +1188,7 @@ static char *GamepadLookProc(const char *, const char *val, BOOL)
    return NULL;
 }
 
-// The inventory wheel, held open with a mouse button (bind mouse3
+// The inventory wheel, held open with a key or a mouse button (bind tab
 // +inv_wheel): the gamepad's radial (weapons and items, time slowed), a
 // cursor moved by the mouse picking a slot in either ring; let go, the picks
 // are taken up.
@@ -1700,14 +1700,16 @@ void InitIBVars ()
       g_pInputBinder->LoadBndFile (gamebnd_path, HK_GAME2_MODE, "game2");
 
       // The game's own keys (no user.bnd yet -- Thief 2 ships none): this
-      // port's additions, as Thief Gold's user.bnd has them -- the middle
-      // button holds the inventory wheel open (it blocked, as B still does),
-      // and Shift with Q or E leans as Q or E alone does. Saving the
-      // controls writes them to user.bnd, where they can be changed.
+      // port's additions -- Tab, held, opens the inventory wheel (it cycled
+      // the items, as [ and ] and the mouse wheel still do; the middle button
+      // blocks, as it always did), and Shift with Q or E leans as Q or E
+      // alone does. Saving the controls writes them to user.bnd, where they
+      // can be changed.
       {
          static const char *const port_binds[][3] = {
             // control, its stock command (or "" for none), this port's
-            {"mouse3", "+block", "+inv_wheel"},
+            {"tab", "cycle_item 1", "+inv_wheel"},   // (Thief Gold's)
+            {"tab", "next_item", "+inv_wheel"},      // (Thief 2's)
             {"q+shift", "", "+leanleft"},
             {"e+shift", "", "+leanright"},
          };
@@ -1718,7 +1720,15 @@ void InitIBVars ()
          {
             char current[256] = {};
             g_pInputBinder->QueryBind(port_binds[i][0], current, sizeof(current));
-            if (!strcmp(current, port_binds[i][1]))
+            // (a command with an argument may come back in its quotes)
+            char *cmd = current;
+            size_t n = strlen(cmd);
+            if (n >= 2 && cmd[0] == '"' && cmd[n - 1] == '"')
+            {
+               cmd[n - 1] = '\0';
+               ++cmd;
+            }
+            if (!strcmp(cmd, port_binds[i][1]))
                g_pInputBinder->Bind((char *)port_binds[i][0], (char *)port_binds[i][2]);
          }
          g_pInputBinder->SetContext(old_context, TRUE);
