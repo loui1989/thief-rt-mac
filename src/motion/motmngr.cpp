@@ -151,8 +151,13 @@ void MotionManagerLoad()
    if (result == S_OK
     && FoundVersion.major == g_MotDBVersion.major
     && FoundVersion.minor == g_MotDBVersion.minor) {
-      g_pMotionSet->Load(pFile);
-      g_pMotionDatabase->Load(pFile);
+      // (the database follows the motion set in the file: with the set not read --
+      // a load that failed before it, or the set itself -- the database would be
+      // read from the wrong place, its counts garbage)
+      if (g_pMotionSet->Load(pFile))
+         g_pMotionDatabase->Load(pFile);
+      else
+         mprintf("Motion database: the motion set was not read; the database is not read either\n");
       ITagFile_CloseBlock(pFile);
       SafeRelease(pFile);
    }

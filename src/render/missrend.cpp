@@ -247,6 +247,21 @@ protected:
       return version;
    }
 
+   // The block as an older NewDark wrote it is shorter: The Thief Gold HD Mod's
+   // training mission (miss1.mis) has 36 bytes, without anim_light_cutoff. What
+   // it has is read, the rest keeps its default; a short block was a "malformed"
+   // file variable, which failed the whole load -- the motion database read after
+   // it out of step, and the game crashed loading the mission.
+   virtual BOOL ReadBlock(ITagFile* file, const TagVersion&)
+   {
+      Reset();
+      const ulong have = file->TellFromEnd();
+      const ulong want = have < sizeof(sMissionLightmapParams) ? have : sizeof(sMissionLightmapParams);
+      if (want < sizeof(int))
+         return FALSE;
+      return file->Read((char*)(sMissionLightmapParams*)this, want) == (long)want;
+   }
+
 public:
    virtual void Reset()
    {
