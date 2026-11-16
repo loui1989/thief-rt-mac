@@ -4056,6 +4056,8 @@ bool Open(SDL_Window *window)
       }
    }
    {
+      // (written back now: quality_preset, for the launcher, in settings saved before it)
+      save_settings();
       const int p = current_preset();
       if (p >= 0)
          fprintf(stderr, "RT: quality preset: %s\n", kPresets[p].name);
