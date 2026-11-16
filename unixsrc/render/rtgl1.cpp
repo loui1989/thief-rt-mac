@@ -10467,19 +10467,22 @@ float arc_flash(uint32_t obj)
    return level;
 }
 
-// the arcs' lights (g_arcObjects): blue-white, flashing; the mission's own light
-// at an arc (within 75 cm) made so, or one of the arc's own
+// the arcs' lights (g_arcObjects): blue-white, flashing, strong -- an arc
+// lights the rock round it in bursts. The mission's own light at an arc (within
+// 75 cm of its middle) made so, and lights of the arc's own along it: a big arc
+// (BigZapArc, 3-4 m from pole to pole) at each end too, each flashing on its own.
 void arc_lights()
 {
    if (g_arcObjects.empty())
       return;
    static const float kArc[3] = {0.55f, 0.75f, 1.0f};
+   constexpr float kMiddle = 750.0f, kEnd = 500.0f;   // (the game's units: 4 lumens each)
    for (uint32_t obj : g_arcObjects) {
       auto it = g_objects.find(obj);
       if (it == g_objects.end())
          continue;
-      const float *c = it->second.center;
-      const float flash = arc_flash(obj);
+      const CachedObject &co = it->second;
+      const float *c = co.center;
       bool found = false;
       for (PendingLight &L : g_pendingLights) {
          if (L.id >= 0x10000u)
@@ -10488,30 +10491,49 @@ void arc_lights()
          const float dx = p.data[0] - c[0], dy = p.data[1] - c[1], dz = p.data[2] - c[2];
          if (dx * dx + dy * dy + dz * dz > 0.75f * 0.75f)
             continue;
-         const float peak = std::max({L.rgb[0], L.rgb[1], L.rgb[2], 1.0f});
+         const float flash = arc_flash(obj);
+         const float peak = std::max({L.rgb[0], L.rgb[1], L.rgb[2], kMiddle});
          for (int k = 0; k < 3; ++k)
             L.rgb[k] = peak * kArc[k] * flash;
          L.peak = peak * flash;
          g_snapLights.insert(L.id);
          found = true;
       }
-      if (!found) {
+      // its long way, end to end (its box's longest side)
+      float half[3] = {0, 0, 0};
+      int axis = 0;
+      for (int k = 0; k < 3; ++k) {
+         half[k] = 0.5f * (co.bmax[k] - co.bmin[k]);
+         if (half[k] > half[axis])
+            axis = k;
+      }
+      auto add = [&](uint32_t n, float along, float strength) {
          PendingLight L{};
-         L.id = kArcLightIds + obj;
+         L.id = kArcLightIds + obj * 4u + n;
+         const float flash = arc_flash(obj * 4u + n);
          for (int k = 0; k < 3; ++k) {
-            L.pos[k] = c[k] / kMetersPerUnit;
-            L.rgb[k] = 200.0f * kArc[k] * flash;
+            float m = c[k];
+            if (k == axis)
+               m += along * half[k];
+            L.pos[k] = m / kMetersPerUnit;
+            L.rgb[k] = strength * kArc[k] * flash;
             L.dir[k] = 0.0f;
          }
          L.radius = 0.0f;
          L.inner = -1.0f;
          L.outer = 0.0f;
-         L.peak = 200.0f * flash;
+         L.peak = strength * flash;
          L.size = 0.15f;
          L.reaches = true;
          L.walk = -2.0f;
          g_snapLights.insert(L.id);
          g_pendingLights.push_back(L);
+      };
+      if (!found)
+         add(0, 0.0f, kMiddle);
+      if (half[axis] > 0.75f) {
+         add(1, -0.75f, kEnd);
+         add(2, 0.75f, kEnd);
       }
    }
 }
