@@ -3120,6 +3120,9 @@ void rendobj_exit(void)
 
 #ifdef DARK_RT
 #include <objsys.h>
+#include <objquery.h>
+#include <traitman.h>
+#include <contain.h>
 // For the ray tracer's object cache (render_rt.h): is the object still in
 // the world where it was?  Destroyed, contained (picked up, in a chest) and
 // world-less objects answer no.
@@ -3392,5 +3395,52 @@ extern "C" void RenderRTGameObjectName(uint32_t obj, char *buf, int size)
 {
    const char *name = ObjEditName((ObjID)obj);
    snprintf(buf, size, "%s", name ? name : "?");
+}
+
+// For the path tracer's effects (rtgl1.cpp, fx_scan): an object's archetype and
+// model names; where it is (1 in the world, 2 held -- in a container, as the
+// player's inventory -- 0 gone); and every object, for the scan.
+extern "C" void RenderRTGameObjectKind(uint32_t obj, char *arch, int an, char *model, int mn)
+{
+   arch[0] = model[0] = '\0';
+   AutoAppIPtr(TraitManager);
+   AutoAppIPtr_(ObjectSystem, pObjSys);
+   const ObjID a = pTraitManager->GetArchetype((ObjID)obj);
+   const char *n = a ? pObjSys->GetName(a) : NULL;
+   snprintf(arch, an, "%s", n ? n : "");
+   char m[64] = "";
+   if (ObjGetModelName((ObjID)obj, m))
+      snprintf(model, mn, "%s", m);
+}
+
+extern "C" int RenderRTGameObjectArchetype(uint32_t obj)
+{
+   AutoAppIPtr(TraitManager);
+   return (int)pTraitManager->GetArchetype((ObjID)obj);
+}
+
+extern "C" int RenderRTGameObjectWhere(uint32_t obj, float pos[3])
+{
+   if (!OBJ_IS_CONCRETE((ObjID)obj) || !ObjExists((ObjID)obj))
+      return 0;
+   AutoAppIPtr(ContainSys);
+   if (pContainSys->GetContainer((ObjID)obj) != OBJ_NULL)
+      return 2;
+   const mxs_vector *v = ObjPosGetLocVector((ObjID)obj);
+   if (!v)
+      return 2;
+   pos[0] = v->x;
+   pos[1] = v->y;
+   pos[2] = v->z;
+   return 1;
+}
+
+extern "C" void RenderRTGameForEachObject(void (*fn)(uint32_t obj, void *user), void *user)
+{
+   AutoAppIPtr_(ObjectSystem, pObjSys);
+   IObjectQuery *q = pObjSys->Iter(kObjectConcrete);
+   for (; !q->Done(); q->Next())
+      fn((uint32_t)q->Object(), user);
+   q->Release();
 }
 #endif

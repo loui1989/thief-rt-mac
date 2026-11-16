@@ -116,6 +116,8 @@ struct Settings {
    float sky = 1.0f;
    float skySeen = 20.0f;     // the mission's own sky (the enhanced one) as seen, apart from its light
    float glow = 1.0f;         // light fixtures
+   float lavaGlow = 1.0f;     // lava's glow (0 off: lit as the rock is)
+   bool effects = true;       // effects' lights: fire elementals, fireballs, flashes, crystals... (fx_lights)
    float fixtureLight = 2.0f; // the light of lamps and torches (lights at a glowing fixture or a flame)
    float smallLamps = 2.0f;   // small lamps (a short reach): this much more, so the light the
                               // game reckons they give -- the light gem's -- shows round them
@@ -341,6 +343,8 @@ void load_settings()
       else if (k == "sky_seen") g_cfg.skySeen = std::clamp(value, 0.25f, 100.0f);
       else if (k == "light_size") g_cfg.lightSize = std::clamp(value, 0.02f, 2.0f);
       else if (k == "glow") g_cfg.glow = std::clamp(value, 0.0f, 10.0f);
+      else if (k == "lava_glow") g_cfg.lavaGlow = std::clamp(value, 0.0f, 4.0f);
+      else if (k == "effects") g_cfg.effects = value != 0.0f;
       else if (k == "water") g_cfg.water = std::clamp(int(value), 0, 2);
       else if (k == "fixture_light") g_cfg.fixtureLight = std::clamp(value, 0.25f, 6.0f);
       else if (k == "small_lamps") g_cfg.smallLamps = std::clamp(value, 1.0f, 6.0f);
@@ -469,6 +473,7 @@ void save_settings()
    fprintf(f, "fog_quality = %d\n", g_cfg.fogQuality);
    fprintf(f, "light_neighbours = %d\n", g_cfg.neighbours);
    fprintf(f, "reuse_models = %d\n", int(g_cfg.reuseModels));
+   fprintf(f, "lava_glow = %.2f\neffects = %d\n", g_cfg.lavaGlow, int(g_cfg.effects));
    // (for the launcher: the preset these settings are, 1 Low .. 4 Ultra, 0 Custom; not read back)
    fprintf(f, "quality_preset = %d\n", current_preset() + 1);
    fclose(f);
@@ -958,6 +963,19 @@ void adopt_job(RtTexture *t)
 bool g_preloading = false;
 const char *texture_name(RtTexture *t);
 
+// Lava: a lava texture -- Thief's lava is water with one (waterhw/l3in, l3out,
+// l4in, l4out: the Lost City's and the Maw's), or one named lava
+bool is_lava(const RtTexture *t)
+{
+   if (!t)
+      return false;
+   std::string id = std::string(t->name) + " " + t->source;
+   for (char &ch : id)
+      ch = ch == '\\' ? '/' : char(tolower((unsigned char)ch));
+   return id.find("lava") != std::string::npos || id.find("waterhw/l3") != std::string::npos ||
+          id.find("waterhw/l4") != std::string::npos;
+}
+
 // Textures the game let go of, kept with RTGL1 a while under their names:
 // a menu, the book or a letter frees all of the mission's textures and
 // makes the same ones again on the way back, and giving them all to the
@@ -1405,6 +1423,8 @@ std::unordered_set<uint32_t> g_snapLights;
 // flicker, or one of its own when it has none (arc_lights)
 std::unordered_set<uint32_t> g_arcObjects;
 constexpr uint32_t kArcLightIds = 0x02000000u;
+void fx_reset();   // (a new world: the effects' objects and lava's lights forgotten)
+std::unordered_map<uint32_t, float> g_fxGlow; // this frame's effects' model glow, by object (fx_lights)
 // a light's flame: the particle group whose flame was seen at it (a candle's
 // light, often a plain static one the game never turns off when the candle
 // is doused -- the flame went, its light and the candle's glow stayed)
@@ -3184,6 +3204,18 @@ void upload_objects()
             }
          }
       }
+      // an effect's model glowing (a crystal, a talisman, the Eye, a fire
+      // elemental: fx_lights), with its light's pulse
+      bool fxGlowing = false;
+      if (auto fg = g_fxGlow.find(obj); fg != g_fxGlow.end() && fg->second > 0.0f) {
+         fxGlowing = true;
+         lampGlow.resize(c.prims.size(), 0.0f);
+         for (size_t i = 0; i < c.prims.size(); ++i) {
+            const CapturedPrim &p = c.prims[i];
+            if (!p.sprite && !p.verts.empty() && !(p.flags & RG_MESH_PRIMITIVE_SHADOW_ONLY))
+               lampGlow[i] = std::max(lampGlow[i], fg->second);
+         }
+      }
       if (c.passLight && c.flameInside && g_cfg.torchShadows) {
          const bool splitKept = c.splitValid && !wasFresh && c.splitGiven && c.unseenGiven == unseen;
          if (!c.splitValid) {
@@ -3231,7 +3263,8 @@ void upload_objects()
          // (as given last time it was given, unless captured anew since)
          c.glowGiven = glowScale;
          c.highlightGiven = g_uploadHighlight;
-         const bool same = !wasFresh && !c.splitGiven && c.passGiven == c.passLight && c.unseenGiven == unseen;
+         const bool same = !wasFresh && !c.splitGiven && c.passGiven == c.passLight && c.unseenGiven == unseen &&
+                           !fxGlowing;
          g_uploadViewer = obj != 0 && (obj == g_viewerObj || obj == g_viewerItem) && g_cfg.playerBody == 1;
          for (size_t i = 0; i < c.prims.size(); ++i)
             upload_captured(ids[i], c.prims[i], c.passLight, same, glowScale,
@@ -3871,7 +3904,15 @@ void upload_world()
          flags |= RG_MESH_PRIMITIVE_ALPHA_TESTED;
       float alpha = 1.0f;
       float tint[3] = {1.0f, 1.0f, 1.0f};
-      if (g.flags & kRenderRTWorldWater) {
+      // lava (the Lost City's river, the Maw's pools: "water" with a lava
+      // texture): glowing and slowly flowing (RTGL1's lava: its emission
+      // boosted on screen and animated, and lighting the room as an area),
+      // not see-through water
+      const bool lava = (g.flags & kRenderRTWorldWater) && is_lava(tex);
+      if (lava) {
+         flags &= ~RgMeshPrimitiveFlags(RG_MESH_PRIMITIVE_ALPHA_TESTED);
+         flags |= RG_MESH_PRIMITIVE_LAVA;
+      } else if (g.flags & kRenderRTWorldWater) {
          flags &= ~RgMeshPrimitiveFlags(RG_MESH_PRIMITIVE_ALPHA_TESTED);
          if (!tex) {
             // a water surface with no texture of its own (texture 0, as
@@ -3939,7 +3980,8 @@ void upload_world()
          .textureFrame = 0,
          .color = pack_color(tint[0], tint[1], tint[2], alpha),
          // (a glowing texture -- a lit window -- also lights its surroundings)
-         .emissive = (g.flags & kRenderRTWorldFullbright) ? 0.25f
+         .emissive = lava ? g_cfg.lavaGlow
+                     : (g.flags & kRenderRTWorldFullbright) ? 0.25f
                      : (flags & (RG_MESH_PRIMITIVE_TRANSLUCENT | RG_MESH_PRIMITIVE_SKY)) ? 0.0f
                      : (tex && tex->glows) ? std::max(ambient_emissive(), tex->glow)
                                            : ambient_emissive(),
@@ -3951,7 +3993,7 @@ void upload_world()
       RgTextureLayer lmLayer{};
       RgMeshPrimitiveTextureLayersEXT lmLayers{};
       if (gameLight && g.lmPage >= 0 && g.lmPage < int(g_lmPages.size()) && g_lmPages[g.lmPage].provided &&
-          g.lmuv.size() == g.verts.size() && !(g.flags & kRenderRTWorldFullbright) && !(tex && tex->glows) &&
+          g.lmuv.size() == g.verts.size() && !(g.flags & kRenderRTWorldFullbright) && !(tex && tex->glows) && !lava &&
           !(flags & (RG_MESH_PRIMITIVE_TRANSLUCENT | RG_MESH_PRIMITIVE_SKY | RG_MESH_PRIMITIVE_WATER))) {
          lmLayer = RgTextureLayer{
             .pTexCoord = g.lmuv.data(),
@@ -4936,7 +4978,7 @@ const char *kUpscaleNames[] = {"Off",
 
 enum UiRow {
    kRowPreset, kRowUpscale, kRowScale, kRowOutput, kRowDynres, kRowBounces, kRowReach, kRowLights, kRowLightFade, kRowCandidates, kRowNeighbours, kRowLightCull, kRowResponse, kRowFlicker, kRowVolumetric, kRowShafts, kRowFog, kRowFogLit, kRowFogQuality, kRowSmoke, kRowPlayerBody, kRowPlayerLegs, kRowShadowAlert, kRowTestMirror, kRowBloom, kRowVsync, kRowFrameCap,
-   kRowFps, kRowDetection, kRowGemScale, kRowGemMatch, kRowGemEase, kRowLight, kRowExposure, kRowDarkAdapt, kRowContrast, kRowAmbient, kRowAmbientFollow, kRowShadowCool, kRowSkySeen, kRowSky, kRowMoon, kRowMoonDir, kRowMoonHeight, kRowSun, kRowSunHalf, kRowLightSize, kRowRough, kRowSmooth, kRowSteady, kRowReuseModels, kRowFixtures, kRowFixtureLight, kRowSmallLamps, kRowLightFix, kRowGlow, kRowFlameGlow, kRowMaterials, kRowBump, kRowCrevice, kRowTexDetail, kRowParallax, kRowPolish, kRowWater, kRowUnderwater, kRowTracedSound, kRowHrtf,
+   kRowFps, kRowDetection, kRowGemScale, kRowGemMatch, kRowGemEase, kRowLight, kRowExposure, kRowDarkAdapt, kRowContrast, kRowAmbient, kRowAmbientFollow, kRowShadowCool, kRowSkySeen, kRowSky, kRowMoon, kRowMoonDir, kRowMoonHeight, kRowSun, kRowSunHalf, kRowLightSize, kRowRough, kRowSmooth, kRowSteady, kRowReuseModels, kRowFixtures, kRowFixtureLight, kRowSmallLamps, kRowLightFix, kRowGlow, kRowFlameGlow, kRowLavaGlow, kRowEffects, kRowMaterials, kRowBump, kRowCrevice, kRowTexDetail, kRowParallax, kRowPolish, kRowWater, kRowUnderwater, kRowTracedSound, kRowHrtf,
    kRowDebug, kRowThinSeeThrough, kRowFreeze, kRowTraceTest, kRowBackFaces, kRowReuse, kRowBlink, kRowPerf, kRowInspect, kRowSkipMission, kRowReset, kRowDev, kRowCount
 };
 
@@ -4944,7 +4986,7 @@ const char *kRowLabels[kRowCount] = {
    "Quality preset", "Upscaler", "Render resolution", "Output resolution", "Dynamic resolution", "Bounce light", "Light reach", "Lights traced",
    "Lights coming into range", "Lights tried per pixel", "  Lights shared with neighbours", "Lights behind walls", "Light changes", "Light flicker",
    "God rays (volumetric)", "  God ray strength", "Mission fog", "  Fog lit by the lamps", "  Lit fog quality", "Smoke and steam", "Garrett's shadow and reflection", "  Garrett himself seen", "  Guards notice his shadow", "  Test mirror", "Bloom", "VSync", "Frame rate limit", "FPS counter", "Light gem and guards", "  Light gem brightness", "  Light gem falloff", "  Light gem response", "Light brightness", "Darkest exposure", "  Eyes adjust to the dark", "  Deep shadows (display)", "Ambient light", "  Follows the game's light", "  Shadow colour", "Sky brightness (as seen)", "Sky light (on the level)", "Moonlight", "  Moon direction", "  Moon height", "Sunlight (Thief 2 missions)", "  Its shadows",
-   "Light size (soft shadows)", "Surface roughness", "Model shading", "Model faces", "  Still models drawn once", "Torches and lamps", "Lamp and torch light", "Lamp reach", "Lights in walls", "Lamp glow", "Flame glow", "Materials", "Bumps", "Crevices", "Texture detail", "Parallax depth", "Polished reflections", "Water", "  Under water: brighter", "Traced sound (Steam Audio)", "  Headphone 3D sound (HRTF)",
+   "Light size (soft shadows)", "Surface roughness", "Model shading", "Model faces", "  Still models drawn once", "Torches and lamps", "Lamp and torch light", "Lamp reach", "Lights in walls", "Lamp glow", "Flame glow", "Lava glow", "Effect lights (spells, crystals...)", "Materials", "Bumps", "Crevices", "Texture detail", "Parallax depth", "Polished reflections", "Water", "  Under water: brighter", "Traced sound (Steam Audio)", "  Headphone 3D sound (HRTF)",
    "Debug view", "See-through faces for the rays", "Freeze scene (test)", "Tracing layout (test)", "Back faces (test)", "Light sampling (test)", "Blink nearest light (test)", "Performance log", "Inspect centre of view", "Skip to next mission (test)", "Reset to defaults", "Developer settings",
 };
 
@@ -5171,6 +5213,11 @@ std::string row_value(int row)
       if (g_cfg.glow <= 0.0f) return "Off";
       snprintf(buf, sizeof(buf), "%.2f", g_cfg.glow);
       return buf;
+   case kRowLavaGlow:
+      if (g_cfg.lavaGlow <= 0.0f) return "Off";
+      snprintf(buf, sizeof(buf), "%.2f", g_cfg.lavaGlow);
+      return buf;
+   case kRowEffects: return g_cfg.effects ? "On" : "Off";
    case kRowFlameGlow:
       if (g_cfg.spriteGlow <= 0.0f) return "Off";
       snprintf(buf, sizeof(buf), "%.2f", g_cfg.spriteGlow);
@@ -5429,6 +5476,10 @@ void change_row(int row, int dir)
    case kRowGlow:
       g_cfg.glow = std::clamp(std::round(g_cfg.glow * 4.0f) / 4.0f + 0.25f * dir, 0.0f, 5.0f);
       break;
+   case kRowLavaGlow:
+      g_cfg.lavaGlow = std::clamp(std::round(g_cfg.lavaGlow * 4.0f) / 4.0f + 0.25f * dir, 0.0f, 4.0f);
+      break;
+   case kRowEffects: g_cfg.effects = !g_cfg.effects; break;
    case kRowSmallLamps:
       g_cfg.smallLamps = std::clamp(std::round(g_cfg.smallLamps * 4.0f) / 4.0f + 0.25f * dir, 1.0f, 6.0f);
       break;
@@ -7699,8 +7750,8 @@ bool smoke_from_sprite(RtTexture *tex, const char *name, const sRenderBackendVer
          why = "not soft: a picture, not a puff";
       else if (!why && st.centreAlpha < 0.05f)
          why = "clear in the middle (a ring)";
-      else if (!why && hi > 0.05f && hi - lo > 0.4f * hi)
-         why = "coloured";
+      else if (!why && hi > 0.05f && hi - lo > 0.4f * hi && id.find("gas") == std::string::npos)
+         why = "coloured";   // (a gas cloud's green: smoke of its colour)
       st.smoke = !why;
       fprintf(stderr, "Smoke: %s (%s): %s%s (colour %.2f %.2f %.2f, middle %.0f%% opaque, edge %.0f%%)\n",
               tex->name, tex->source.c_str(), st.smoke ? "volumetric smoke" : "stays a sprite: ",
@@ -7723,7 +7774,10 @@ bool smoke_from_sprite(RtTexture *tex, const char *name, const sRenderBackendVer
       alb[k] = std::clamp(c[k] * st.rgb[k], 0.02f, 0.95f);
    {
       const float hi = std::max({alb[0], alb[1], alb[2]}), lo = std::min({alb[0], alb[1], alb[2]});
-      if (hi > 0.05f && hi - lo > 0.45f * hi)
+      std::string id = std::string(tex->name) + " " + tex->source;
+      for (char &ch : id)
+         ch = char(tolower((unsigned char)ch));
+      if (hi > 0.05f && hi - lo > 0.45f * hi && id.find("gas") == std::string::npos)
          return false;
    }
    // where it is and how big: the quad's middle, and its half width (the
@@ -9411,6 +9465,7 @@ void RenderRTWorldBegin(uint32_t serial)
    g_ownedLights.clear();
    g_snapLights.clear();
    g_arcObjects.clear();
+   fx_reset();
    g_lightFlameObj.clear();
    // a new world (a mission or a saved game loaded): the models kept from the
    // last one are not this one's, though some have the same numbers and places
@@ -10538,6 +10593,371 @@ void arc_lights()
    }
 }
 
+// ---- Effects' lights -------------------------------------------------------
+// Things the game shows as glowing or burning but gives no light of their own
+// (or only a dim white one): found by their archetype and model names among
+// the mission's objects (fx_scan, every few frames, so a fireball thrown is
+// found as it flies), each given a light that follows it -- coloured, and
+// flickering, pulsing or swirling as it should -- and a glow on its model:
+//   fire elementals: orange, flickering as a fire does
+//   fireballs (a fire mage's, a priest's, a summoning) and fire arrows in
+//     flight: orange, flickering; a burst of light where they end
+//   flash bombs and flash mines: a blinding white flash where one goes off
+//   explosive mines: an orange-white blast
+//   crystals (the elemental arrows' crystals) and talismans: a faint light of
+//     their element's colour (fire red-orange, water blue, earth green, air
+//     white), slowly pulsing
+//   the Trickster's portal (the Maw): violet light, swirling
+//   the Eye: blue, pulsing; the Lost City's and the mystic's gems: faint
+enum FxKind { kFxElemental = 1, kFxFireBolt, kFxFireArrow, kFxFlash, kFxMine, kFxCrystal, kFxTalisman,
+              kFxPortal, kFxEye, kFxGem };
+struct FxObj {
+   int kind = 0;
+   float rgb[3] = {1, 1, 1};
+   float strength = 0;    // the light's peak, in the game's units (4 lumens each)
+   float size = 0.15f;    // its source's radius, metres
+   float glow = 0;        // its model's glow
+   float pos[3] = {0, 0, 0};
+   bool posKnown = false;
+   double lastMoved = -10; // when it last moved fast (thrown, flying)
+};
+struct FxBurst {
+   uint32_t id;
+   float pos[3], rgb[3];
+   float peak, life;
+   double start;
+};
+std::unordered_map<uint32_t, FxObj> g_fx;
+std::unordered_map<uint32_t, int> g_fxNot;  // objects looked at, none of these: their archetype then
+std::vector<FxBurst> g_fxBursts;
+uint32_t g_fxBurstNext = 0;
+constexpr uint32_t kFxLightIds = 0x03000000u, kFxBurstIds = 0x04000000u, kLavaLightIds = 0x05000000u;
+
+extern "C" void RenderRTGameObjectKind(uint32_t obj, char *arch, int an, char *model, int mn);
+extern "C" int RenderRTGameObjectWhere(uint32_t obj, float pos[3]);
+extern "C" int RenderRTGameObjectArchetype(uint32_t obj);
+extern "C" void RenderRTGameForEachObject(void (*fn)(uint32_t obj, void *user), void *user);
+
+bool fx_classify(uint32_t obj, FxObj &f)
+{
+   char arch[128], model[64];
+   RenderRTGameObjectKind(obj, arch, sizeof(arch), model, sizeof(model));
+   std::string a(arch), m(model);
+   for (char &ch : a)
+      ch = char(tolower((unsigned char)ch));
+   for (char &ch : m)
+      ch = char(tolower((unsigned char)ch));
+   auto has = [](const std::string &s, const char *w) { return s.find(w) != std::string::npos; };
+   static const float kFire[3] = {1.0f, 0.45f, 0.15f}, kWater[3] = {0.30f, 0.55f, 1.0f},
+                      kEarth[3] = {0.45f, 1.0f, 0.35f}, kAir[3] = {0.85f, 0.92f, 1.0f};
+   auto element = [&](const float *fallback) -> const float * {
+      if (has(a, "fire") || has(m, "fire") || has(m, "elfire"))
+         return kFire;
+      if (has(a, "water") || has(a, "h2o") || has(m, "water") || has(m, "elwater"))
+         return kWater;
+      if (has(a, "earth") || has(m, "earth") || has(m, "elearth"))
+         return kEarth;
+      if (has(a, "air") || has(m, "elair"))
+         return kAir;
+      return fallback;
+   };
+   auto set = [&](int kind, const float *c, float strength, float size, float glow) {
+      f.kind = kind;
+      memcpy(f.rgb, c, sizeof(f.rgb));
+      f.strength = strength;
+      f.size = size;
+      f.glow = glow;
+   };
+   // (a particle group -- an elemental's flames, a crystal's sparkles, a
+   // talisman's field -- is none of these: its own glow is a sprite's)
+   if (has(m, "particle") || m.empty())
+      return false;
+   if (has(a, "fireelement") || has(a, "fire elemental"))
+      set(kFxElemental, kFire, 900, 0.35f, 1.0f);
+   else if (m.rfind("fireb", 0) == 0 || m == "fireball" || m == "hamball" || has(a, "magebolt") ||
+            has(a, "firebolt") || has(a, "fireball") || has(a, "elementalsummon"))
+      set(kFxFireBolt, kFire, 700, 0.15f, 1.5f);
+   else if (m == "arrowfir")
+      set(kFxFireArrow, kFire, 30, 0.05f, 0.0f);
+   else if (m == "flashbom" || m == "flshmine" || has(a, "flashbomb") || has(a, "flashmine") || has(a, "flash mine")) {
+      static const float kWhite[3] = {1, 1, 1};
+      set(kFxFlash, kWhite, 0, 0.3f, 0.0f);
+   } else if (m == "expmine" || m == "exbmine3") {
+      static const float kBlast[3] = {1.0f, 0.70f, 0.40f};
+      set(kFxMine, kBlast, 0, 0.3f, 0.0f);
+   } else if (has(a, "talisman") && !m.empty())
+      set(kFxTalisman, element(kAir), 120, 0.1f, 0.8f);
+   else if (has(a, "crystal") && !m.empty() && m != "arrow" && !has(m, "cryemit") && !has(m, "particle"))
+      set(kFxCrystal, element(kAir), 45, 0.08f, 0.6f);
+   else if (has(a, "mawportal") || m == "porthole") {
+      static const float kPortal[3] = {0.70f, 0.40f, 1.0f};
+      set(kFxPortal, kPortal, 1200, 1.0f, 1.0f);
+   } else if (has(a, "theeye")) {
+      static const float kEye[3] = {0.40f, 0.60f, 1.0f};
+      set(kFxEye, kEye, 300, 0.2f, 1.0f);
+   } else if (has(a, "lc_gem") || m == "lcgem" || m == "mysticsl" || m == "mysticht") {
+      static const float kGem[3] = {0.45f, 1.0f, 0.75f};
+      set(kFxGem, kGem, 35, 0.06f, 0.5f);
+   } else
+      return false;
+   fprintf(stderr, "RT: effect light: %s (object %u, model %s): %s\n", arch, obj, model,
+           f.kind == kFxElemental ? "fire elemental"
+           : f.kind == kFxFireBolt ? "fireball"
+           : f.kind == kFxFireArrow ? "fire arrow"
+           : f.kind == kFxFlash ? "flash bomb"
+           : f.kind == kFxMine ? "mine"
+           : f.kind == kFxCrystal ? "crystal"
+           : f.kind == kFxTalisman ? "talisman"
+           : f.kind == kFxPortal ? "portal"
+           : f.kind == kFxEye ? "the Eye"
+                              : "gem");
+   return true;
+}
+
+void fx_scan()
+{
+   // (a fireball lives a second: looked for every few frames; an object looked
+   // at and found none of these is not looked at again -- unless its number
+   // now belongs to another kind of object, the game reusing it)
+   static uint32_t s_frame = 0;
+   if ((s_frame++ % 4) != 0)
+      return;
+   RenderRTGameForEachObject(
+      [](uint32_t obj, void *) {
+         if (g_fx.count(obj))
+            return;
+         const int arch = RenderRTGameObjectArchetype(obj);
+         auto no = g_fxNot.find(obj);
+         if (no != g_fxNot.end() && no->second == arch)
+            return;
+         FxObj f;
+         if (fx_classify(obj, f))
+            g_fx[obj] = f;
+         else
+            g_fxNot[obj] = arch;
+      },
+      nullptr);
+}
+
+void fx_burst(const float pos[3], const float rgb[3], float peak, float life)
+{
+   FxBurst b;
+   b.id = kFxBurstIds + (g_fxBurstNext++ & 0xFFFFu);
+   memcpy(b.pos, pos, sizeof(b.pos));
+   memcpy(b.rgb, rgb, sizeof(b.rgb));
+   b.peak = peak;
+   b.life = life;
+   b.start = now_seconds();
+   g_fxBursts.push_back(b);
+}
+
+void fx_push(uint32_t id, const float pos[3], const float rgb[3], float level, float size)
+{
+   if (level <= 0.01f)
+      return;
+   PendingLight L{};
+   L.id = id;
+   for (int k = 0; k < 3; ++k) {
+      L.pos[k] = pos[k];
+      L.rgb[k] = rgb[k] * level;
+      L.dir[k] = 0.0f;
+   }
+   L.radius = 0.0f;
+   L.inner = -1.0f;
+   L.outer = 0.0f;
+   L.peak = std::max({L.rgb[0], L.rgb[1], L.rgb[2]});
+   L.size = size;
+   L.reaches = true;
+   L.walk = -2.0f;
+   g_snapLights.insert(id);
+   g_pendingLights.push_back(L);
+}
+
+void fx_lights()
+{
+   g_fxGlow.clear();
+   if (!g_cfg.effects || !g_inScene)
+      return;
+   fx_scan();
+   const double t = now_seconds();
+   static double s_last = t;
+   const float dt = float(std::clamp(t - s_last, 1e-3, 0.2));
+   s_last = t;
+   const float *cam = g_camera.pos;
+   for (auto it = g_fx.begin(); it != g_fx.end();) {
+      const uint32_t obj = it->first;
+      FxObj &f = it->second;
+      float p[3];
+      const int where = RenderRTGameObjectWhere(obj, p);
+      if (where == 0) {
+         // gone: a flash bomb or a mine went off, a fireball hit (not one
+         // picked up and put with the others in the inventory: one in flight,
+         // or one gone off away from the player)
+         if (f.posKnown) {
+            const float dx = f.pos[0] - cam[0], dy = f.pos[1] - cam[1], dz = f.pos[2] - cam[2];
+            const float away = std::sqrt(dx * dx + dy * dy + dz * dz);   // feet
+            const bool flying = t - f.lastMoved < 0.6;
+            static const float kHit[3] = {1.0f, 0.55f, 0.20f};
+            if (f.kind == kFxFlash && (flying || away > 6.0f))
+               fx_burst(f.pos, f.rgb, 8000.0f, 0.35f);
+            else if (f.kind == kFxMine && (flying || away > 5.0f))
+               fx_burst(f.pos, f.rgb, 4000.0f, 0.6f);
+            else if (f.kind == kFxFireBolt || (f.kind == kFxFireArrow && flying))
+               fx_burst(f.pos, kHit, 2500.0f, 0.35f);
+         }
+         it = g_fx.erase(it);
+         continue;
+      }
+      ++it;
+      if (where != 1) {
+         f.posKnown = false;   // (held: no light, no glow)
+         continue;
+      }
+      if (f.posKnown) {
+         const float dx = p[0] - f.pos[0], dy = p[1] - f.pos[1], dz = p[2] - f.pos[2];
+         if (std::sqrt(dx * dx + dy * dy + dz * dz) / dt > 8.0f)
+            f.lastMoved = t;
+      }
+      memcpy(f.pos, p, sizeof(f.pos));
+      f.posKnown = true;
+      float level = 1.0f;
+      float strength = f.strength;
+      switch (f.kind) {
+      case kFxElemental:
+      case kFxFireBolt: {
+         const float n = 0.5f * flame_noise(t * 2.3, obj) + 0.3f * flame_noise(t * 7.0, obj + 9u) +
+                         0.2f * flame_noise(t * 15.0, obj + 21u);
+         level = std::max(0.4f, 1.0f + 0.35f * n);
+         break;
+      }
+      case kFxFireArrow:
+         if (t - f.lastMoved < 0.3)
+            strength = 500.0f;   // in flight
+         level = 1.0f + 0.25f * flame_noise(t * 9.0, obj);
+         break;
+      case kFxCrystal:
+      case kFxTalisman:
+      case kFxEye:
+      case kFxGem:
+         level = 1.0f + 0.18f * float(std::sin(t * 2.0 * 3.14159 * 0.45 + double(obj % 13)));
+         break;
+      case kFxPortal:
+         level = 1.0f + 0.30f * float(std::sin(t * 2.1)) * float(std::sin(t * 0.7 + 1.0));
+         break;
+      default:
+         level = 0.0f;   // (flash bombs and mines: only when they go off)
+      }
+      float c[3];
+      for (int k = 0; k < 3; ++k)
+         c[k] = f.rgb[k] * strength;
+      fx_push(kFxLightIds + obj, p, c, level, f.size);
+      if (f.glow > 0.0f)
+         g_fxGlow[obj] = f.glow * std::clamp(level, 0.3f, 1.5f);
+   }
+   for (auto it = g_fxBursts.begin(); it != g_fxBursts.end();) {
+      const float age = float(t - it->start);
+      if (age > it->life) {
+         it = g_fxBursts.erase(it);
+         continue;
+      }
+      // at full at once, then dying away
+      const float level = std::exp(-3.0f * age / it->life);
+      float c[3];
+      for (int k = 0; k < 3; ++k)
+         c[k] = it->rgb[k] * it->peak;
+      fx_push(it->id, it->pos, c, level, 0.3f);
+      ++it;
+   }
+}
+
+// Lava's light: its glow lights the room only through the bounce rays (RTGL1's
+// lava as an area); lights over it -- one over each 4 m square of it, as
+// strong as the lava there is large -- light the walls and ceiling round it,
+// orange, slowly swelling
+std::vector<PendingLight> g_lavaLights;
+uint32_t g_lavaWorldSerial = 0;
+void build_lava_lights()
+{
+   g_lavaLights.clear();
+   g_lavaWorldSerial = g_worldSerial;
+   struct Cell { double area = 0, x = 0, y = 0, z = 0; };
+   std::map<std::pair<int, int>, Cell> cells;
+   for (const WorldGroup &g : g_world) {
+      if (!(g.flags & kRenderRTWorldWater))
+         continue;
+      auto found = g_worldTextures.find(g.textureId);
+      if (found == g_worldTextures.end() || !is_lava(found->second))
+         continue;
+      for (size_t k = 0; k + 2 < g.indices.size(); k += 3) {
+         const float *a = g.verts[g.indices[k]].position, *b = g.verts[g.indices[k + 1]].position,
+                     *e = g.verts[g.indices[k + 2]].position;
+         const float u[3] = {b[0] - a[0], b[1] - a[1], b[2] - a[2]}, v[3] = {e[0] - a[0], e[1] - a[1], e[2] - a[2]};
+         const float cx = u[1] * v[2] - u[2] * v[1], cy = u[2] * v[0] - u[0] * v[2], cz = u[0] * v[1] - u[1] * v[0];
+         const double area = 0.5 * std::sqrt(double(cx) * cx + double(cy) * cy + double(cz) * cz);
+         if (area <= 0)
+            continue;
+         const float m[3] = {(a[0] + b[0] + e[0]) / 3, (a[1] + b[1] + e[1]) / 3, (a[2] + b[2] + e[2]) / 3};
+         Cell &c = cells[{int(std::floor(m[0] / 4.0f)), int(std::floor(m[1] / 4.0f))}];
+         c.area += area;
+         c.x += m[0] * area;
+         c.y += m[1] * area;
+         c.z += m[2] * area;
+      }
+   }
+   static const float kLava[3] = {1.0f, 0.42f, 0.10f};
+   uint32_t n = 0;
+   for (auto &e : cells) {
+      const Cell &c = e.second;
+      if (c.area < 0.5)
+         continue;
+      PendingLight L{};
+      L.id = kLavaLightIds + n++;
+      const float strength = float(std::min(120.0 * c.area, 1600.0));
+      L.pos[0] = float(c.x / c.area) / kMetersPerUnit;
+      L.pos[1] = float(c.y / c.area) / kMetersPerUnit;
+      L.pos[2] = (float(c.z / c.area) + 0.5f) / kMetersPerUnit;   // (half a metre over it)
+      for (int k = 0; k < 3; ++k) {
+         L.rgb[k] = kLava[k] * strength;
+         L.dir[k] = 0.0f;
+      }
+      L.radius = 0.0f;
+      L.inner = -1.0f;
+      L.outer = 0.0f;
+      L.peak = strength;
+      L.size = 0.6f;
+      L.reaches = true;
+      L.walk = -2.0f;
+      g_lavaLights.push_back(L);
+   }
+   if (!g_lavaLights.empty())
+      fprintf(stderr, "RT: lava: %zu lights over it\n", g_lavaLights.size());
+}
+
+void fx_reset()
+{
+   g_fx.clear();
+   g_fxNot.clear();
+   g_fxBursts.clear();
+   g_lavaWorldSerial = 0;
+}
+
+void lava_lights()
+{
+   if (g_cfg.lavaGlow <= 0.0f || !g_worldValid)
+      return;
+   if (g_lavaWorldSerial != g_worldSerial)
+      build_lava_lights();
+   const double t = now_seconds();
+   for (PendingLight L : g_lavaLights) {
+      const float swell = 1.0f + 0.15f * flame_noise(t * 0.35, L.id);
+      for (float &c : L.rgb)
+         c *= swell * g_cfg.lavaGlow;
+      L.peak *= swell * g_cfg.lavaGlow;
+      g_snapLights.insert(L.id);
+      g_pendingLights.push_back(L);
+   }
+}
+
 void flush_lights()
 {
    upload_moon();
@@ -10559,6 +10979,8 @@ void flush_lights()
       }
    }
    arc_lights();
+   fx_lights();
+   lava_lights();
    g_lightsTotal = uint32_t(g_pendingLights.size());
    smooth_flicker();
    g_lastOffered = g_pendingLights;

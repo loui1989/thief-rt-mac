@@ -46,6 +46,9 @@
 #include <objsys.h>
 #include <osysbase.h>
 #include <objquery.h>
+#include <traitman.h>
+#include <wrfunc.h>
+#include <port.h>
 #include <objpos.h>
 #include <wrtype.h>
 #include <lnkquery.h>
@@ -186,6 +189,8 @@ static BOOL gConsoleRetinfoHUD = FALSE;
 static BOOL gTextureAuditDone = FALSE;
 static void console_format_retinfo(char* message, int size);
 static void console_texture_audit(char* value);
+static void run_survey(const char* path);
+static void rt_test_frame(void);
 #endif
 
 ////////////////////////////////////////////////////////////
@@ -267,6 +272,21 @@ void dark_rend_update_frame(void)
       {
          gTextureAuditDone = TRUE;
          console_texture_audit(auditPath);
+      }
+   }
+
+   rt_test_frame();
+   {
+      // (a survey for testing: every object and the glowing terrain, with where
+      // they are, written once the mission is in; then the game quits)
+      static BOOL s_surveyed = FALSE;
+      char surveyPath[260] = "";
+      if (!s_surveyed && wr_num_cells > 0 && PlayerObjectExists() &&
+          config_get_raw("rt_survey", surveyPath, sizeof(surveyPath)))
+      {
+         s_surveyed = TRUE;
+         run_survey(surveyPath);
+         exit(0);
       }
    }
 
@@ -560,6 +580,27 @@ static const sConsoleMission* console_find_mission(const char* value)
 static void console_open_mission(char* value)
 {
    const sConsoleMission* mission = console_find_mission(value);
+   // (Thief Gold's missions, and any other installed, by number)
+   static sConsoleMission s_byNumber;
+   if (!mission && value)
+   {
+      while (*value && isspace((unsigned char)*value))
+         ++value;
+      if (isdigit((unsigned char)*value))
+      {
+         char filename[32];
+         s_byNumber.number = atoi(value);
+         s_byNumber.short_name = "";
+         s_byNumber.title = "";
+         _snprintf(filename, sizeof(filename), "miss%d.mis", s_byNumber.number);
+         FILE* f = fopen(filename, "rb");
+         if (f)
+         {
+            fclose(f);
+            mission = &s_byNumber;
+         }
+      }
+   }
    if (!mission)
    {
       console_message("Unknown mission. Use list_missions for valid numbers and short names.");
@@ -992,11 +1033,459 @@ static void run_texture_audit(const char* requestedPath)
    console_message("%s.",summary);
 }
 
+static void run_survey(const char* path)
+{
+   FILE* log = fopen(path, "w");
+   if (!log)
+      return;
+   AutoAppIPtr_(ObjectSystem, pObjectSystem);
+   AutoAppIPtr(TraitManager);
+   IObjectQuery* objects = pObjectSystem->Iter(kObjectConcrete);
+   for (; !objects->Done(); objects->Next())
+   {
+      ObjID object = objects->Object();
+      char model[64] = "";
+      ObjGetModelName(object, model);
+      const char* name = pObjectSystem->GetName(object);
+      ObjID arch = pTraitManager->GetArchetype(object);
+      const char* archName = arch ? pObjectSystem->GetName(arch) : NULL;
+      mxs_vector* position = ObjPosGetLocVector(object);
+      if (!position)
+         continue;
+      fprintf(log, "OBJ %d \"%s\" \"%s\" \"%s\" %.1f %.1f %.1f\n", object,
+              name ? name : "", archName ? archName : "", model,
+              position->x, position->y, position->z);
+   }
+   objects->Release();
+   for (int c = 0; c < wr_num_cells; ++c)
+   {
+      PortalCell* cell = WR_CELL(c);
+      if (!cell || !cell->render_list)
+         continue;
+      int voff = 0;
+      for (int p = 0; p < cell->num_polys; ++p)
+      {
+         const int n = cell->poly_list[p].num_vertices;
+         if (p < cell->num_render_polys)
+         {
+            const int texture = cell->render_list[p].texture_id;
+            IRes* resource = (texture > 0 && texture < TEXMEM_MAX) ? texmemGetHandle(texture) : NULL;
+            char* canonical = NULL;
+            if (resource)
+               IRes_GetCanonPathName(resource, &canonical);
+            if (canonical)
+            {
+               mxs_vector sum = { 0, 0, 0 };
+               for (int k = 0; k < n; ++k)
+               {
+                  mxs_vector* v = &cell->vpool[cell->vertex_list[voff + k]];
+                  sum.x += v->x; sum.y += v->y; sum.z += v->z;
+               }
+               fprintf(log, "TERR %d \"%s\" %.1f %.1f %.1f\n", texture, canonical,
+                       sum.x / n, sum.y / n, sum.z / n);
+               free(canonical);
+            }
+         }
+         voff += n;
+      }
+   }
+   fclose(log);
+}
+
 static void console_texture_audit(char* value)
 {
    while (value && isspace((unsigned char)*value))
       ++value;
    run_texture_audit(value && *value ? value : "texture-audit.log");
+}
+
+// ---- testing: god mode, noclip, teleport, and the ray tracer's test sites ----
+
+static void console_god(char* value)
+{
+   int state = console_on_off(value, !gConsoleImmune);
+   if (state < 0)
+   {
+      console_message("Usage: god [on/off]");
+      return;
+   }
+   gConsoleImmune = state;
+   console_message("God mode %s.", state ? "on (no damage)" : "off");
+}
+
+static void console_noclip(char* value)
+{
+   static BOOL s_noclip = FALSE;
+   int state = console_on_off(value, !s_noclip);
+   if (state < 0)
+   {
+      console_message("Usage: noclip [on/off]");
+      return;
+   }
+   s_noclip = state;
+   char on[] = "on", off[] = "off";
+   console_flying(state ? on : off);
+   console_player_physics(state ? off : on);
+   console_message("Noclip %s.", state ? "on: fly through walls (jump/crouch: up/down)" : "off");
+}
+
+static void place_player(const mxs_vector* pos, float heading)
+{
+   if (!PlayerObjectExists())
+      return;
+   mxs_angvec fac;
+   fac.tx = 0;
+   fac.ty = 0;
+   fac.tz = (mxs_ang)(int)(heading * 65536.0f / 360.0f);
+   AutoAppIPtr(GameTools);
+   pGameTools->TeleportObject(PlayerObject(), pos, &fac, OBJ_NULL);
+}
+
+static void console_teleport(char* value)
+{
+   float x, y, z, h = -1000.0f;
+   if (!value || (sscanf(value, "%f %f %f %f", &x, &y, &z, &h) < 3 &&
+                  sscanf(value, "%f,%f,%f,%f", &x, &y, &z, &h) < 3))
+   {
+      console_message("Usage: teleport x y z [heading]   (feet, as whereami gives them)");
+      return;
+   }
+   mxs_vector pos;
+   mx_mk_vec(&pos, x, y, z);
+   if (h < -999.0f)
+   {
+      ObjPos* now = PlayerObjectExists() ? ObjPosGet(PlayerObject()) : NULL;
+      h = now ? now->fac.tz * (360.0f / 65536.0f) : 0.0f;
+   }
+   place_player(&pos, h);
+   console_message("Teleported to %.1f %.1f %.1f.", x, y, z);
+}
+
+static void console_whereami(void)
+{
+   if (!PlayerObjectExists())
+      return;
+   ObjPos* pos = ObjPosGet(PlayerObject());
+   if (!pos)
+      return;
+   const sMissionData* mission = GetMissionData();
+   char line[160];
+   _snprintf(line, sizeof(line) - 1, "Mission %d, at %.1f %.1f %.1f, heading %.0f",
+             mission ? mission->num : 0, pos->loc.vec.x, pos->loc.vec.y, pos->loc.vec.z,
+             pos->fac.tz * (360.0f / 65536.0f));
+   line[sizeof(line) - 1] = '\0';
+   console_message("%s (teleport %.1f %.1f %.1f)", line, pos->loc.vec.x, pos->loc.vec.y, pos->loc.vec.z);
+   FILE* log = fopen("thief-console.log", "a");
+   if (log)
+   {
+      fprintf(log, "%s\n", line);
+      fclose(log);
+   }
+}
+
+// Where to see the ray tracer's effects (Thief Gold, its HD Mod's missions):
+// the mission, and an object of an archetype in it, or a texture on its walls
+struct sRtTestSite
+{
+   const char* name;
+   int mission;
+   char kind;            // 'o' an object of this archetype, 't' a wall or floor with this texture
+   const char* match;
+   const char* what;
+};
+
+static const sRtTestSite gRtTestSites[] =
+{
+   { "lava",          9,  't', "waterhw\\l3out", "The Lost City: lava (glow, flow, its light)" },
+   { "elemental",     9,  'o', "FireElement",    "The Lost City: a fire elemental" },
+   { "firemage",      9,  'o', "FireMage",       "The Lost City: a fire mage (his fireballs)" },
+   { "magetowers",    16, 'o', "FireMage",       "The Mage Towers: a fire mage (his fireballs)" },
+   { "priest",        3,  'o', "ham priest",     "Cragscleft: a Hammerite priest (his fireballs)" },
+   { "firearrow",     4,  'o', "firearr",        "The Bonehoard: fire arrows (shoot one)" },
+   { "flash",         5,  'o', "Flashbomb",      "Assassins: flash bombs (throw one)" },
+   { "mine",          15, 'o', "Mine",           "The Thieves' Guild: explosive mines (throw or trip one)" },
+   { "gasmine",       12, 'o', "GasMine",        "Escape!: gas mines (the gas cloud)" },
+   { "gasarrow",      9,  'o', "GasArrow",       "The Lost City: gas arrows (the gas cloud)" },
+   { "coals",         5,  't', "firepl02",       "Assassins: a fireplace with its fire" },
+   { "firecrystal",   4,  'o', "FireCrystal",    "The Bonehoard: a fire crystal" },
+   { "watercrystal",  4,  'o', "WaterCrystal",   "The Bonehoard: a water crystal" },
+   { "earthcrystal",  3,  'o', "EarthCrystal",   "Cragscleft: an earth crystal" },
+   { "aircrystal",    12, 'o', "AirCrystal",     "Escape!: an air crystal" },
+   { "talisman",      9,  'o', "FireTalisman",   "The Lost City: the Talisman of Fire" },
+   { "watertalisman", 17, 'o', "H2OTalisman",    "Song of the Caverns: the Talisman of Water" },
+   { "airtalisman",   10, 'o', "AirTalisman",    "Undercover: the Talisman of Air" },
+   { "earthtalisman", 11, 'o', "EarthTalisman",  "Return to the Cathedral: the Talisman of Earth" },
+   { "portal",        14, 'o', "MawPortal",      "The Maw of Chaos: the Trickster's portal" },
+   { "eye",           7,  'o', "TheEye",         "The Haunted Cathedral: the Eye" },
+   { "gem",           9,  'o', "LC_Gem",         "The Lost City: its gems" },
+   { "arc",           3,  'o', "BigZapArc",      "Cragscleft: the electric arc" },
+   { "lamp",          3,  'o', "HangSpotFlush",  "Cragscleft: a flickering lamp" },
+};
+
+static const sRtTestSite* gRtTestPending = NULL;
+static int gRtTestPendingIndex = 1;
+static int gRtTestPendingFrames = 0;
+
+static BOOL rt_test_target(const sRtTestSite* site, int index, mxs_vector* target, mxs_vector* normal, int* count)
+{
+   mx_mk_vec(normal, 0.0f, 0.0f, 1.0f);
+   int n = 0;
+   BOOL found = FALSE;
+   *count = 0;
+   if (site->kind == 'o')
+   {
+      AutoAppIPtr_(ObjectSystem, pObjectSystem);
+      AutoAppIPtr(TraitManager);
+      AutoAppIPtr(ContainSys);
+      IObjectQuery* objects = pObjectSystem->Iter(kObjectConcrete);
+      for (; !objects->Done(); objects->Next())
+      {
+         ObjID object = objects->Object();
+         ObjID arch = pTraitManager->GetArchetype(object);
+         const char* archName = arch ? pObjectSystem->GetName(arch) : NULL;
+         if (!archName || _stricmp(archName, site->match))
+            continue;
+         if (pContainSys->GetContainer(object) != OBJ_NULL)
+            continue;
+         mxs_vector* position = ObjPosGetLocVector(object);
+         if (!position)
+            continue;
+         ++n;
+         if (n == index)
+         {
+            *target = *position;
+            found = TRUE;
+         }
+      }
+      objects->Release();
+   }
+   else
+   {
+      for (int c = 0; c < wr_num_cells; ++c)
+      {
+         PortalCell* cell = WR_CELL(c);
+         if (!cell || !cell->render_list)
+            continue;
+         int voff = 0;
+         for (int p = 0; p < cell->num_polys; ++p)
+         {
+            const int nv = cell->poly_list[p].num_vertices;
+            if (p < cell->num_render_polys)
+            {
+               const int texture = cell->render_list[p].texture_id;
+               IRes* resource = (texture > 0 && texture < TEXMEM_MAX) ? texmemGetHandle(texture) : NULL;
+               char* canonical = NULL;
+               if (resource)
+                  IRes_GetCanonPathName(resource, &canonical);
+               if (canonical)
+               {
+                  for (char* ch = canonical; *ch; ++ch)
+                     *ch = (char)tolower((unsigned char)*ch);
+                  char want[64];
+                  _snprintf(want, sizeof(want) - 1, "%s", site->match);
+                  want[sizeof(want) - 1] = '\0';
+                  for (char* ch = want; *ch; ++ch)
+                     *ch = (char)tolower((unsigned char)*ch);
+                  if (strstr(canonical, want))
+                  {
+                     ++n;
+                     // (one face in each ten: a wall or a river is many faces)
+                     if (n == 1 + (index - 1) * 10)
+                     {
+                        mxs_vector sum = { 0, 0, 0 };
+                        for (int k = 0; k < nv; ++k)
+                        {
+                           mxs_vector* v = &cell->vpool[cell->vertex_list[voff + k]];
+                           sum.x += v->x; sum.y += v->y; sum.z += v->z;
+                        }
+                        mx_scale_vec(target, &sum, 1.0f / nv);
+                        *normal = cell->plane_list[cell->poly_list[p].planeid].normal;
+                        // (its normal turned toward the cell the face belongs to:
+                        // the side it is seen from)
+                        mxs_vector probe = *target;
+                        mx_scale_addeq_vec(&probe, normal, 0.5f);
+                        Location probeLoc;
+                        MakeLocationFromVector(&probeLoc, &probe);
+                        if (CellFromLoc(&probeLoc) != c)
+                           mx_scaleeq_vec(normal, -1.0f);
+                        found = TRUE;
+                     }
+                  }
+                  free(canonical);
+               }
+            }
+            voff += nv;
+         }
+      }
+      n = (n + 9) / 10;
+   }
+   *count = n;
+   return found;
+}
+
+// a place to stand a little way from it, on a floor, with nothing between
+// (1 placed, 0 none found there, -1 none of them in the mission at all)
+static int rt_test_spot(const sRtTestSite* site, int index, int* count, BOOL lastTry)
+{
+   mxs_vector target;
+   mxs_vector normal;
+   *count = 0;
+   if (!rt_test_target(site, index, &target, &normal, count))
+      return -1;
+   const BOOL overLiquid = site->kind == 't' && strstr(site->match, "waterhw");
+   static const float radii[] = { 8.0f, 11.0f, 6.0f, 14.0f, 4.0f };
+   // (a wall's or floor's face: from a little way out of it)
+   mxs_vector from = target;
+   if (site->kind == 't')
+      mx_scale_addeq_vec(&from, &normal, overLiquid ? 4.0f : 2.0f);
+   else
+      from.z += 1.0f;
+   Location fromLoc;
+   MakeLocationFromVector(&fromLoc, &from);
+   for (int r = 0; r < (int)(sizeof(radii) / sizeof(radii[0])); ++r)
+      for (int d = 0; d < 8; ++d)
+      {
+         const float a = d * 3.14159265f / 4.0f;
+         mxs_vector spot = from;
+         spot.x += radii[r] * cosf(a);
+         spot.y += radii[r] * sinf(a);
+         Location spotLoc, hit;
+         MakeLocationFromVector(&spotLoc, &spot);
+         if (CellFromLoc(&spotLoc) == CELL_INVALID)
+            continue;
+         if (!PortalRaycast(&fromLoc, &spotLoc, &hit, 0))
+            continue;   // (a wall between)
+         mxs_vector below = spot;
+         below.z -= 30.0f;
+         Location belowLoc;
+         MakeLocationFromVector(&belowLoc, &below);
+         if (PortalRaycast(&spotLoc, &belowLoc, &hit, 0))
+            continue;   // (no floor under it)
+         if (overLiquid && hit.vec.z < target.z + 0.5f)
+            continue;   // (the lava itself)
+         mxs_vector stand = hit.vec;
+         stand.z += 3.5f;
+         const float heading = atan2f(target.y - stand.y, target.x - stand.x) * 180.0f / 3.14159265f;
+         place_player(&stand, heading);
+         console_message("%s (%d of %d): at %.0f %.0f %.0f.", site->what, index, *count,
+                         target.x, target.y, target.z);
+         return 1;
+      }
+   if (!lastTry)
+      return 0;
+   // (nowhere to stand found: over it, flying)
+   mxs_vector over = target;
+   over.z += 5.0f;
+   char on[] = "on";
+   console_flying(on);
+   place_player(&over, 0.0f);
+   console_message("%s (%d of %d): over it, flying (flying off to land).", site->what, index, *count);
+   return 1;
+}
+
+// the one asked for, or the next with somewhere to stand
+static void rt_test_place(const sRtTestSite* site, int index)
+{
+   int count = 0;
+   const int got = rt_test_spot(site, index, &count, FALSE);
+   if (got == 1)
+      return;
+   if (got < 0)
+   {
+      if (count)
+         console_message("%s: there are %d of them here (rt_test %s 1..%d).", site->what, count, site->name, count);
+      else
+         console_message("%s: none found in this mission.", site->what);
+      return;
+   }
+   for (int k = 1; k < count && k < 40; ++k)
+   {
+      int c = 0;
+      if (rt_test_spot(site, (index - 1 + k) % count + 1, &c, FALSE) == 1)
+         return;
+   }
+   rt_test_spot(site, index, &count, TRUE);
+}
+
+static void console_rt_test(char* value)
+{
+   char name[64] = "";
+   int index = 1;
+   if (value)
+      sscanf(value, "%63s %d", name, &index);
+   if (index < 1)
+      index = 1;
+   if (!name[0])
+   {
+      FILE* log = fopen("thief-console.log", "a");
+      if (log)
+         fprintf(log, "\nRay tracing test sites (rt_test <name> [number]):\n");
+      for (int i = 0; i < (int)(sizeof(gRtTestSites) / sizeof(gRtTestSites[0])); ++i)
+      {
+         mprintf("%-14s %s (mission %d)\n", gRtTestSites[i].name, gRtTestSites[i].what, gRtTestSites[i].mission);
+         if (log)
+            fprintf(log, "%-14s %s (mission %d)\n", gRtTestSites[i].name, gRtTestSites[i].what,
+                    gRtTestSites[i].mission);
+      }
+      if (log)
+         fclose(log);
+      console_message("rt_test <name> [number]: lava, elemental, firemage, priest, firearrow, flash, mine, "
+                      "gasmine, coals, firecrystal, talisman, portal, eye, gem, arc... (all in thief-console.log)");
+      return;
+   }
+   const sRtTestSite* site = NULL;
+   for (int i = 0; i < (int)(sizeof(gRtTestSites) / sizeof(gRtTestSites[0])); ++i)
+      if (!_stricmp(name, gRtTestSites[i].name))
+         site = &gRtTestSites[i];
+   if (!site)
+   {
+      console_message("No test site %s (rt_test alone lists them).", name);
+      return;
+   }
+   const sMissionData* mission = GetMissionData();
+   if (mission && mission->num == site->mission)
+   {
+      rt_test_place(site, index);
+      return;
+   }
+   // the mission first: there once it has loaded
+   gRtTestPending = site;
+   gRtTestPendingIndex = index;
+   gRtTestPendingFrames = 0;
+   char number[16];
+   _snprintf(number, sizeof(number), "%d", site->mission);
+   console_message("%s: opening mission %d...", site->what, site->mission);
+   console_open_mission(number);
+}
+
+static void rt_test_frame(void)
+{
+   // (rt_test=<name> on the command line: once the mission is in)
+   static BOOL s_startTried = FALSE;
+   if (!s_startTried && PlayerObjectExists() && wr_num_cells > 0)
+   {
+      char start[80];
+      s_startTried = TRUE;
+      if (config_get_raw("rt_test", start, sizeof(start)))
+      {
+         start[sizeof(start) - 1] = '\0';
+         for (char* ch = start; *ch; ++ch)
+            if (*ch == ',')
+               *ch = ' ';
+         console_rt_test(start);
+      }
+   }
+   if (!gRtTestPending || !PlayerObjectExists() || wr_num_cells <= 0)
+      return;
+   const sMissionData* mission = GetMissionData();
+   if (!mission || mission->num != gRtTestPending->mission)
+      return;
+   // (a few frames in: the player set down by the mission's start)
+   if (++gRtTestPendingFrames < 20)
+      return;
+   const sRtTestSite* site = gRtTestPending;
+   gRtTestPending = NULL;
+   rt_test_place(site, gRtTestPendingIndex);
 }
 
 static void console_list_scripts(void)
@@ -1054,6 +1543,11 @@ static Command thief_console_commands[] =
    { "audit_textures", FUNC_STRING, console_texture_audit, "audit_textures [output file]" },
    { "list_scripts", FUNC_VOID,   console_list_scripts,  "list loaded script classes" },
    { "debug_scripts", FUNC_STRING, console_debug_scripts, "debug_scripts [on/off]" },
+   { "god",          FUNC_STRING, console_god,           "god [on/off]: no damage" },
+   { "noclip",       FUNC_STRING, console_noclip,        "noclip [on/off]: fly through walls" },
+   { "teleport",     FUNC_STRING, console_teleport,      "teleport x y z [heading]" },
+   { "whereami",     FUNC_VOID,   console_whereami,      "where the player is (for teleport)" },
+   { "rt_test",      FUNC_STRING, console_rt_test,       "rt_test [name] [number]: go to a ray tracing test site" },
 };
 
 #endif // THIEF2_GAME
