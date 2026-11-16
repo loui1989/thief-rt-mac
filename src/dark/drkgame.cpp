@@ -1052,9 +1052,25 @@ static void run_survey(const char* path)
       mxs_vector* position = ObjPosGetLocVector(object);
       if (!position)
          continue;
-      fprintf(log, "OBJ %d \"%s\" \"%s\" \"%s\" %.1f %.1f %.1f\n", object,
+      AutoAppIPtr(ContainSys);
+      fprintf(log, "OBJ %d \"%s\" \"%s\" \"%s\" %.1f %.1f %.1f%s\n", object,
               name ? name : "", archName ? archName : "", model,
-              position->x, position->y, position->z);
+              position->x, position->y, position->z,
+              pContainSys->GetContainer(object) != OBJ_NULL ? " contained" : "");
+   }
+   objects->Release();
+   // the particle groups' kinds (archetypes too: a gas cloud is made when a
+   // gas arrow or mine goes off): how each is drawn, its colour, its picture
+   objects = pObjectSystem->Iter(kObjectAll);
+   for (; !objects->Done(); objects->Next())
+   {
+      ObjID object = objects->Object();
+      ParticleGroup* group = ObjGetParticleGroup(object);
+      const char* name = pObjectSystem->GetName(object);
+      if (group)
+         fprintf(log, "PGRP %d \"%s\" type %d colour %d %d %d alpha %d size %.2f bitmap \"%.16s\" n %d\n",
+                 object, name ? name : "", int(group->render_type), group->cr, group->cg, group->cb,
+                 group->ca, group->size, group->modelname, group->n);
    }
    objects->Release();
    for (int c = 0; c < wr_num_cells; ++c)
@@ -1081,8 +1097,8 @@ static void run_survey(const char* path)
                   mxs_vector* v = &cell->vpool[cell->vertex_list[voff + k]];
                   sum.x += v->x; sum.y += v->y; sum.z += v->z;
                }
-               fprintf(log, "TERR %d \"%s\" %.1f %.1f %.1f\n", texture, canonical,
-                       sum.x / n, sum.y / n, sum.z / n);
+               fprintf(log, "TERR %d \"%s\" %.1f %.1f %.1f medium %d\n", texture, canonical,
+                       sum.x / n, sum.y / n, sum.z / n, (int)cell->medium);
                free(canonical);
             }
          }
@@ -1205,7 +1221,8 @@ static const sRtTestSite gRtTestSites[] =
    { "flash",         5,  'o', "Flashbomb",      "Assassins: flash bombs (throw one)" },
    { "mine",          15, 'o', "Mine",           "The Thieves' Guild: explosive mines (throw or trip one)" },
    { "gasmine",       12, 'o', "GasMine",        "Escape!: gas mines (the gas cloud)" },
-   { "gasarrow",      9,  'o', "GasArrow",       "The Lost City: gas arrows (the gas cloud)" },
+   { "gasarrow",      17, 'o', "GasArrow",       "Song of the Caverns: a gas arrow (shoot it: the gas cloud)" },
+   { "moss",          13, 'o', "mosslump",       "Strange Bedfellows: moss (as a moss arrow leaves it)" },
    { "coals",         5,  't', "firepl02",       "Assassins: a fireplace with its fire" },
    { "firecrystal",   4,  'o', "FireCrystal",    "The Bonehoard: a fire crystal" },
    { "watercrystal",  4,  'o', "WaterCrystal",   "The Bonehoard: a water crystal" },
@@ -1430,7 +1447,7 @@ static void console_rt_test(char* value)
       if (log)
          fclose(log);
       console_message("rt_test <name> [number]: lava, elemental, firemage, priest, firearrow, flash, mine, "
-                      "gasmine, coals, firecrystal, talisman, portal, eye, gem, arc... (all in thief-console.log)");
+                      "gasmine, gasarrow, moss, coals, watercrystal, talisman, portal, eye, gem, arc... (all in thief-console.log)");
       return;
    }
    const sRtTestSite* site = NULL;

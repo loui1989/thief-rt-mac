@@ -524,6 +524,8 @@ struct RtTexture {
    bool hasAlpha = false;  // any texel not fully opaque
    bool cutout = false;    // any texel see-through (alpha < 50%)
    bool soft = false;      // its alpha a soft gradient, not a cut-out (a soot mark, a stain)
+   bool solidSoft = false; // soft, but a coloured shape, mostly over half opaque (the HD Mod's moss:
+                           // 80% opaque throughout): cut out at half, and lit, not a stain drawn unlit
    bool white = false;     // the 1x1 white "no texture" texture
    // its material maps being made (off the main thread), until they are done
    // it is given to RTGL1 as it is, under its plain name
@@ -670,6 +672,26 @@ void copy_pixels(RtTexture &t, int width, int height, const void *rgba, int rowB
          }
       }
       t.soft = some > 0 && part * 2 > some;
+   }
+   t.solidSoft = false;
+   if (t.soft) {
+      size_t some = 0, half = 0;
+      double c[3] = {0, 0, 0};
+      for (size_t i = 0; i + 3 < t.rgba.size(); i += 4) {
+         const uint8_t a = t.rgba[i + 3];
+         if (a < 16)
+            continue;
+         ++some;
+         if (a >= 128) {
+            ++half;
+            for (int k = 0; k < 3; ++k)
+               c[k] += t.rgba[i + k];
+         }
+      }
+      if (some > 0 && half * 10 >= some * 8) {
+         const double hi = std::max({c[0], c[1], c[2]}), lo = std::min({c[0], c[1], c[2]});
+         t.solidSoft = hi > 0 && hi - lo > 0.35 * hi;   // (a soot mark is grey: still a stain)
+      }
    }
    if (alpha)
       bleed_edges(t.rgba, width, height);
@@ -1425,6 +1447,44 @@ std::unordered_set<uint32_t> g_arcObjects;
 constexpr uint32_t kArcLightIds = 0x02000000u;
 void fx_reset();   // (a new world: the effects' objects and lava's lights forgotten)
 std::unordered_map<uint32_t, float> g_fxGlow; // this frame's effects' model glow, by object (fx_lights)
+// a gas cloud's particles (a gas arrow's, a gas mine's: their archetype says
+// "gas"): their olive colour passed for a flame's, and they were drawn as one --
+// a flame picture made from a faint disc, so nothing at all. The elemental
+// crystals: drawn solid -- the HD Mod's water crystal is a see-through vial
+// under an added shimmer, all of it drawn see-through: a glow, the crystal
+// itself next to invisible.
+extern "C" void RenderRTGameObjectKind(uint32_t obj, char *arch, int an, char *model, int mn);
+extern "C" int RenderRTGameObjectArchetype(uint32_t obj);
+// what an object is, by its archetype's name (and model's): 1 a gas cloud,
+// 2 an elemental crystal (as fx_classify has them), 0 neither -- known at once,
+// the first time it is drawn (fx_scan looks every few frames)
+int object_special(uint32_t obj)
+{
+   static std::unordered_map<uint32_t, std::pair<int, int>> s_known;   // object -> archetype, kind
+   if (!obj)
+      return 0;
+   const int arch = RenderRTGameObjectArchetype(obj);
+   auto it = s_known.find(obj);
+   if (it != s_known.end() && it->second.first == arch)
+      return it->second.second;
+   char a[128] = "", m[64] = "";
+   RenderRTGameObjectKind(obj, a, sizeof(a), m, sizeof(m));
+   std::string n(a), md(m);
+   for (char &ch : n)
+      ch = char(tolower((unsigned char)ch));
+   for (char &ch : md)
+      ch = char(tolower((unsigned char)ch));
+   int kind = 0;
+   if (n.find("gas") != std::string::npos && (md.empty() || md.find("particle") != std::string::npos))
+      kind = 1;
+   else if (n.find("crystal") != std::string::npos && !md.empty() && md != "arrow" &&
+            md.find("cryemit") == std::string::npos && md.find("particle") == std::string::npos)
+      kind = 2;
+   s_known[obj] = {arch, kind};
+   return kind;
+}
+bool object_is_gas(uint32_t obj) { return object_special(obj) == 1; }
+bool g_spriteGas = false;   // the sprite being drawn is a gas cloud's
 // a light's flame: the particle group whose flame was seen at it (a candle's
 // light, often a plain static one the game never turns off when the candle
 // is doused -- the flame went, its light and the candle's glow stayed)
@@ -3465,6 +3525,7 @@ struct WorldGroup {
    uint64_t givenSig = 0;            // all else it was last given with (world_prim_sig)
    int lmPage = -1;                  // the game's light: its lightmaps' page of the atlas
    int underWater = 0;               // under water: 0 not, else (its depth in 0.25 m steps) + 1
+   bool underside = false;           // a water surface's face seen from under it (facing down)
    std::vector<float> baseUv;        // the stand-in water's own texture coordinates (stand_in_water)
    std::vector<RgFloat2D> lmuv;      // and where on it, a u,v for each vertex
 };
@@ -3909,6 +3970,11 @@ void upload_world()
       // boosted on screen and animated, and lighting the room as an area),
       // not see-through water
       const bool lava = (g.flags & kRenderRTWorldWater) && is_lava(tex);
+      // (its face from under it, in the same place as the one on top: the two
+      // fought for each pixel -- black speckles and patches, changing as you
+      // moved. Nothing sees lava from below.)
+      if (lava && g.underside)
+         continue;
       if (lava) {
          flags &= ~RgMeshPrimitiveFlags(RG_MESH_PRIMITIVE_ALPHA_TESTED);
          flags |= RG_MESH_PRIMITIVE_LAVA;
@@ -7750,8 +7816,8 @@ bool smoke_from_sprite(RtTexture *tex, const char *name, const sRenderBackendVer
          why = "not soft: a picture, not a puff";
       else if (!why && st.centreAlpha < 0.05f)
          why = "clear in the middle (a ring)";
-      else if (!why && hi > 0.05f && hi - lo > 0.4f * hi && id.find("gas") == std::string::npos)
-         why = "coloured";   // (a gas cloud's green: smoke of its colour)
+      else if (!why && hi > 0.05f && hi - lo > 0.4f * hi && !g_spriteGas)
+         why = "coloured";   // (a gas cloud's: smoke of its colour)
       st.smoke = !why;
       fprintf(stderr, "Smoke: %s (%s): %s%s (colour %.2f %.2f %.2f, middle %.0f%% opaque, edge %.0f%%)\n",
               tex->name, tex->source.c_str(), st.smoke ? "volumetric smoke" : "stays a sprite: ",
@@ -7774,10 +7840,7 @@ bool smoke_from_sprite(RtTexture *tex, const char *name, const sRenderBackendVer
       alb[k] = std::clamp(c[k] * st.rgb[k], 0.02f, 0.95f);
    {
       const float hi = std::max({alb[0], alb[1], alb[2]}), lo = std::min({alb[0], alb[1], alb[2]});
-      std::string id = std::string(tex->name) + " " + tex->source;
-      for (char &ch : id)
-         ch = char(tolower((unsigned char)ch));
-      if (hi > 0.05f && hi - lo > 0.45f * hi && id.find("gas") == std::string::npos)
+      if (hi > 0.05f && hi - lo > 0.45f * hi && !g_spriteGas)
          return false;
    }
    // where it is and how big: the quad's middle, and its half width (the
@@ -8354,7 +8417,7 @@ void RenderRTDrawWorld(int primitive, const sRenderBackendVertex *v, const float
       d.color = (name && !sprite) ? pack_color(1, 1, 1, v[i].a)
                                   : pack_color(v[i].r, v[i].g, v[i].b, v[i].a);
    }
-   const bool softDecal = tex && tex->soft && g_blend == kRenderBackendBlendAlpha && !sprite;
+   const bool softDecal = tex && tex->soft && !tex->solidSoft && g_blend == kRenderBackendBlendAlpha && !sprite;
    if (g_RenderRTShadowOnly && softDecal)
       return;   // (a soft see-through stain casts no shadow)
    if (softDecal)
@@ -8377,7 +8440,8 @@ void RenderRTDrawWorld(int primitive, const sRenderBackendVertex *v, const float
       // A flame (a torch's, a candle's: warm and saturated, not grey smoke)
       // glows in its colour through an emission map of its own -- black
       // outside its soft shape, so no square. Its light is the torch's own.
-      if (tex) {
+      g_spriteGas = object_is_gas(g_currentObject);
+      if (tex && !g_spriteGas) {
          float c[3] = {0, 0, 0};
          for (int i = 0; i < count; ++i) {
             c[0] += v[i].r / count;
@@ -8427,7 +8491,7 @@ void RenderRTDrawWorld(int primitive, const sRenderBackendVertex *v, const float
       prim.flags |= RG_MESH_PRIMITIVE_TRANSLUCENT;
       prim.emissive = 1.0f;
    } else if (softDecal || (g_blend == kRenderBackendBlendAlpha && minAlpha < 0.99f &&
-              !(tex && tex->cutout && g_alphaTest && minAlpha >= 0.5f))) {
+              !(tex && tex->cutout && g_alphaTest && minAlpha >= 0.45f))) {
       // (a soft-edged stain -- soot behind a torch, alpha blended and
       // alpha tested in the game -- see-through as drawn: cut out at half
       // its alpha it was a hard black blot on the wall)
@@ -8435,9 +8499,20 @@ void RenderRTDrawWorld(int primitive, const sRenderBackendVertex *v, const float
       // (a cut-out texture drawn alpha-tested and a little see-through --
       // a tree's leaves at 0.68: The Black Parade's T2Tree2 -- is cut out,
       // not glass: as glass, its crossed layers of leaves flickered, sorted
-      // anew each frame and noisy, among the ones drawn whole)
+      // anew each frame and noisy, among the ones drawn whole; Assassins'
+      // bushes, at half -- 0.498, as the game gives it -- were see-through)
    } else if (tex && tex->cutout && (g_alphaTest || g_blend == kRenderBackendBlendAlpha)) {
       prim.flags |= RG_MESH_PRIMITIVE_ALPHA_TESTED;
+   }
+
+   // an elemental crystal: solid (its added shimmer stays see-through)
+   if (!sprite && g_currentObject && (prim.flags & RG_MESH_PRIMITIVE_TRANSLUCENT) &&
+       g_blend != kRenderBackendBlendAdd && object_special(g_currentObject) == 2) {
+      prim.flags &= ~RgMeshPrimitiveFlags(RG_MESH_PRIMITIVE_TRANSLUCENT);
+      if (tex && tex->cutout)
+         prim.flags |= RG_MESH_PRIMITIVE_ALPHA_TESTED;
+      for (int i = 0; i < count; ++i)
+         prim.verts[size_t(i)].color = pack_color(1, 1, 1, 1);
    }
 
    // a smoke or steam particle: a puff of the volume's smoke instead
@@ -9530,6 +9605,9 @@ void RenderRTWorldPolygonUnderWater(float depth)
    g_nextUnderWater = std::clamp(int(depth * kMetersPerUnit / 0.25f) + 1, 1, 15);
 }
 
+bool g_nextUnderside = false;
+void RenderRTWorldPolygonUnderside(void) { g_nextUnderside = true; }
+
 void RenderRTWorldPolygonFacing(float nx, float ny, float nz)
 {
    g_nextFacing[0] = nx;
@@ -9546,6 +9624,10 @@ void RenderRTWorldPolygon(int textureId, int flags, int count, const float *xyz,
    g_nextLmPage = -1;
    const int underWater = g_nextUnderWater;
    g_nextUnderWater = 0;
+   // (a water surface is two faces: the one seen from above, and the one
+   // from under it, in the water's cell -- kept apart: lava has no underside)
+   const bool underside = (flags & kRenderRTWorldWater) && g_nextUnderside;
+   g_nextUnderside = false;
    if (count < 3)
       return;
    // its block of the mission, by its first corner
@@ -9555,13 +9637,15 @@ void RenderRTWorldPolygon(int textureId, int flags, int count, const float *xyz,
    // (and by the page of the game's light its lightmaps are on)
    const uint64_t key = ((uint64_t(uint32_t(textureId) & 0xffffu) << 48) | (uint64_t(flags & 0x0f) << 44) |
                          (uint64_t(lmPage + 1) << 39) | chunk) ^
-                        (uint64_t(underWater) * 0x9e3779b97f4a7c15ull);   // (and by its depth under water)
+                        (uint64_t(underWater) * 0x9e3779b97f4a7c15ull) ^   // (and by its depth under water)
+                        (underside ? 0x5bd1e9955bd1e995ull : 0ull);
    auto found = g_worldIndex.find(key);
    if (found == g_worldIndex.end()) {
       found = g_worldIndex.emplace(key, g_world.size()).first;
       g_world.push_back(WorldGroup{textureId, flags, {}, {}});
       g_world.back().lmPage = lmPage;
       g_world.back().underWater = underWater;
+      g_world.back().underside = underside;
    }
    WorldGroup &g = g_world[found->second];
    if (lmPage >= 0)
@@ -10749,6 +10833,7 @@ void fx_burst(const float pos[3], const float rgb[3], float peak, float life)
    b.life = life;
    b.start = now_seconds();
    g_fxBursts.push_back(b);
+   g_lightEventFrames = 10;   // (the denoiser lets go: the flash seen at once, not smeared in)
 }
 
 void fx_push(uint32_t id, const float pos[3], const float rgb[3], float level, float size)
@@ -10799,11 +10884,11 @@ void fx_lights()
             const bool flying = t - f.lastMoved < 0.6;
             static const float kHit[3] = {1.0f, 0.55f, 0.20f};
             if (f.kind == kFxFlash && (flying || away > 6.0f))
-               fx_burst(f.pos, f.rgb, 8000.0f, 0.35f);
+               fx_burst(f.pos, f.rgb, 60000.0f, 0.7f);
             else if (f.kind == kFxMine && (flying || away > 5.0f))
-               fx_burst(f.pos, f.rgb, 4000.0f, 0.6f);
+               fx_burst(f.pos, f.rgb, 20000.0f, 0.8f);
             else if (f.kind == kFxFireBolt || (f.kind == kFxFireArrow && flying))
-               fx_burst(f.pos, kHit, 2500.0f, 0.35f);
+               fx_burst(f.pos, kHit, 5000.0f, 0.5f);
          }
          it = g_fx.erase(it);
          continue;
@@ -10860,8 +10945,9 @@ void fx_lights()
          it = g_fxBursts.erase(it);
          continue;
       }
-      // at full at once, then dying away
-      const float level = std::exp(-3.0f * age / it->life);
+      // at full at once, held a moment (a tenth of its life), then dying away
+      const float hold = 0.1f * it->life;
+      const float level = age < hold ? 1.0f : std::exp(-4.0f * (age - hold) / (it->life - hold));
       float c[3];
       for (int k = 0; k < 3; ++k)
          c[k] = it->rgb[k] * it->peak;
@@ -10886,7 +10972,7 @@ void build_lava_lights()
       if (!(g.flags & kRenderRTWorldWater))
          continue;
       auto found = g_worldTextures.find(g.textureId);
-      if (found == g_worldTextures.end() || !is_lava(found->second))
+      if (found == g_worldTextures.end() || !is_lava(found->second) || g.underside)
          continue;
       for (size_t k = 0; k + 2 < g.indices.size(); k += 3) {
          const float *a = g.verts[g.indices[k]].position, *b = g.verts[g.indices[k + 1]].position,
@@ -11174,7 +11260,11 @@ void flush_lights()
          if (it == s_fade.end()) {
             if (!first && s_dimBefore.count(L.id) && !light_flickers(L.id))
                g_lightEventFrames = 10;   // lit in the game (not a flicker's coming on)
-            it = s_fade.emplace(L.id, (first || s_dimBefore.count(L.id)) ? 1.0f : 0.0f).first;
+            // (an effect's light -- a flash, a fireball, an arc -- at full at
+            // once: faded in over 0.6 s, a flash bomb's third of a second
+            // never reached a tenth of its strength)
+            const bool effect = L.id >= kArcLightIds && L.id < 0x05000000u;
+            it = s_fade.emplace(L.id, (first || effect || s_dimBefore.count(L.id)) ? 1.0f : 0.0f).first;
          }
          it->second = std::min(1.0f, it->second + step);
          upload_scaled(L, it->second);

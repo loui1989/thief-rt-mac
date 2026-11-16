@@ -2363,6 +2363,8 @@ static void portal_rt_submit_world(void)
                if (water_top[c] - z > 0.0f)
                   RenderRTWorldPolygonUnderWater(water_top[c] - z);
             }
+            if ((flags & kRenderRTWorldWater) && r->medium == 2)
+               RenderRTWorldPolygonUnderside();
             RenderRTWorldPolygon(stand_in ? PORTAL_RT_STAND_IN_WATER : tid, flags, n, xyz, uv);
             if (!(flags & kRenderRTWorldSky) && !portal_rt_is_sky(tid) &&
                 tid < PORTAL_RT_MAX_TEXTURE_IDS) {

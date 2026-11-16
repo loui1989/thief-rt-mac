@@ -128,6 +128,8 @@ void RenderRTWorldPolygonFacing(float nx, float ny, float nz);
 // by it, seen from above it (an untextured water surface is not drawn: the
 // game draws none -- the water's haze over what is under it is all it shows)
 void RenderRTWorldPolygonUnderWater(float depth);
+// the next polygon: a water surface seen from under it (its cell is the water)
+void RenderRTWorldPolygonUnderside(void);
 // the mission's water colour (0-255 each), for that haze
 void RenderRTWorldWaterColor(int r, int g, int b);
 // The game's own light on the next polygon (its lightmap: the light the light
