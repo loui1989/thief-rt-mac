@@ -210,6 +210,9 @@ float env_float(const char *name, float fallback)
 }
 
 const Settings kDefaults;
+// the build as shipped (the launcher's launch.sh: THIEF_RT_SHIPPING=1): the frame counter
+// shows the frame rate alone, and the performance log (where a frame's time goes) is out
+bool g_shipping = false;
 
 std::string settings_path()
 {
@@ -4044,6 +4047,9 @@ bool Wanted()
 bool Open(SDL_Window *window)
 {
    load_settings();
+   g_shipping = env_float("THIEF_RT_SHIPPING", 0) != 0;
+   if (g_shipping)
+      g_cfg.perfLog = false;
    // a quality preset chosen in the launcher (THIEF_RT_PRESET: low, medium, high, ultra)
    if (const char *want = getenv("THIEF_RT_PRESET"); want && *want) {
       const int p = preset_by_name(want);
@@ -4943,7 +4949,8 @@ std::vector<int> visible_rows()
    std::vector<int> rows(std::begin(kMainRows), std::end(kMainRows));
    if (g_devRows) {
       for (int r = 0; r < kRowCount; ++r)
-         if (std::find(std::begin(kMainRows), std::end(kMainRows), r) == std::end(kMainRows))
+         if (std::find(std::begin(kMainRows), std::end(kMainRows), r) == std::end(kMainRows) &&
+             !(g_shipping && r == kRowPerf))
             rows.push_back(r);
    }
    return rows;
@@ -5899,7 +5906,13 @@ void draw_ui(bool scene)
       bg.insert(bg.end(), q, q + 6);
    };
 
-   if (g_cfg.fps) {
+   if (g_cfg.fps && g_shipping) {
+      char line[64];
+      snprintf(line, sizeof(line), "%3.0f fps  %5.1f ms", g_ui.fps, g_ui.frameMs);
+      const float s = std::round(px * 0.8f);
+      panel(0, 0, text_width(s, line) + 2 * pad, s + pad, 0.6f);
+      text(fg, pad, pad * 0.5f, s, line, white);
+   } else if (g_cfg.fps) {
       int w, h;
       render_size(w, h);
       char line[128], line2[192];
