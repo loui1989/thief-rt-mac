@@ -1399,6 +1399,12 @@ std::unordered_map<uint32_t, std::vector<uint32_t>> g_ownedLights;
 // the light it gave stayed steady. (Not a flame's: torches keep their easing,
 // and their own flicker, flame_noise.)
 std::unordered_set<uint32_t> g_snapLights;
+// Electric arcs (a "zap" model, its see-through electric texture: BigZapArc in
+// the Thief Gold mines): their light is blue-white and flashes as an arc does --
+// the light the mission put at one (white, steady) given that colour and
+// flicker, or one of its own when it has none (arc_lights)
+std::unordered_set<uint32_t> g_arcObjects;
+constexpr uint32_t kArcLightIds = 0x02000000u;
 // a light's flame: the particle group whose flame was seen at it (a candle's
 // light, often a plain static one the game never turns off when the candle
 // is doused -- the flame went, its light and the candle's glow stayed)
@@ -8416,6 +8422,21 @@ void RenderRTDrawWorld(int primitive, const sRenderBackendVertex *v, const float
    // behind a torch at Reflections in Red's cemetery gate was a glaring
    // orange block over the view whenever one came near it.)
    const bool clearGlass = (prim.flags & RG_MESH_PRIMITIVE_TRANSLUCENT) && tex && (tex->cutout || tex->soft);
+   // an electric arc: a see-through electric picture on a model
+   if (g_currentObject && !sprite && !g_RenderRTShadowOnly && (prim.flags & RG_MESH_PRIMITIVE_TRANSLUCENT) &&
+       !g_arcObjects.count(g_currentObject)) {
+      std::string n = name ? name : prim.texture;
+      for (char &ch : n)
+         ch = char(tolower((unsigned char)ch));
+      if (n.find("elec_") != std::string::npos || n.find("/elec") != std::string::npos ||
+          n.find("zap") != std::string::npos) {
+         g_arcObjects.insert(g_currentObject);
+         char on[128];
+         RenderRTGameObjectName(g_currentObject, on, sizeof(on));
+         fprintf(stderr, "RT: electric arc: %s (object %u, %s): its light blue and flashing\n", on,
+                 unsigned(g_currentObject), n.c_str());
+      }
+   }
    if (clearGlass && g_cfg.glow > 0.0f && allWhite && name && !sprite && !g_RenderRTShadowOnly) {
       static std::unordered_set<std::string> s_told;
       if (s_told.insert(name).second)
@@ -9389,6 +9410,7 @@ void RenderRTWorldBegin(uint32_t serial)
    g_lightState.clear();
    g_ownedLights.clear();
    g_snapLights.clear();
+   g_arcObjects.clear();
    g_lightFlameObj.clear();
    // a new world (a mission or a saved game loaded): the models kept from the
    // last one are not this one's, though some have the same numbers and places
@@ -10420,6 +10442,80 @@ void upload_moon()
       ++g_frameLights;
 }
 
+// An arc's flashing: jumps 24 times a second, now and then out for a moment,
+// and a few times a second a bright flash (0..1.6)
+float hash01(uint32_t a, uint32_t b)
+{
+   uint32_t h = a * 0x9E3779B1u ^ (b + 0x7F4A7C15u) * 0x85EBCA77u;
+   h ^= h >> 15;
+   h *= 0x2C1B3C6Du;
+   h ^= h >> 12;
+   h *= 0x297A2D39u;
+   h ^= h >> 15;
+   return float(h & 0xFFFFFFu) / 16777216.0f;
+}
+float arc_flash(uint32_t obj)
+{
+   const double t = now_seconds();
+   const uint32_t step = uint32_t(int64_t(t * 24.0));
+   float level = 0.35f + 0.65f * std::pow(hash01(step, obj), 0.7f);
+   if (hash01(step, obj + 3u) < 0.12f)
+      level = 0.08f;
+   const double b = t * 3.0;
+   if (hash01(uint32_t(int64_t(b)), obj + 7u) > 0.75f && b - std::floor(b) < 0.12)
+      level = 1.6f;
+   return level;
+}
+
+// the arcs' lights (g_arcObjects): blue-white, flashing; the mission's own light
+// at an arc (within 75 cm) made so, or one of the arc's own
+void arc_lights()
+{
+   if (g_arcObjects.empty())
+      return;
+   static const float kArc[3] = {0.55f, 0.75f, 1.0f};
+   for (uint32_t obj : g_arcObjects) {
+      auto it = g_objects.find(obj);
+      if (it == g_objects.end())
+         continue;
+      const float *c = it->second.center;
+      const float flash = arc_flash(obj);
+      bool found = false;
+      for (PendingLight &L : g_pendingLights) {
+         if (L.id >= 0x10000u)
+            continue;
+         const RgFloat3D p = to_rt(L.pos);
+         const float dx = p.data[0] - c[0], dy = p.data[1] - c[1], dz = p.data[2] - c[2];
+         if (dx * dx + dy * dy + dz * dz > 0.75f * 0.75f)
+            continue;
+         const float peak = std::max({L.rgb[0], L.rgb[1], L.rgb[2], 1.0f});
+         for (int k = 0; k < 3; ++k)
+            L.rgb[k] = peak * kArc[k] * flash;
+         L.peak = peak * flash;
+         g_snapLights.insert(L.id);
+         found = true;
+      }
+      if (!found) {
+         PendingLight L{};
+         L.id = kArcLightIds + obj;
+         for (int k = 0; k < 3; ++k) {
+            L.pos[k] = c[k] / kMetersPerUnit;
+            L.rgb[k] = 200.0f * kArc[k] * flash;
+            L.dir[k] = 0.0f;
+         }
+         L.radius = 0.0f;
+         L.inner = -1.0f;
+         L.outer = 0.0f;
+         L.peak = 200.0f * flash;
+         L.size = 0.15f;
+         L.reaches = true;
+         L.walk = -2.0f;
+         g_snapLights.insert(L.id);
+         g_pendingLights.push_back(L);
+      }
+   }
+}
+
 void flush_lights()
 {
    upload_moon();
@@ -10440,6 +10536,7 @@ void flush_lights()
          g_pendingLights.push_back(L);
       }
    }
+   arc_lights();
    g_lightsTotal = uint32_t(g_pendingLights.size());
    smooth_flicker();
    g_lastOffered = g_pendingLights;
