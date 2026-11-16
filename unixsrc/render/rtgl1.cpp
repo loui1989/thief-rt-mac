@@ -73,6 +73,7 @@ extern "C" void *sel_registerName(const char *name);
 extern "C" void objc_msgSend(void);
 #endif
 #include <limits.h>
+#include <strings.h>
 #include <sys/stat.h>
 #include <unistd.h>
 #include <zlib.h>
@@ -132,7 +133,7 @@ struct Settings {
    int water = 0;             // 0 translucent (as the game), 1 RTGL1 water, 2 opaque
    int gi = 0;                // bounce light: 0 two bounces at half rate (as Blood RT),
                               // 1 one bounce, 2 two bounces, 3 one bounce at half rate
-   bool volumetric = false;   // haze lit by every light
+   bool volumetric = true;    // haze lit by every light (the High preset's)
    bool thinSeeThrough = true;   // see-through models' faces thinned for the rays (thin_see_through)
    // the mission's sun's (moon's) shadow rays: 0 at every pixel; 1 a pixel of each 2x2
    // block a frame, in a pass of their own, smoothed (RTGL1 0033, ThiefSunShadow); 2 every
@@ -148,12 +149,13 @@ struct Settings {
    float sun = 1.0f;          // a Thief 2 mission's sunlight (its render parameters), times this (0 off)
    bool mfxDenoise = false;   // MetalFX's denoising upscaler in place of the path tracer's denoiser
    int fog = 2;               // the mission's fog: 0 off, 1 light, 2 as the mission, 3 thick
-   int dynres = 0;            // dynamic resolution's target fps, 0 off
-   int outputHeight = 0;      // the frame's height in pixels, 0 = the screen's own (Retina)
+   int dynres = 60;           // dynamic resolution's target fps, 0 off
+   int outputHeight = 1800;   // the frame's height in pixels, 0 = the screen's own (Retina);
+                              // a screen with fewer: its own
    bool perfLog = false;      // logs/perf.log: where each frame's time goes, every 2 s
    int frameCap = 60;         // the most frames a second (the game's own pacing: 60)
    bool frameGen = false;     // MetalFX frame interpolation: a frame made between each two (macOS 26)
-   int reach = 40;            // lights fade out with their walking distance (metres); 0: nearest maxLights
+   int reach = 30;            // lights fade out with their walking distance (metres); 0: nearest maxLights
    int maxLights = 64;        // lights given to the path tracer, nearest first; 0 all
    int flicker = 0;           // flickering lights: 0 smoothed, 1 as the game, 2 nearly steady
    bool smoothModels = true;  // models shaded smooth (their normals blended across edges to 60 degrees)
@@ -219,6 +221,99 @@ std::string settings_path()
 #else
    return std::string(home) + "/.config/dark-engine-restored/rt_settings.txt";
 #endif
+}
+
+// ---- quality presets --------------------------------------------------------
+// The settings that cost frame time, set together: Low, Medium, High (the
+// defaults: as the game was tuned on an M-series MacBook Pro), Ultra. Every
+// other setting (brightness, the look of things) is the player's and no preset
+// changes it. The panel's "Quality preset" shows the preset the settings match,
+// or Custom; the launcher sets one with THIEF_RT_PRESET (low, medium, high,
+// ultra) and reads the one in use from rt_settings.txt (quality_preset).
+struct Preset {
+   const char *name;
+   int upscale, outputHeight, dynres, gi;
+   int volumetric;   // 0 off, 1 moonlight's god rays only, 2 every light's
+   int reach, maxLights, candidates, neighbours, fogQuality;
+   bool fogLit;
+   float smoke, parallax;
+   bool polish;
+   int sunShadows;
+};
+const Preset kPresets[] = {
+   //  name      upscale out   dynres gi vol reach lights cand nbr fogQ fogLit smoke parallax polish sun
+   {"Low",       3,  1080, 60, 3, 0, 20, 32,  8,  3, 1, false, 0.0f, 0.0f,  false, 2},
+   {"Medium",    3,  1440, 60, 3, 1, 30, 48,  8,  5, 1, true,  1.0f, 0.03f, true,  1},
+   {"High",      3,  1800, 60, 0, 2, 30, 64,  12, 5, 1, true,  1.0f, 0.03f, true,  1},
+   {"Ultra",     2,  0,    60, 2, 2, 40, 96,  16, 8, 2, true,  1.0f, 0.03f, true,  0},
+};
+constexpr int kPresetCount = int(sizeof(kPresets) / sizeof(kPresets[0]));
+constexpr int kPresetHigh = 2;
+
+void apply_preset(int i)
+{
+   const Preset &p = kPresets[std::clamp(i, 0, kPresetCount - 1)];
+   g_cfg.upscale = p.upscale;
+   g_cfg.outputHeight = p.outputHeight;
+   g_cfg.dynres = p.dynres;
+   g_cfg.gi = p.gi;
+   g_cfg.volumetric = p.volumetric == 2;
+   g_cfg.moonShafts = p.volumetric == 1;
+   g_cfg.reach = p.reach;
+   g_cfg.maxLights = p.maxLights;
+   g_cfg.candidates = p.candidates;
+   g_cfg.neighbours = p.neighbours;
+   g_cfg.fogQuality = p.fogQuality;
+   g_cfg.fogLit = p.fogLit;
+   g_cfg.smoke = p.smoke;
+   g_cfg.parallax = p.parallax;
+   g_cfg.polish = p.polish;
+   g_cfg.sunShadows = p.sunShadows;
+}
+
+// what of the settings differs from preset i (empty: they match it)
+std::string preset_differences(int i)
+{
+   const Preset &p = kPresets[i];
+   std::string d;
+   auto add = [&](bool differs, const char *what) {
+      if (differs)
+         d += d.empty() ? what : std::string(", ") + what;
+   };
+   const int vol = g_cfg.volumetric ? 2 : g_cfg.moonShafts ? 1 : 0;
+   add(g_cfg.upscale != p.upscale, "upscale");
+   add(g_cfg.outputHeight != p.outputHeight, "output_height");
+   add(g_cfg.dynres != p.dynres, "dynres");
+   add(g_cfg.gi != p.gi, "gi");
+   add(vol != p.volumetric, "volumetric");
+   add(g_cfg.reach != p.reach, "reach");
+   add(g_cfg.maxLights != p.maxLights, "max_lights");
+   add(g_cfg.candidates != p.candidates, "light_candidates");
+   add(g_cfg.neighbours != p.neighbours, "light_neighbours");
+   add(g_cfg.fogQuality != p.fogQuality, "fog_quality");
+   add(g_cfg.fogLit != p.fogLit, "fog_lamps");
+   add(std::fabs(g_cfg.smoke - p.smoke) > 0.01f, "volumetric_smoke");
+   add(std::fabs(g_cfg.parallax - p.parallax) > 0.001f, "parallax");
+   add(g_cfg.polish != p.polish, "polish");
+   add(g_cfg.sunShadows != p.sunShadows, "sun_shadows");
+   return d;
+}
+
+// the preset the settings match: 0 Low .. 3 Ultra; -1 none (Custom)
+int current_preset()
+{
+   for (int i = 0; i < kPresetCount; ++i)
+      if (preset_differences(i).empty())
+         return i;
+   return -1;
+}
+
+int preset_by_name(const char *name)
+{
+   for (int i = 0; i < kPresetCount; ++i)
+      if (name && !strcasecmp(name, kPresets[i].name))
+         return i;
+   return -1;
 }
 
 constexpr float kDefaultsSpriteGlow = 1.0f;
@@ -371,6 +466,8 @@ void save_settings()
    fprintf(f, "fog_quality = %d\n", g_cfg.fogQuality);
    fprintf(f, "light_neighbours = %d\n", g_cfg.neighbours);
    fprintf(f, "reuse_models = %d\n", int(g_cfg.reuseModels));
+   // (for the launcher: the preset these settings are, 1 Low .. 4 Ultra, 0 Custom; not read back)
+   fprintf(f, "quality_preset = %d\n", current_preset() + 1);
    fclose(f);
 }
 
@@ -3947,6 +4044,24 @@ bool Wanted()
 bool Open(SDL_Window *window)
 {
    load_settings();
+   // a quality preset chosen in the launcher (THIEF_RT_PRESET: low, medium, high, ultra)
+   if (const char *want = getenv("THIEF_RT_PRESET"); want && *want) {
+      const int p = preset_by_name(want);
+      if (p >= 0) {
+         apply_preset(p);
+         save_settings();
+         fprintf(stderr, "RT: quality preset %s, from the launcher\n", kPresets[p].name);
+      } else {
+         fprintf(stderr, "RT: THIEF_RT_PRESET=%s is no preset (low, medium, high, ultra)\n", want);
+      }
+   }
+   {
+      const int p = current_preset();
+      if (p >= 0)
+         fprintf(stderr, "RT: quality preset: %s\n", kPresets[p].name);
+      else
+         fprintf(stderr, "RT: quality preset: Custom (from High: %s)\n", preset_differences(kPresetHigh).c_str());
+   }
    g_PlayerShadowAlert = g_cfg.shadowAlert;
    wd_start();
    // the Metal backend's GPU timeline, every 2 seconds, in the log
@@ -4798,21 +4913,42 @@ const char *kUpscaleNames[] = {"Off",
                                "MetalFX Custom"};
 
 enum UiRow {
-   kRowUpscale, kRowScale, kRowOutput, kRowDynres, kRowBounces, kRowReach, kRowLights, kRowLightFade, kRowCandidates, kRowNeighbours, kRowLightCull, kRowResponse, kRowFlicker, kRowVolumetric, kRowShafts, kRowFog, kRowFogLit, kRowFogQuality, kRowSmoke, kRowPlayerBody, kRowPlayerLegs, kRowShadowAlert, kRowTestMirror, kRowBloom, kRowVsync, kRowFrameCap,
+   kRowPreset, kRowUpscale, kRowScale, kRowOutput, kRowDynres, kRowBounces, kRowReach, kRowLights, kRowLightFade, kRowCandidates, kRowNeighbours, kRowLightCull, kRowResponse, kRowFlicker, kRowVolumetric, kRowShafts, kRowFog, kRowFogLit, kRowFogQuality, kRowSmoke, kRowPlayerBody, kRowPlayerLegs, kRowShadowAlert, kRowTestMirror, kRowBloom, kRowVsync, kRowFrameCap,
    kRowFps, kRowDetection, kRowGemScale, kRowGemMatch, kRowGemEase, kRowLight, kRowExposure, kRowDarkAdapt, kRowContrast, kRowAmbient, kRowAmbientFollow, kRowShadowCool, kRowSkySeen, kRowSky, kRowMoon, kRowMoonDir, kRowMoonHeight, kRowSun, kRowSunHalf, kRowLightSize, kRowRough, kRowSmooth, kRowSteady, kRowReuseModels, kRowFixtures, kRowFixtureLight, kRowSmallLamps, kRowLightFix, kRowGlow, kRowFlameGlow, kRowMaterials, kRowBump, kRowCrevice, kRowTexDetail, kRowParallax, kRowPolish, kRowWater, kRowUnderwater, kRowTracedSound, kRowHrtf,
-   kRowDebug, kRowThinSeeThrough, kRowFreeze, kRowTraceTest, kRowBackFaces, kRowReuse, kRowBlink, kRowPerf, kRowInspect, kRowSkipMission, kRowReset, kRowCount
+   kRowDebug, kRowThinSeeThrough, kRowFreeze, kRowTraceTest, kRowBackFaces, kRowReuse, kRowBlink, kRowPerf, kRowInspect, kRowSkipMission, kRowReset, kRowDev, kRowCount
 };
 
 const char *kRowLabels[kRowCount] = {
-   "Upscaler", "Render resolution", "Output resolution", "Dynamic resolution", "Bounce light", "Light reach", "Lights traced",
+   "Quality preset", "Upscaler", "Render resolution", "Output resolution", "Dynamic resolution", "Bounce light", "Light reach", "Lights traced",
    "Lights coming into range", "Lights tried per pixel", "  Lights shared with neighbours", "Lights behind walls", "Light changes", "Light flicker",
    "God rays (volumetric)", "  God ray strength", "Mission fog", "  Fog lit by the lamps", "  Lit fog quality", "Smoke and steam", "Garrett's shadow and reflection", "  Garrett himself seen", "  Guards notice his shadow", "  Test mirror", "Bloom", "VSync", "Frame rate limit", "FPS counter", "Light gem and guards", "  Light gem brightness", "  Light gem falloff", "  Light gem response", "Light brightness", "Darkest exposure", "  Eyes adjust to the dark", "  Deep shadows (display)", "Ambient light", "  Follows the game's light", "  Shadow colour", "Sky brightness (as seen)", "Sky light (on the level)", "Moonlight", "  Moon direction", "  Moon height", "Sunlight (Thief 2 missions)", "  Its shadows",
    "Light size (soft shadows)", "Surface roughness", "Model shading", "Model faces", "  Still models drawn once", "Torches and lamps", "Lamp and torch light", "Lamp reach", "Lights in walls", "Lamp glow", "Flame glow", "Materials", "Bumps", "Crevices", "Texture detail", "Parallax depth", "Polished reflections", "Water", "  Under water: brighter", "Traced sound (Steam Audio)", "  Headphone 3D sound (HRTF)",
-   "Debug view", "See-through faces for the rays", "Freeze scene (test)", "Tracing layout (test)", "Back faces (test)", "Light sampling (test)", "Blink nearest light (test)", "Performance log", "Inspect centre of view", "Skip to next mission (test)", "Reset to defaults",
+   "Debug view", "See-through faces for the rays", "Freeze scene (test)", "Tracing layout (test)", "Back faces (test)", "Light sampling (test)", "Blink nearest light (test)", "Performance log", "Inspect centre of view", "Skip to next mission (test)", "Reset to defaults", "Developer settings",
 };
 
+// The panel: the main settings, then "Developer settings" -- every other one,
+// the finer and the technical, shown when it is opened
+const int kMainRows[] = {
+   kRowPreset, kRowUpscale, kRowOutput, kRowDynres, kRowFrameCap, kRowVsync, kRowFps,
+   kRowLight, kRowAmbient, kRowExposure, kRowDarkAdapt, kRowContrast,
+   kRowVolumetric, kRowFog, kRowBloom, kRowWater, kRowPlayerBody,
+   kRowTracedSound, kRowHrtf, kRowReset, kRowDev,
+};
+bool g_devRows = false;   // "Developer settings" open (not kept)
+
+std::vector<int> visible_rows()
+{
+   std::vector<int> rows(std::begin(kMainRows), std::end(kMainRows));
+   if (g_devRows) {
+      for (int r = 0; r < kRowCount; ++r)
+         if (std::find(std::begin(kMainRows), std::end(kMainRows), r) == std::end(kMainRows))
+            rows.push_back(r);
+   }
+   return rows;
+}
+
 // rows that do something when chosen rather than having a value
-bool row_is_action(int row) { return row == kRowInspect || row == kRowSkipMission || row == kRowReset; }
+bool row_is_action(int row) { return row == kRowInspect || row == kRowSkipMission || row == kRowReset || row == kRowDev; }
 bool g_skipMission = false;   // (RenderRTTakeSkipMission)
 
 std::string row_value(int row)
@@ -4820,6 +4956,11 @@ std::string row_value(int row)
    char buf[96];
    int w, h;
    switch (row) {
+   case kRowPreset: {
+      const int p = current_preset();
+      return p >= 0 ? kPresets[p].name : "Custom";
+   }
+   case kRowDev: return g_devRows ? "Hide" : "Show more ...";
    case kRowUpscale: return kUpscaleNames[std::clamp(g_cfg.upscale, 0, 5)];
    case kRowScale:
       render_size(w, h);
@@ -5070,6 +5211,14 @@ void change_row(int row, int dir)
 {
    static const int kDynres[] = {0, 30, 40, 50, 60, 72, 90, 120};
    switch (row) {
+   case kRowPreset: {
+      // Low .. Ultra; from Custom, the nearest way from High
+      const int p = current_preset();
+      const int next = p < 0 ? (dir > 0 ? kPresetHigh : kPresetHigh - 1) : p + dir;
+      apply_preset(std::clamp(next, 0, kPresetCount - 1));
+      break;
+   }
+   case kRowDev: g_devRows = !g_devRows; return;   // not saved
    case kRowUpscale: g_cfg.upscale = (g_cfg.upscale + dir + 6) % 6; break;
    case kRowScale: {
       if (g_cfg.upscale >= 1 && g_cfg.upscale <= 4) {
@@ -5801,21 +5950,24 @@ void draw_ui(bool scene)
       // As many rows as fit the window; the list scrolls with the selection.
       const float chrome = rowH * 6.5f + 2 * pad;   // title, more-lines, help, note
       const int fit = std::max(4, int((g_drawableH * 0.94f - chrome) / rowH));
-      const int shown = std::min<int>(kRowCount, fit);
+      const std::vector<int> rows = visible_rows();
+      const int count = int(rows.size());
+      g_ui.row = std::clamp(g_ui.row, 0, count - 1);
+      const int shown = std::min<int>(count, fit);
       if (g_ui.row < g_ui.scroll)
          g_ui.scroll = g_ui.row;
       if (g_ui.row >= g_ui.scroll + shown)
          g_ui.scroll = g_ui.row - shown + 1;
-      g_ui.scroll = std::clamp(g_ui.scroll, 0, kRowCount - shown);
+      g_ui.scroll = std::clamp(g_ui.scroll, 0, count - shown);
       const float h = rowH * (shown + 6.5f) + 2 * pad;
       const float x0 = std::round((g_drawableW - w) * 0.5f);
       const float y0 = std::round((g_drawableH - h) * 0.5f);
       panel(x0, y0, x0 + w, y0 + h, 0.82f);
       float y = y0 + pad + rowH * 0.25f;
       text(fg, x0 + 2 * pad, y, px, "Ray tracing settings", gold);
-      if (shown < kRowCount) {
+      if (shown < count) {
          char where[32];
-         snprintf(where, sizeof(where), "%d / %d", g_ui.row + 1, int(kRowCount));
+         snprintf(where, sizeof(where), "%d / %d", g_ui.row + 1, count);
          const float ss = std::round(px * 0.75f);
          text(fg, x0 + w - 2 * pad - text_width(ss, where), y + (px - ss), ss, where, dim);
       }
@@ -5824,11 +5976,12 @@ void draw_ui(bool scene)
       if (g_ui.scroll > 0)
          text(fg, x0 + 2 * pad, y, ms, "... more above (Up / Page Up)", dim);
       y += rowH;
-      for (int r = g_ui.scroll; r < g_ui.scroll + shown; ++r) {
-         const bool sel = r == g_ui.row;
+      for (int i = g_ui.scroll; i < g_ui.scroll + shown; ++i) {
+         const int r = rows[i];
+         const bool sel = i == g_ui.row;
          if (sel)
             panel(x0 + pad, y - rowH * 0.18f, x0 + w - pad, y + px + rowH * 0.18f, 0.9f);
-         const uint32_t c = sel ? white : dim;
+         const uint32_t c = sel ? white : r == kRowDev ? gold : dim;
          text(fg, x0 + 2 * pad, y, px, kRowLabels[r], c);
          std::string v = row_value(r);
          if (sel && !row_is_action(r))
@@ -5836,7 +5989,7 @@ void draw_ui(bool scene)
          text(fg, x0 + 2 * pad + labelW, y, px, v.c_str(), sel ? gold : c);
          y += rowH;
       }
-      if (g_ui.scroll + shown < kRowCount)
+      if (g_ui.scroll + shown < count)
          text(fg, x0 + 2 * pad, y, ms, "... more below (Down / Page Down)", dim);
       y += rowH * 1.25f;
       const float s = std::round(px * 0.75f);
@@ -6958,6 +7111,9 @@ bool HandleKey(int scancode, int mods, bool down, bool repeat)
    }
    if (!g_ui.open || !down)
       return false;   // key releases always reach the game: no stuck keys
+   const std::vector<int> rows = visible_rows();
+   const int count = int(rows.size());
+   g_ui.row = std::clamp(g_ui.row, 0, count - 1);
    switch (scancode) {
    case SDL_SCANCODE_ESCAPE:
       if (!repeat) {
@@ -6965,16 +7121,16 @@ bool HandleKey(int scancode, int mods, bool down, bool repeat)
          panel_pause(false);
       }
       break;
-   case SDL_SCANCODE_UP: g_ui.row = (g_ui.row + kRowCount - 1) % kRowCount; break;
-   case SDL_SCANCODE_DOWN: g_ui.row = (g_ui.row + 1) % kRowCount; break;
+   case SDL_SCANCODE_UP: g_ui.row = (g_ui.row + count - 1) % count; break;
+   case SDL_SCANCODE_DOWN: g_ui.row = (g_ui.row + 1) % count; break;
    case SDL_SCANCODE_PAGEUP: g_ui.row = std::max(g_ui.row - 10, 0); break;
-   case SDL_SCANCODE_PAGEDOWN: g_ui.row = std::min(g_ui.row + 10, int(kRowCount) - 1); break;
+   case SDL_SCANCODE_PAGEDOWN: g_ui.row = std::min(g_ui.row + 10, count - 1); break;
    case SDL_SCANCODE_HOME: g_ui.row = 0; break;
-   case SDL_SCANCODE_END: g_ui.row = int(kRowCount) - 1; break;
-   case SDL_SCANCODE_LEFT: change_row(g_ui.row, -1); break;
+   case SDL_SCANCODE_END: g_ui.row = count - 1; break;
+   case SDL_SCANCODE_LEFT: change_row(rows[g_ui.row], -1); break;
    case SDL_SCANCODE_RIGHT:
    case SDL_SCANCODE_RETURN:
-   case SDL_SCANCODE_SPACE: change_row(g_ui.row, 1); break;
+   case SDL_SCANCODE_SPACE: change_row(rows[g_ui.row], 1); break;
    default: break;
    }
    return true;   // the game doesn't see keys pressed while the panel is open
