@@ -3761,13 +3761,14 @@ void upload_world()
       if (g.verts.empty())
          continue;
       if (g.flags & kRenderRTWorldSky) {
-         // The sky's own faces, while the moon is up: not seen (a ray that
-         // meets one sees the sky, as one that meets nothing) and no shadow,
-         // but there for the moon's test that its light came in through the
-         // sky -- not out of the level through a gap (sunRequireSky). All of
-         // them, near or far: few, and the moon's rays go a long way.
-         if (!sky_light_on())
-            continue;
+         // The sky's own faces (the "sky hack" texture): a ray that meets one
+         // sees the sky, and no shadow. They are walls the sky is painted on,
+         // as the game draws them: what is behind one is hidden -- given only
+         // while the moon was up (for its test that its light came in through
+         // the sky, not out of the level through a gap: sunRequireSky), the
+         // view saw through them, to bits of the level never meant to be seen
+         // (The Thief Gold HD Mod's training courtyard: pieces of roofs
+         // floating over it). All of them, near or far: few.
          auto skyPrim = RgMeshPrimitiveInfo{
             .sType = RG_STRUCTURE_TYPE_MESH_PRIMITIVE_INFO,
             .pNext = nullptr,
