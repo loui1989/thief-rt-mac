@@ -1392,6 +1392,13 @@ bool light_flickers(uint32_t id)
    return n >= 3;
 }
 std::unordered_map<uint32_t, std::vector<uint32_t>> g_ownedLights;
+// A lamp the game makes flicker (its anim light's mode: flicker, flip or
+// random -- a faulty electric lamp jumping between two brightnesses): its light
+// follows the game's at once, as its glowing glass does. Eased like a torch's,
+// the jumps (every few tens of ms) were averaged away: the glass flickered and
+// the light it gave stayed steady. (Not a flame's: torches keep their easing,
+// and their own flicker, flame_noise.)
+std::unordered_set<uint32_t> g_snapLights;
 // a light's flame: the particle group whose flame was seen at it (a candle's
 // light, often a plain static one the game never turns off when the candle
 // is doused -- the flame went, its light and the candle's glow stayed)
@@ -5213,6 +5220,7 @@ float step_mul(float v, int dir, float lo, float hi)
 
 extern "C" int ObjAnimLightDescribe(int light_index, char *buf, int n);
 extern "C" int ObjAnimLightOwner(int light_index);
+extern "C" int ObjAnimLightMode(int light_index);
 extern "C" void SetSimTimePassing(int passing);
 extern "C" int IsSimTimePassing(void);
 void inspect_view();
@@ -9380,6 +9388,7 @@ void RenderRTWorldBegin(uint32_t serial)
    g_lightOwnerKind.clear();
    g_lightState.clear();
    g_ownedLights.clear();
+   g_snapLights.clear();
    g_lightFlameObj.clear();
    // a new world (a mission or a saved game loaded): the models kept from the
    // last one are not this one's, though some have the same numbers and places
@@ -9618,6 +9627,11 @@ void RenderRTLight(uint32_t id, const float pos[3], const float rgb[3], float ra
             kind = 1;
       }
       g_lightOwnerKind[id] = kind;
+      if (kind < 2) {
+         const int mode = ObjAnimLightMode(int(id));
+         if (mode == 0 /* flip */ || mode == 2 /* random */ || mode == 9 /* flicker */)
+            g_snapLights.insert(id);
+      }
       if (kind >= 1)
          g_fixtureLights.insert(id);
       if (kind >= 2)
@@ -10024,8 +10038,11 @@ void smooth_flicker()
       if (std::fabs(L.peak - before) > 0.05f * std::max(before, 1.0f))
          ++s_changing;
       // put out (a torch doused): no easing, it goes dark at once (not a
-      // lantern's flicker going off: light_flickers)
-      const float b = (L.peak < 0.15f * before && !light_flickers(L.id)) ? 1.0f : a;
+      // lantern's flicker going off: light_flickers); a flickering lamp's
+      // jumps kept, but for a frame's softening ("Nearly steady": eased)
+      const float b = (L.peak < 0.15f * before && !light_flickers(L.id)) ? 1.0f
+                      : (g_cfg.flicker != 2 && g_snapLights.count(L.id)) ? 1.0f - std::exp(-dt / 0.02f)
+                                                                         : a;
       for (int k = 0; k < 3; ++k) {
          st[k] += (L.rgb[k] - st[k]) * b;
          L.rgb[k] = st[k];
