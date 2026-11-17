@@ -1089,6 +1089,8 @@ static void run_survey(const char* path)
             char* canonical = NULL;
             if (resource)
                IRes_GetCanonPathName(resource, &canonical);
+            if (!canonical && texture == 0)
+               canonical = strdup("(sky)");
             if (canonical)
             {
                mxs_vector sum = { 0, 0, 0 };
