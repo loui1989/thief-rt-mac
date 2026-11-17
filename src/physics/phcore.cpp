@@ -3357,6 +3357,12 @@ static BOOL IsOnMovingTerrainHack(cPhysModel *pModel)
 }
 
 
+// The player and the creatures pass through each other while this lasts
+// (seconds): set when the player is stuck with a creature by him
+// (PlayerStuckWatch) -- a zombie pressing him to a wall held him there, his
+// sphere and its pinned between them, every way out blocked.
+static float s_playerCreatureGhost = 0.0f;
+
 void CheckModelObjectCollisions(cPhysModel * pModel, mxs_real t0, mxs_real dt, BOOL checkTest, tPhysSubModId subModId)
 {
 #ifdef OBJ_COLL_TIMING
@@ -3468,6 +3474,11 @@ void CheckModelObjectCollisions(cPhysModel * pModel, mxs_real t0, mxs_real dt, B
                // When player physics is disabled, exclude the player from
                // checks initiated by other moving objects as well.
                if (!g_PhysicsOn && pCurModel->IsPlayer())
+                  goto next_coll_obj;
+               // (getting the player out from between a creature and a wall)
+               if (s_playerCreatureGhost > 0.0f &&
+                   ((pModel->IsPlayer() && pCurModel->IsCreature() && !pCurModel->IsPlayer()) ||
+                    (pCurModel->IsPlayer() && pModel->IsCreature() && !pModel->IsPlayer())))
                   goto next_coll_obj;
 
                // Has this object already done its collision checking this frame?
@@ -7014,6 +7025,35 @@ static void PlayerStuckWatch(long dt_msec)
    s_last = here;
    s_have = TRUE;
    const float dt = dt_msec / 1000.0f;
+   // the nearest creature's centre, in feet across the floor (and its name)
+   float nearest = 1e9f;
+   ObjID nearObj = OBJ_NULL;
+   for (cPhysModel *m = g_PhysModels.GetFirstActive(); m; m = g_PhysModels.GetNextActive(m))
+   {
+      if (m == pModel || m->IsPlayer() || !m->IsCreature() || m->GetObjID() == player)
+         continue;
+      const mxs_vector &c = m->GetLocationVec();
+      if (fabsf(c.z - here.z) > 7.0f)
+         continue;
+      const float d = sqrtf((c.x - here.x) * (c.x - here.x) + (c.y - here.y) * (c.y - here.y));
+      if (d < nearest)
+         nearest = d, nearObj = m->GetObjID();
+   }
+   // Passing through: for a moment, and on while still inside the creature
+   // (else, let go of half inside it, the two would lock again) -- 3 s at most.
+   static float s_ghostFor = 0.0f;
+   if (s_playerCreatureGhost > 0.0f)
+   {
+      s_ghostFor += dt;
+      s_playerCreatureGhost -= dt;
+      if (s_playerCreatureGhost <= 0.0f && nearest < 2.2f && s_ghostFor < 3.0f)
+         s_playerCreatureGhost = 0.1f;
+      if (s_playerCreatureGhost <= 0.0f)
+      {
+         s_playerCreatureGhost = 0.0f;
+         mprintf("Player stuck: free of the creature again (%.1f s)\n", s_ghostFor);
+      }
+   }
    // (moving at under a tenth of the speed wanted)
    if (wantSpeed > 2.0f && moved < 0.1f * wantSpeed * dt)
       s_stuck += dt;
@@ -7024,6 +7064,15 @@ static void PlayerStuckWatch(long dt_msec)
       s_stuck = 0.0f;
       s_told = FALSE;
       return;
+   }
+   // Stuck with a creature next to him (a zombie or a guard pressing him to
+   // a wall, in a doorway): through it, for a moment.
+   if (s_stuck >= 0.25f && s_playerCreatureGhost <= 0.0f && nearest < 4.5f)
+   {
+      s_playerCreatureGhost = 0.75f;
+      s_ghostFor = 0.0f;
+      mprintf("Player stuck: by %s (%.1f ft off), passing through it for a moment\n",
+              ObjWarnName(nearObj), nearest);
    }
    // (short hold-ups too: caught in a doorway or a crawlspace for a moment)
    if (s_stuck < 0.4f || s_told || s_episodes >= 40)
