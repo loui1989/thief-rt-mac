@@ -303,13 +303,21 @@ const char kSceneFragmentShader[] =
    " float ref=length(v)/far-0.0015;\n"
    " vec3 d=normalize(v);\n"
    " vec3 t=normalize(cross(d,abs(d.z)<0.9?vec3(0.0,0.0,1.0):vec3(1.0,0.0,0.0)));\n"
-   " vec3 b=cross(d,t);float r=dynShadow[i].z;float s=1.0;\n"
-   " if(dynShadow[i].x>=0.0){s=0.0;\n"
+   " vec3 b=cross(d,t);float r=abs(dynShadow[i].z);float s=1.0;\n"
+   // (a flame's, its softness negative: a flame no point, its shadows' edges
+   // wider -- where its sway carried one across a strip it went from lit to
+   // dark at once)
+   " if(dynShadow[i].z<0.0)r*=2.0;\n"
+   " if(dynShadow[i].x>=0.0){s=0.0;float q=r*0.7;\n"
    "  s+=texture(dynShadowMaps,vec4(d+(t+b)*r,dynShadow[i].x),ref);\n"
    "  s+=texture(dynShadowMaps,vec4(d+(t-b)*r,dynShadow[i].x),ref);\n"
    "  s+=texture(dynShadowMaps,vec4(d+(-t+b)*r,dynShadow[i].x),ref);\n"
    "  s+=texture(dynShadowMaps,vec4(d+(-t-b)*r,dynShadow[i].x),ref);\n"
-   "  s*=0.25;}\n"
+   "  s+=texture(dynShadowMaps,vec4(d+t*q*1.4,dynShadow[i].x),ref);\n"
+   "  s+=texture(dynShadowMaps,vec4(d-t*q*1.4,dynShadow[i].x),ref);\n"
+   "  s+=texture(dynShadowMaps,vec4(d+b*q*1.4,dynShadow[i].x),ref);\n"
+   "  s+=texture(dynShadowMaps,vec4(d-b*q*1.4,dynShadow[i].x),ref);\n"
+   "  s*=0.125;}\n"
    // the models' shadows (dynShadow.w: their layer, -1 none)
    " if(dynShadow[i].w>=0.0){float m=0.0;float r2=r*1.5;\n"
    "  m+=texture(dynCasterMaps,vec4(d+(t+b)*r2,dynShadow[i].w),ref);\n"
@@ -346,7 +354,7 @@ const char kSceneFragmentShader[] =
    // (the point moved off its surface by a shadow map texel or so at its
    // distance, more at a glancing angle: no shadow of a surface on itself)
    "  if(dynShadow[i].x>=0.0||dynShadow[i].w>=0.0)"
-        "f*=dyn_shadow(i,p+n*(0.06+d*dynShadow[i].z*(1.0+2.0*(1.0-c))));\n"
+        "f*=dyn_shadow(i,p+n*(0.06+d*abs(dynShadow[i].z)*(1.0+2.0*(1.0-c))));\n"
    "  sum+=dynCol[i].rgb*f;\n"
    " }\n"
    " return sum;\n"
@@ -382,7 +390,7 @@ const char kSceneFragmentShader[] =
    "   if(dynDebug>2.5&&dynEnabled>0.5&&worldPos.w>0.99){for(int i=0;i<dynCount;++i)if(dynShadow[i].w>=0.0){"
         "vec3 nn=normalize(cross(dFdx(worldPos.xyz),dFdy(worldPos.xyz)));if(dot(nn,dynCamera-worldPos.xyz)<0.0)nn=-nn;"
         "float dd=length(dynPos[i].xyz-worldPos.xyz);"
-        "float s=dyn_shadow(i,worldPos.xyz+nn*(0.06+dd*dynShadow[i].z*2.0));light.rgb=vec3(1.0,s,s);break;}}}\n"
+        "float s=dyn_shadow(i,worldPos.xyz+nn*(0.06+dd*abs(dynShadow[i].z)*2.0));light.rgb=vec3(1.0,s,s);break;}}}\n"
    "#endif\n"
    "  light.rgb+=minLight*(vec3(1.0)-light.rgb);color*=light;}\n"
    " if(alphaTest>0.5&&texel.a<0.5)discard;\n"
@@ -801,10 +809,13 @@ void lights(const sRenderBackendLight *in, int count)
          const float k = 1.0f + 0.09f * noise(9.0f, 0);
          for (float &c : l.color)
             c *= k;
+         // (mostly up and down: a wall torch's flame is a few inches off its
+         // wall, and a sway towards it or away swung the shadow of the wall's
+         // edge right across the mouldings over it)
          if (swaying++ < 6 && g_shadows) {
-            l.pos[0] += 0.09f * noise(5.3f, 1);
-            l.pos[1] += 0.09f * noise(5.9f, 2);
-            l.pos[2] += 0.05f * noise(7.1f, 3);
+            l.pos[0] += 0.025f * noise(5.3f, 1);
+            l.pos[1] += 0.025f * noise(5.9f, 2);
+            l.pos[2] += 0.07f * noise(7.1f, 3);
          }
       }
       in = s_live.data();
@@ -818,7 +829,8 @@ void lights(const sRenderBackendLight *in, int count)
       spot[i * 4 + 3] = g_fade[l.id];
       par[i * 4] = float(l.kind); par[i * 4 + 1] = l.inner_radius;
       par[i * 4 + 2] = l.spot_inner; par[i * 4 + 3] = l.spot_outer;
-      sh[i * 4] = -1.0f; sh[i * 4 + 1] = farZ; sh[i * 4 + 2] = 2.5f / float(g_shadowSize); sh[i * 4 + 3] = -1.0f;
+      sh[i * 4] = -1.0f; sh[i * 4 + 1] = farZ; sh[i * 4 + 3] = -1.0f;
+      sh[i * 4 + 2] = (l.flicker ? -2.5f : 2.5f) / float(g_shadowSize);   // (a flame's soft: negative)
       if (!shadows)
          continue;
       if (casters && casterSlot < kCasterSlots && draw_casters(l, casterSlot, farZ))
