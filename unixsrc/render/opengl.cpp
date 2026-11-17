@@ -425,7 +425,7 @@ int g_frame = 0;
 bool g_collect = false;      // (capturing: the draws only kept, not drawn)
 uint32_t g_curObj = 0;
 float g_cam[3] = {0, 0, 0};
-struct Caster { std::vector<float> tris; float pose[6]; float c[3] = {0, 0, 0}; float r = 0; };
+struct Caster { std::vector<float> tris; float pose[6]; float c[3] = {0, 0, 0}; float r = 0; int frame = 0; };
 std::unordered_map<uint32_t, Caster> g_objs;
 GLuint g_casterTex = 0, g_casterBuffer = 0, g_casterArray = 0;
 constexpr int kCasterSlots = 16;
@@ -691,16 +691,23 @@ void lights(const sRenderBackendLight *in, int count)
    count = std::min(count, kMaxLights);
    float pos[kMaxLights * 4], col[kMaxLights * 4], spot[kMaxLights * 4], par[kMaxLights * 4],
          sh[kMaxLights * 4];
-   const bool shadows = g_shadows && g_shadowProgram && g_meshTriangles > 0;
+   // (the walls' shadows always: without them the lights, their own light
+   // taken out of the lightmaps, shone through every wall; the setting is
+   // the models' shadows)
+   const bool shadows = g_shadowProgram && g_meshTriangles > 0;
    GLint program = 0, array = 0, buffer = 0, fbo = 0, view[4];
    GLboolean depthTest = GL_FALSE, blend = GL_FALSE, depthMask = GL_TRUE, colorMask[4];
    GLint depthFunc = GL_LESS;
-   const bool casters = shadows && !g_objs.empty();
-   // the models kept: gone, or moved since (and not drawn again), let go
+   const bool casters = shadows && g_shadows && !g_objs.empty();
+   // the models kept: gone, or moved since and not drawn again for a while
+   // (out of reach), let go. One moving -- a door opening -- is drawn again
+   // each frame after the shadows are: kept as it was meanwhile, or its
+   // shadow flickered, missing every few frames.
    if ((g_frame & 3) == 0)
       for (auto it = g_objs.begin(); it != g_objs.end();) {
          float pose[6];
-         if (!RenderRTGameObjectPose(it->first, pose) || memcmp(pose, it->second.pose, sizeof(pose)) != 0)
+         if (!RenderRTGameObjectPose(it->first, pose) ||
+             (memcmp(pose, it->second.pose, sizeof(pose)) != 0 && g_frame - it->second.frame > 8))
             it = g_objs.erase(it);
          else
             ++it;
@@ -860,6 +867,7 @@ void object_begin(uint32_t obj, const float pose[6])
    Caster &o = g_objs[obj];
    o.tris.clear();
    memcpy(o.pose, pose, sizeof(o.pose));
+   o.frame = g_frame;
 }
 
 void object_end()
@@ -1172,8 +1180,8 @@ const char *label(int row)
    switch (row) {
    case kShadow: return "Guards notice your shadow";
    case kMinLight: return "Unlit corners lifted to";
-   case kDynLights: return "Real-time lights (lamps, torches)";
-   case kDynShadows: return "Their shadows";
+   case kDynLights: return "Real-time lights";
+   case kDynShadows: return "Shadows from objects";
    default: return "FPS counter";
    }
 }
