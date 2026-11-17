@@ -967,3 +967,28 @@ char *sky_which(void)
    return _fam_sky_name;
 }
 #endif
+
+// The path tracer: a world texture's name ("fam\\waterhw\\l3out"), by its
+// number -- a water texture's pixels are remade here (its colour), so the
+// picture the renderer is given has no file name of its own to tell lava by
+int RenderRTGameTextureName(int i, char *out, int n)
+{
+   IRes* hnd;
+   char* name = NULL;
+
+   if (!out || n <= 0)
+      return 0;
+   out[0] = '\0';
+   if (i < 0 || i >= TEXMEM_MAX)
+      return 0;
+   hnd = texmemGetHandle(i);
+   if (hnd == NULL)
+      return 0;
+   IRes_GetCanonPathName(hnd, &name);
+   if (name == NULL)
+      return 0;
+   strncpy(out, name, n - 1);
+   out[n - 1] = '\0';
+   Free(name);
+   return 1;
+}

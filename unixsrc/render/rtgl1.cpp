@@ -998,6 +998,32 @@ bool is_lava(const RtTexture *t)
           id.find("waterhw/l4") != std::string::npos;
 }
 
+// Lava by the world texture's number: its name from the game (a water
+// texture's picture is remade by the game -- its colour -- and has no file
+// name of its own: the Lost City's l3out was drawn as water, a dark and
+// noisy patch fighting the lava over it). 0 not lava, 1 lava's top, 2 lava's
+// face from inside it ("out": in the lava's own cell, under the top).
+extern "C" int RenderRTGameTextureName(int i, char *out, int n);
+std::unordered_map<int, int> g_lavaById;   // (forgotten with a new world: fx_reset)
+int lava_kind(int id)
+{
+   auto it = g_lavaById.find(id);
+   if (it != g_lavaById.end())
+      return it->second;
+   char buf[256];
+   int kind = 0;
+   if (RenderRTGameTextureName(id, buf, sizeof(buf))) {
+      std::string n(buf);
+      for (char &ch : n)
+         ch = ch == '\\' ? '/' : char(tolower((unsigned char)ch));
+      if (n.find("lava") != std::string::npos || n.find("waterhw/l3") != std::string::npos ||
+          n.find("waterhw/l4") != std::string::npos)
+         kind = (n.size() > 3 && n.compare(n.size() - 3, 3, "out") == 0) ? 2 : 1;
+   }
+   g_lavaById[id] = kind;
+   return kind;
+}
+
 // Textures the game let go of, kept with RTGL1 a while under their names:
 // a menu, the book or a letter frees all of the mission's textures and
 // makes the same ones again on the way back, and giving them all to the
@@ -3971,11 +3997,12 @@ void upload_world()
       // texture): glowing and slowly flowing (RTGL1's lava: its emission
       // boosted on screen and animated, and lighting the room as an area),
       // not see-through water
-      const bool lava = (g.flags & kRenderRTWorldWater) && is_lava(tex);
+      const int lavaKind = (g.flags & kRenderRTWorldWater) ? lava_kind(g.textureId) : 0;
+      const bool lava = (g.flags & kRenderRTWorldWater) && (lavaKind != 0 || is_lava(tex));
       // (its face from under it, in the same place as the one on top: the two
       // fought for each pixel -- black speckles and patches, changing as you
       // moved. Nothing sees lava from below.)
-      if (lava && g.underside)
+      if (lava && (g.underside || lavaKind == 2))
          continue;
       if (lava) {
          flags &= ~RgMeshPrimitiveFlags(RG_MESH_PRIMITIVE_ALPHA_TESTED);
@@ -10978,7 +11005,9 @@ void build_lava_lights()
       if (!(g.flags & kRenderRTWorldWater))
          continue;
       auto found = g_worldTextures.find(g.textureId);
-      if (found == g_worldTextures.end() || !is_lava(found->second) || g.underside)
+      const int lk = lava_kind(g.textureId);
+      if (lk == 2 || g.underside ||
+          ((found == g_worldTextures.end() || !is_lava(found->second)) && lk == 0))
          continue;
       for (size_t k = 0; k + 2 < g.indices.size(); k += 3) {
          const float *a = g.verts[g.indices[k]].position, *b = g.verts[g.indices[k + 1]].position,
@@ -11027,6 +11056,7 @@ void build_lava_lights()
 
 void fx_reset()
 {
+   g_lavaById.clear();
    g_fx.clear();
    g_fxNot.clear();
    g_fxBursts.clear();
