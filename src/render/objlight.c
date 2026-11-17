@@ -809,13 +809,14 @@ void objlight_rt_submit(void)
 extern unsigned char portal_light_realtime[2048];
 extern uchar *portal_anim_light_intensity;
 extern int ObjAnimLightTable(int *index, float *max_bright, float *radius,
-                             float *inner_radius, int max);
+                             float *inner_radius, int *owner, int max);
 extern void ObjAnimLightRefresh(int light_index);
 
 #define GL_ANIM_MAX 2048
 static int gl_table_n = -1;           // the animated lights (-1: not known yet)
 static int gl_table_index[GL_ANIM_MAX];
 static float gl_table_max[GL_ANIM_MAX], gl_table_radius[GL_ANIM_MAX], gl_table_inner[GL_ANIM_MAX];
+static int gl_table_owner[GL_ANIM_MAX];
 static int gl_table_lights = -1;      // num_light when it was made
 
 static void objlight_gl_reset(void)
@@ -867,7 +868,7 @@ void objlight_gl_submit(const mxs_vector *cam)
       want = 32;
    if (gl_table_n < 0 || gl_table_lights != num_light) {
       gl_table_n = ObjAnimLightTable(gl_table_index, gl_table_max, gl_table_radius,
-                                     gl_table_inner, GL_ANIM_MAX);
+                                     gl_table_inner, gl_table_owner, GL_ANIM_MAX);
       gl_table_lights = num_light;
    }
    // the nearest animated lights (by how far their reach is from the
@@ -883,7 +884,7 @@ void objlight_gl_submit(const mxs_vector *cam)
       reach = gl_table_radius[k] > 0.0f ? gl_table_radius[k] : 40.0f;
       picks[n].k = k;
       picks[n].score = (float)sqrt(dx * dx + dy * dy + dz * dz) - reach -
-                       (portal_light_realtime[i] ? 8.0f : 0.0f);
+                       (portal_light_realtime[i] ? 15.0f : 0.0f);
       ++n;
    }
    qsort(picks, n, sizeof(picks[0]), gl_pick_cmp);
@@ -912,6 +913,7 @@ void objlight_gl_submit(const mxs_vector *cam)
          o->kind = 0;
          o->id = i;
          o->moving = 0;
+         o->owner = (uint32_t)gl_table_owner[j];
       }
    }
    // the moving lights (their own light already left out of the lightmaps)
@@ -931,6 +933,7 @@ void objlight_gl_submit(const mxs_vector *cam)
       o->kind = 1;
       o->id = 100000 + k;
       o->moving = 1;
+      o->owner = 0;
    }
    {
       float c[3] = { cam->x, cam->y, cam->z };

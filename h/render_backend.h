@@ -42,6 +42,7 @@ typedef struct sRenderBackendLight {
   int kind;
   int id;        // the same light keeps its id (its shadow map kept)
   int moving;    // its shadow drawn anew each frame
+  uint32_t owner; // its own object (a torch, a lamp): casts it no shadow
 } sRenderBackendLight;
 
 enum eRenderBackendPrimitive {
@@ -108,6 +109,15 @@ void RenderBackendSetDynamicLights(const sRenderBackendLight *lights, int count,
 // The view drawn: the models it drew (their world triangles, solid ones)
 // cast the lights' shadows from the next frame.
 void RenderBackendDynamicViewEnd(void);
+// The models that cast the lights' shadows, drawn for them alone (nothing
+// rasterized) and kept while they stay where they are: between
+// RenderBackendCaptureObjects(1) and (0), each between ObjectBegin and End.
+// pose: its place and facing (x y z, three angles). ObjectCached: already
+// kept, at this pose.
+void RenderBackendCaptureObjects(int on);
+void RenderBackendObjectBegin(uint32_t obj, const float pose[6]);
+void RenderBackendObjectEnd(void);
+int RenderBackendObjectCached(uint32_t obj, const float pose[6]);
 
 // Optional diagnostics for automated render checks. Set DARK_RENDER_TRACE to
 // opt in to the plain-text trace; normal game and viewer runs create no log.

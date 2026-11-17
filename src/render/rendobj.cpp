@@ -7,6 +7,7 @@
 
 // Render an object
 #include <vector>   // (first: the headers below declare C linkage)
+#include <algorithm>
 #include <set>
 #include <objarray.h>
 
@@ -3451,5 +3452,82 @@ extern "C" void RenderRTGameForEachObject(void (*fn)(uint32_t obj, void *user), 
    for (; !q->Done(); q->Next())
       fn((uint32_t)q->Object(), user);
    q->Release();
+}
+#endif
+
+#ifdef DARK_RT
+// ---- the OpenGL renderer's real-time lights: the models that cast shadows ----
+// Every solid model near the camera, drawn whole (unclipped, nothing on the
+// screen) for the lights' shadows -- whether the view shows it or not, so a
+// shadow does not come and go as the camera turns. Each kept by the renderer
+// while it stays where it is: a few a frame, the nearest first; a moving one
+// (a guard walking) every frame.
+#include <render_backend.h>
+extern "C" void RenderGLGameDrawShadowObjects(void)
+{
+   const float kRadius = 60.0f;   // feet
+   if (!g_lgd3d || RenderRTActive() || !g_RenderGLWorldPositions)
+      return;
+   static std::vector<ObjID> s_near;
+   static unsigned s_calls = 0;
+   static mxs_vector s_nearAt;
+   static int s_nearMax = -1;
+   if (s_calls++ % 16 == 0 || s_nearMax != gMaxObjID ||
+       mx_dist2_vec(&portal_camera_loc, &s_nearAt) > 10.0f * 10.0f)
+   {
+      std::vector<std::pair<float, ObjID>> found;
+      s_nearAt = portal_camera_loc;
+      s_nearMax = gMaxObjID;
+      for (ObjID obj = 1; obj < gMaxObjID; ++obj)
+      {
+         if (!ObjectExists(obj) || !ObjHasRefs(obj))
+            continue;
+         Position *pos = ObjPosGet(obj);
+         if (!pos)
+            continue;
+         const float d2 = mx_dist2_vec(&pos->loc.vec, &portal_camera_loc);
+         if (d2 > (kRadius + 15.0f) * (kRadius + 15.0f))
+            continue;
+         const int type = rendobj_type(obj);
+         if (type == OM_TYPE_MD || type == OM_TYPE_MESH)
+            found.push_back({d2, obj});
+      }
+      std::sort(found.begin(), found.end());
+      s_near.clear();
+      for (const auto &f : found)
+         s_near.push_back(f.second);
+   }
+   const ObjID player = PlayerObjectExists() ? PlayerObject() : OBJ_NULL;
+   int budget = 16;
+   RenderBackendCaptureObjects(1);
+   for (ObjID obj : s_near)
+   {
+      if (budget <= 0)
+         break;
+      if (obj == player || !ObjectExists(obj) || !ObjHasRefs(obj) || rt_first_person_object(obj))
+         continue;
+      Position *pos = ObjPosGet(obj);
+      if (!pos || mx_dist2_vec(&pos->loc.vec, &portal_camera_loc) > kRadius * kRadius)
+         continue;
+      if (ObjRenderType(obj) == kRenderNotAtAll)
+         continue;
+      float pose[6];
+      if (!RenderRTGameObjectPose((uint32_t)obj, pose) || RenderBackendObjectCached((uint32_t)obj, pose))
+         continue;
+      int idx;
+      model_funcs *ptmf = rendobj_get_model_funcs(obj, &idx);
+      if (!ptmf || !ptmf->render)
+         continue;
+      lgd3d_render_flush();
+      RenderBackendObjectBegin((uint32_t)obj, pose);
+      r3d_rt_noclip = 1;
+      rendobj_core_render_object(obj, OBJ_NO_SPLIT, idx, NULL, ptmf->render, ptmf);
+      lgd3d_render_flush();
+      r3d_rt_noclip = 0;
+      r3d_rt_backface = 0;
+      RenderBackendObjectEnd();
+      --budget;
+   }
+   RenderBackendCaptureObjects(0);
 }
 #endif

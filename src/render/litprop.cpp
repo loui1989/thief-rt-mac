@@ -1102,7 +1102,7 @@ extern "C" int ObjAnimLightDescribe(int light_index, char *buf, int n)
 // one's light_data index, its maximum brightness (the one its lightmaps were
 // made with), radius and inner radius (feet). Returns how many.
 extern "C" int ObjAnimLightTable(int *index, float *max_bright, float *radius,
-                                 float *inner_radius, int max)
+                                 float *inner_radius, int *owner, int max)
 {
    sPropertyObjIter iter;
    ObjID obj;
@@ -1122,6 +1122,7 @@ extern "C" int ObjAnimLightTable(int *index, float *max_bright, float *radius,
       max_bright[n] = anim_light->animation.max_brightness;
       radius[n] = anim_light->radius;
       inner_radius[n] = anim_light->inner_radius;
+      owner[n] = obj;
       ++n;
    }
    g_AnimLightProp->IterStop(&iter);

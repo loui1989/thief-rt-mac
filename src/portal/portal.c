@@ -3232,8 +3232,11 @@ cleanup:
    if (cell != CELL_INVALID)
       PORTAL_PART(5);
    RenderRTSceneEnd();
-   if (!RenderRTActive())
+   if (!RenderRTActive()) {
+      extern void RenderGLGameDrawShadowObjects(void);
+      RenderGLGameDrawShadowObjects();
       RenderBackendDynamicViewEnd();
+   }
 #endif
    portal_fog_on = fog_was_on;
    portal_end_3d();

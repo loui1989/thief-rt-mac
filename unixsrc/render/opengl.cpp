@@ -25,6 +25,7 @@
 #include <cstring>
 #include <vector>
 #include <chrono>
+#include <unordered_map>
 #include <cmath>
 #include <thread>
 #include <string>
@@ -45,6 +46,11 @@ extern "C" void PlayerDescribeCamera(char *buf, int size);   // (plyrloop.cpp)
 #endif
 #include "rt_font.h"
 
+#ifdef DARK_RT
+extern "C" int RenderRTGameObjectPose(uint32_t obj, float pose[6]);   // (rendobj.cpp)
+#else
+static int RenderRTGameObjectPose(uint32_t, float *) { return 0; }
+#endif
 extern "C" void DarkInputKey(uchar scan, int down);
 extern "C" void DarkInputMouse(short x, short y, uchar type, uchar buttons, char wheel);
 extern "C" void DarkInputMouseRelative(int x, int y, uchar buttons);
@@ -288,7 +294,7 @@ const char kSceneFragmentShader[] =
    "  m+=texture(dynCasterMaps,vec4(d+(t-b)*r2,dynShadow[i].w),ref);\n"
    "  m+=texture(dynCasterMaps,vec4(d+(-t+b)*r2,dynShadow[i].w),ref);\n"
    "  m+=texture(dynCasterMaps,vec4(d+(-t-b)*r2,dynShadow[i].w),ref);\n"
-   "  s*=m*0.25;}\n"
+   "  s*=mix(1.0,m*0.25,dynSpot[i].w);}\n"
    " return s;\n"
    "}\n"
    "vec3 dyn_light(vec3 p){\n"
@@ -412,16 +418,22 @@ struct Slot { int id = -1; unsigned generation = 0; float pos[3] = {0, 0, 0}; fl
 std::vector<Slot> g_slot;
 int g_frame = 0;
 
-// The models the view drew (solid ones, their world triangles): this
-// frame's are gathered as it is drawn and cast shadows from the next frame
-// on, into a second cube map array (a slot each for the nearest lights)
-bool g_collect = false;
+// The models that cast shadows (solid ones, their world triangles): drawn
+// whole for the lights alone (RenderGLGameDrawShadowObjects), nothing on the
+// screen, and kept while each stays where it is -- whether the view shows it
+// or not. Into a second cube map array, a slot each for the nearest lights.
+bool g_collect = false;      // (capturing: the draws only kept, not drawn)
+uint32_t g_curObj = 0;
 float g_cam[3] = {0, 0, 0};
-std::vector<float> g_casters, g_castersUse;
+struct Caster { std::vector<float> tris; float pose[6]; float c[3] = {0, 0, 0}; float r = 0; };
+std::unordered_map<uint32_t, Caster> g_objs;
 GLuint g_casterTex = 0, g_casterBuffer = 0, g_casterArray = 0;
-constexpr int kCasterSlots = 8;
+constexpr int kCasterSlots = 16;
 int g_casterSize = 0;
 GLint uCasters = -1;
+// each light's models' shadows faded in as it becomes real-time (by its id)
+std::unordered_map<int, float> g_fade;
+std::chrono::steady_clock::time_point g_lastLights;
 
 const char kShadowVertex[] =
    "layout(location=0) in vec3 position;\n"
@@ -602,15 +614,18 @@ bool draw_casters(const sRenderBackendLight &l, int slot, float farZ)
    static std::vector<float> mine;
    mine.clear();
    const float reach2 = farZ * farZ;
-   for (size_t t = 0; t + 9 <= g_castersUse.size(); t += 9) {
-      const float *v = &g_castersUse[t];
-      bool near = false;
-      for (int k = 0; k < 3 && !near; ++k) {
-         const float dx = v[k * 3] - l.pos[0], dy = v[k * 3 + 1] - l.pos[1], dz = v[k * 3 + 2] - l.pos[2];
-         near = dx * dx + dy * dy + dz * dz < reach2;
-      }
-      if (near)
-         mine.insert(mine.end(), v, v + 9);
+   (void)reach2;
+   for (const auto &e : g_objs) {
+      const Caster &o = e.second;
+      if (o.tris.empty() || e.first == l.owner)
+         continue;
+      const float dx = o.c[0] - l.pos[0], dy = o.c[1] - l.pos[1], dz = o.c[2] - l.pos[2];
+      const float d = std::sqrt(dx * dx + dy * dy + dz * dz);
+      // (out of its reach; or round the light itself: a lamp's, a torch's
+      // own fixture, another object than the light's)
+      if (d > farZ + o.r || (d < 2.0f && o.r < 2.5f))
+         continue;
+      mine.insert(mine.end(), o.tris.begin(), o.tris.end());
    }
    if (mine.empty())
       return false;
@@ -680,7 +695,26 @@ void lights(const sRenderBackendLight *in, int count)
    GLint program = 0, array = 0, buffer = 0, fbo = 0, view[4];
    GLboolean depthTest = GL_FALSE, blend = GL_FALSE, depthMask = GL_TRUE, colorMask[4];
    GLint depthFunc = GL_LESS;
-   const bool casters = shadows && !g_castersUse.empty();
+   const bool casters = shadows && !g_objs.empty();
+   // the models kept: gone, or moved since (and not drawn again), let go
+   if ((g_frame & 3) == 0)
+      for (auto it = g_objs.begin(); it != g_objs.end();) {
+         float pose[6];
+         if (!RenderRTGameObjectPose(it->first, pose) || memcmp(pose, it->second.pose, sizeof(pose)) != 0)
+            it = g_objs.erase(it);
+         else
+            ++it;
+      }
+   // the models' shadows of a light that has just become real-time faded in
+   const auto now = std::chrono::steady_clock::now();
+   const float dt = std::clamp(std::chrono::duration<float>(now - g_lastLights).count(), 0.0f, 0.1f);
+   g_lastLights = now;
+   std::unordered_map<int, float> fade;
+   for (int i = 0; i < count; ++i) {
+      auto f = g_fade.find(in[i].id);
+      fade[in[i].id] = std::min(1.0f, (f != g_fade.end() ? f->second : 0.0f) + dt * 2.5f);
+   }
+   g_fade.swap(fade);
    int casterSlot = 0;
    if (shadows) {
       // (enough for the setting's lights and a few moving ones; grown, never
@@ -716,7 +750,8 @@ void lights(const sRenderBackendLight *in, int count)
       const float farZ = reach(l) + 1.0f;
       pos[i * 4] = l.pos[0]; pos[i * 4 + 1] = l.pos[1]; pos[i * 4 + 2] = l.pos[2]; pos[i * 4 + 3] = l.radius;
       col[i * 4] = l.color[0]; col[i * 4 + 1] = l.color[1]; col[i * 4 + 2] = l.color[2]; col[i * 4 + 3] = l.bright;
-      spot[i * 4] = l.dir[0]; spot[i * 4 + 1] = l.dir[1]; spot[i * 4 + 2] = l.dir[2]; spot[i * 4 + 3] = 0;
+      spot[i * 4] = l.dir[0]; spot[i * 4 + 1] = l.dir[1]; spot[i * 4 + 2] = l.dir[2];
+      spot[i * 4 + 3] = g_fade[l.id];
       par[i * 4] = float(l.kind); par[i * 4 + 1] = l.inner_radius;
       par[i * 4 + 2] = l.spot_inner; par[i * 4 + 3] = l.spot_outer;
       sh[i * 4] = -1.0f; sh[i * 4 + 1] = farZ; sh[i * 4 + 2] = 2.5f / float(g_shadowSize); sh[i * 4 + 3] = -1.0f;
@@ -785,9 +820,7 @@ void lights(const sRenderBackendLight *in, int count)
       glBindTexture(GL_TEXTURE_CUBE_MAP_ARRAY, g_casterTex);
       glActiveTexture(GL_TEXTURE0);
    }
-   // the view's models gathered as it is drawn
-   g_collect = count > 0 && shadows;
-   g_casters.clear();
+
    g_count = count;
    g_active = count > 0;
    if (getenv("DARK_GL_LIGHTS_LIST") && (g_frame % 50) == 0)
@@ -797,42 +830,68 @@ void lights(const sRenderBackendLight *in, int count)
                  in[i].color[0], in[i].color[1], in[i].color[2], in[i].radius, in[i].inner_radius,
                  in[i].spot_inner, in[i].spot_outer, sh[i * 4]);
    static int s_logged = -1;
-   if (count != s_logged && (g_frame % 120) == 1) {
+   if ((count != s_logged && (g_frame % 120) == 1) || (getenv("DARK_GL_LIGHTS_LIST") && g_frame % 50 == 0)) {
       s_logged = count;
-      fprintf(stderr, "OpenGL: %d real-time lights, %d shadows drawn this frame; models' shadows for %d of them (%zu triangles)\n",
-              count, drawn, casterSlot, g_castersUse.size() / 9);
+      fprintf(stderr, "OpenGL: %d real-time lights, %d shadows drawn this frame; models' shadows for %d of them (%zu models kept)\n",
+              count, drawn, casterSlot, g_objs.size());
    }
 }
 
 // a draw of the view's: its solid triangles kept, for the models' shadows
 void collect(const sRenderBackendVertex *v, int count, bool second, int primitive)
 {
-   if (!g_collect || second || primitive != kRenderBackendTriangles || count < 3)
+   if (!g_collect || !g_curObj || second || primitive != kRenderBackendTriangles || count < 3)
       return;
+   std::vector<float> &out = g_objs[g_curObj].tris;
    if (g_blendMode != kRenderBackendBlendOpaque && !g_alphaTest)
       return;
    for (int t = 0; t + 2 < count; t += 3) {
       const sRenderBackendVertex *a = &v[t], *b = &v[t + 1], *c = &v[t + 2];
       if (a->wvalid < 0.5f || b->wvalid < 0.5f || c->wvalid < 0.5f)
          continue;
-      // (not the player's own arm and weapon, held at the camera)
-      const float mx = (a->wx + b->wx + c->wx) / 3 - g_cam[0], my = (a->wy + b->wy + c->wy) / 3 - g_cam[1],
-                  mz = (a->wz + b->wz + c->wz) / 3 - g_cam[2];
-      if (mx * mx + my * my + mz * mz < 2.5f * 2.5f)
-         continue;
       const float tri[9] = {a->wx, a->wy, a->wz, b->wx, b->wy, b->wz, c->wx, c->wy, c->wz};
-      g_casters.insert(g_casters.end(), tri, tri + 9);
+      out.insert(out.end(), tri, tri + 9);
    }
-   if (g_casters.size() > size_t(9) * 200000)
-      g_collect = false;   // (enough)
 }
 
-void view_end()
+void object_begin(uint32_t obj, const float pose[6])
 {
-   g_castersUse.swap(g_casters);
-   g_casters.clear();
-   g_collect = false;
+   g_curObj = obj;
+   Caster &o = g_objs[obj];
+   o.tris.clear();
+   memcpy(o.pose, pose, sizeof(o.pose));
 }
+
+void object_end()
+{
+   if (!g_curObj)
+      return;
+   Caster &o = g_objs[g_curObj];
+   // its bounding sphere
+   float lo[3] = {1e30f, 1e30f, 1e30f}, hi[3] = {-1e30f, -1e30f, -1e30f};
+   for (size_t k = 0; k + 3 <= o.tris.size(); k += 3)
+      for (int a = 0; a < 3; ++a) {
+         lo[a] = std::min(lo[a], o.tris[k + a]);
+         hi[a] = std::max(hi[a], o.tris[k + a]);
+      }
+   if (!o.tris.empty()) {
+      float r2 = 0;
+      for (int a = 0; a < 3; ++a) {
+         o.c[a] = (lo[a] + hi[a]) * 0.5f;
+         r2 += (hi[a] - lo[a]) * (hi[a] - lo[a]) * 0.25f;
+      }
+      o.r = std::sqrt(r2);
+   }
+   g_curObj = 0;
+}
+
+bool object_cached(uint32_t obj, const float pose[6])
+{
+   auto it = g_objs.find(obj);
+   return it != g_objs.end() && memcmp(it->second.pose, pose, sizeof(float) * 6) == 0;
+}
+
+void view_end() {}
 
 void camera(const float pos[3])
 {
@@ -2453,7 +2512,7 @@ int RenderBackendDraw(int primitive,const sRenderBackendVertex *vertices,int cou
    bind_texture(1,second?static_cast<Texture*>(g_textures[1]):nullptr);
    glActiveTexture(GL_TEXTURE0);
    GLenum p=primitive==kRenderBackendLines?GL_LINES:primitive==kRenderBackendPoints?GL_POINTS:GL_TRIANGLES;
-   if (dyn::g_collect) dyn::collect(vertices,count,second!=0,primitive);
+   if (dyn::g_collect) { dyn::collect(vertices,count,second!=0,primitive); return 1; }
    return draw_vertices(p,vertices,count,second!=0,g_width,g_height,g_fog,
       g_fogColor,g_alphaTest);
 }
@@ -2488,4 +2547,27 @@ void RenderBackendDynamicViewEnd(void)
 {
    if (g_context && !g_rt)
       dyn::view_end();
+}
+void RenderBackendCaptureObjects(int on)
+{
+   dyn::g_collect = on && g_context && !g_rt && dyn::g_active && dyn::g_shadows;
+   if (!dyn::g_collect)
+      dyn::g_curObj = 0;
+}
+void RenderBackendObjectBegin(uint32_t obj, const float pose[6])
+{
+   if (dyn::g_collect && obj && pose)
+      dyn::object_begin(obj, pose);
+}
+void RenderBackendObjectEnd(void)
+{
+   if (dyn::g_collect)
+      dyn::object_end();
+}
+int RenderBackendObjectCached(uint32_t obj, const float pose[6])
+{
+   // (nothing wanted: as good as kept)
+   if (!dyn::g_collect)
+      return 1;
+   return pose && dyn::object_cached(obj, pose) ? 1 : 0;
 }
