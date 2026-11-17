@@ -456,12 +456,33 @@ static void BitmapTextureLoad(ModelHandle *mh, char *objName)
    IRes *temp_load[MAX_BITMAP_FRAMES];
    int i, sz;
 
+   // the frames: the bitmap's name cut to six letters and two digits (the
+   // original game's 8.3 names: tsmoke_ -> tsmoke00), or -- NewDark's, the
+   // HD Mod's -- its whole name and two digits (gasarr_00, fireatt_00,
+   // lavaspr_00). Cut, a longer name's frames were never found, and the
+   // HD Mod's single stand-in picture was drawn instead: its gas arrow's
+   // cloud was a near-clear square, nothing to see.
+   BOOL whole = FALSE;
    mh->texptr = temp_load;
    set_silent_load(TRUE);
+   if (strlen(objName) > 6)
+   {
+      char name[256];
+      snprintf(name, sizeof(name), "%s%02d", objName, 0);
+      common_texture_load(mh, BitmapTexturesPath, name, 0, objName);
+      whole = temp_load[0] != NULL;
+   }
    for (i=0; i < MAX_BITMAP_FRAMES; ++i)
    {
       char name[256];
-      sprintf(name, "%.6s%02d", objName, i);
+      if (whole)
+      {
+         if (i == 0)
+            continue;   // (loaded above)
+         snprintf(name, sizeof(name), "%s%02d", objName, i);
+      }
+      else
+         sprintf(name, "%.6s%02d", objName, i);
       common_texture_load(mh, BitmapTexturesPath, 
                           name, i, objName);
       if (temp_load[i] == NULL)
@@ -481,6 +502,8 @@ static void BitmapTextureLoad(ModelHandle *mh, char *objName)
    }
    set_silent_load(FALSE);
    mh->numtex = i;
+   if (whole)
+      fprintf(stderr, "Bitmap model %s: %d frames (%s00...)\n", objName, i, objName);
    sz = mh->numtex*sizeof(mh->texptr[0]);
    mh->texptr = (IRes **) Malloc(sz);
    memcpy(mh->texptr, temp_load, sz);

@@ -1475,7 +1475,9 @@ int object_special(uint32_t obj)
    for (char &ch : md)
       ch = char(tolower((unsigned char)ch));
    int kind = 0;
-   if (n.find("gas") != std::string::npos && (md.empty() || md.find("particle") != std::string::npos))
+   // (a gas cloud: particles, or an animated picture -- gasarr_, a name ending in "_")
+   if (n.find("gas") != std::string::npos &&
+       (md.empty() || md.find("particle") != std::string::npos || md.back() == '_'))
       kind = 1;
    else if (n.find("crystal") != std::string::npos && !md.empty() && md != "arrow" &&
             md.find("cryemit") == std::string::npos && md.find("particle") == std::string::npos)
@@ -8420,11 +8422,15 @@ void RenderRTDrawWorld(int primitive, const sRenderBackendVertex *v, const float
    const bool softDecal = tex && tex->soft && !tex->solidSoft && g_blend == kRenderBackendBlendAlpha && !sprite;
    if (g_RenderRTShadowOnly && softDecal)
       return;   // (a soft see-through stain casts no shadow)
-   if (softDecal)
+   if (softDecal) {
       // drawn see-through, so unlit: with the game's light on it, as the
-      // game draws it (else as dark under a lamp as in the dark)
+      // game draws it (else as dark under a lamp as in the dark). A gas
+      // cloud never darker than a quarter: it was black in a dark room.
+      const float least = (!sprite && object_is_gas(g_currentObject)) ? 0.35f : 0.0f;
       for (int i = 0; i < count; ++i)
-         prim.verts[size_t(i)].color = pack_color(v[i].r, v[i].g, v[i].b, v[i].a);
+         prim.verts[size_t(i)].color = pack_color(std::max(v[i].r, least), std::max(v[i].g, least),
+                                                  std::max(v[i].b, least), v[i].a);
+   }
    if (g_RenderRTShadowOnly) {
       // a face turned away from the camera: it blocks light, but is not seen
       // (two-sided model parts are pairs of coincident opposite faces)
