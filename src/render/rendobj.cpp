@@ -3499,6 +3499,9 @@ extern "C" void RenderGLGameDrawShadowObjects(void)
    }
    const ObjID player = PlayerObjectExists() ? PlayerObject() : OBJ_NULL;
    int budget = 16;
+   // (what the view left queued drawn first: captured with the models, it
+   // was never drawn -- an elemental's flames now and then gone)
+   lgd3d_render_flush();
    RenderBackendCaptureObjects(1);
    for (ObjID obj : s_near)
    {

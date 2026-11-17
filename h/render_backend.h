@@ -44,6 +44,7 @@ typedef struct sRenderBackendLight {
   int moving;    // its shadow drawn anew each frame
   uint32_t owner; // its own object (a torch, a lamp): casts it no shadow
   int flicker;    // a flame's: it flickers and sways a little (its shadows move)
+  float size;     // how big (feet): its shadows' softness; 0 a lamp's or a flame's
 } sRenderBackendLight;
 
 enum eRenderBackendPrimitive {

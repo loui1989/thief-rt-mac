@@ -943,6 +943,7 @@ void objlight_gl_submit(const mxs_vector *cam)
          o->moving = 0;
          o->owner = (uint32_t)gl_table_owner[j];
          o->flicker = gl_table_fire[j];
+         o->size = 0.0f;
       }
    }
    // the moving lights (their own light already left out of the lightmaps)
@@ -964,6 +965,7 @@ void objlight_gl_submit(const mxs_vector *cam)
       o->moving = 1;
       o->owner = 0;
       o->flicker = 0;
+      o->size = 0.25f;
    }
    {
       float c[3] = { cam->x, cam->y, cam->z };
