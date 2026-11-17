@@ -39,6 +39,10 @@ void SynchD3D(void) {}
 static uchar g_palettes[MODERN_MAX_PALETTES][768];
 static uchar *g_textureClut = NULL;
 static ushort *g_alphaPalette = NULL;
+// A water texture's own palette (the portal's water hack, ptdrawhw.c), NULL
+// for any other: its bitmap's align is made the number of its water's alpha
+// palette, not a palette slot
+extern "C" const uchar *(*lgd3d_water_texture_palette)(grs_bitmap *bm) = NULL;
 // Dark's portal and model UVs routinely extend beyond the base texture and
 // rely on the primary texture stage repeating.  Starting stage zero clamped
 // turns every out-of-range surface into a stretched edge row/column until a
@@ -117,6 +121,12 @@ static uchar *ConvertTexture(tdrv_texture_info *info) {
   // A slot-0 texture may carry its own palette (no palette slot was left).
   const uchar *ownPalette =
       (bm->type == BMT_FLAT8 && bm->align == 0) ? palmgr_bitmap_palette(bm) : NULL;
+  // A water texture drawn as a lit surface (a light-mapped one: the Lost
+  // City's lava) is no alpha texture, and its align, its water's number,
+  // took a palette slot of that number: speckled purple and green. Its own.
+  if (bm->type == BMT_FLAT8 && !(info->flags & TF_ALPHA) && lgd3d_water_texture_palette)
+    if (const uchar *own = lgd3d_water_texture_palette(bm))
+      ownPalette = own;
   for (y = 0; y < h; ++y)
     for (x = 0; x < w; ++x) {
       uchar r = 255, g = 255, b = 255, a = 255;

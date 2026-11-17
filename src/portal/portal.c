@@ -2709,6 +2709,73 @@ extern void objlight_gl_submit(const mxs_vector *cam);
 // The level's solid surfaces for the lights' shadows, once a mission: every
 // cell's opaque polygons (not its portals -- water, openings -- which the
 // game's own light passes through when it lights the lightmaps)
+// The lava's lights (as the path tracer's, rtgl1.cpp build_lava_lights): its
+// tops' area summed in squares 4 m a side, a light over each at its middle
+extern int portal_lava_kind(int texture_id);
+static void portal_gl_lava_lights(void)
+{
+   enum { kMax = 512 };
+   static float sq[kMax * 4];   // x, y, z (area-weighted), area
+   static int key[kMax * 2];
+   int c, n = 0, i;
+   const float side = 13.12f;
+   for (c = 0; c < wr_num_cells; ++c) {
+      PortalCell *r = WR_CELL(c);
+      int p, k, voff = 0, first;
+      if (!r || !r->render_list)
+         continue;
+      first = r->num_polys - r->num_portal_polys;
+      for (p = 0; p < r->num_polys; ++p) {
+         const int nv = r->poly_list[p].num_vertices;
+         if (p >= first && p < r->num_render_polys && nv >= 3 &&
+             portal_lava_kind(r->render_list[p].texture_id) == 1) {
+            for (k = 2; k < nv; ++k) {
+               const mxs_vector *a = &r->vpool[r->vertex_list[voff]];
+               const mxs_vector *b = &r->vpool[r->vertex_list[voff + k - 1]];
+               const mxs_vector *d = &r->vpool[r->vertex_list[voff + k]];
+               mxs_vector u, v, x;
+               float area, m[3];
+               int kx, ky, j;
+               mx_sub_vec(&u, b, a);
+               mx_sub_vec(&v, d, a);
+               mx_cross_vec(&x, &u, &v);
+               area = 0.5f * mx_mag_vec(&x);
+               if (area <= 0.0f)
+                  continue;
+               m[0] = (a->x + b->x + d->x) / 3.0f;
+               m[1] = (a->y + b->y + d->y) / 3.0f;
+               m[2] = (a->z + b->z + d->z) / 3.0f;
+               kx = (int)floorf(m[0] / side);
+               ky = (int)floorf(m[1] / side);
+               for (j = 0; j < n && (key[j * 2] != kx || key[j * 2 + 1] != ky); ++j)
+                  ;
+               if (j == n) {
+                  if (n >= kMax)
+                     continue;
+                  key[n * 2] = kx; key[n * 2 + 1] = ky;
+                  sq[n * 4] = sq[n * 4 + 1] = sq[n * 4 + 2] = sq[n * 4 + 3] = 0.0f;
+                  ++n;
+               }
+               sq[j * 4] += m[0] * area;
+               sq[j * 4 + 1] += m[1] * area;
+               sq[j * 4 + 2] += m[2] * area;
+               sq[j * 4 + 3] += area;
+            }
+         }
+         voff += nv;
+      }
+   }
+   for (i = 0; i < n; ++i) {
+      const float a = sq[i * 4 + 3];
+      sq[i * 4] /= a;
+      sq[i * 4 + 1] /= a;
+      sq[i * 4 + 2] = sq[i * 4 + 2] / a + 1.6f;   // (half a metre over it)
+   }
+   RenderBackendSetLavaLights(sq, n);
+   if (n > 0)
+      mprintf("OpenGL: lava: %d lights over it\n", n);
+}
+
 static void portal_gl_world_mesh(void)
 {
    static int known_cells = -1;
@@ -2775,6 +2842,7 @@ static void portal_gl_world_mesh(void)
    firsts[wr_num_cells] = at;
    RenderBackendSetWorldShadowMesh(xyz, at, firsts, spheres, wr_num_cells);
    free(xyz); free(firsts); free(spheres);
+   portal_gl_lava_lights();
 }
 
 // (DARK_GL_LIGHTS_VERIFY) an animated light's own lightmaps against the

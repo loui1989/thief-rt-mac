@@ -21,6 +21,8 @@
 #include <porthw.h>
 #include <portsky.h>
 #include <texmem.h>
+#include <ctype.h>
+#include <string.h>
 #include <wrdbrend.h>
 
 #include <profile.h>
@@ -282,6 +284,52 @@ static void init_water_pal(water_info *info, ushort alpha, ushort argb, uchar *p
 
 ushort pt_default_water_texture_flags = BMF_TRANS;
 
+// lgd3d's question (modern.cpp): the palette of a water texture (of one of a
+// water texture's frames) -- its align now its water's number, not its
+// palette's -- for one drawn as an ordinary lit surface; NULL for any other
+extern const uchar *(*lgd3d_water_texture_palette)(grs_bitmap *bm);
+// Lava (the Lost City's river, the Maw's pools): "water" whose texture is
+// lava's, by its name (as the path tracer finds it, rtgl1.cpp lava_kind). 0
+// not lava, 1 its top, 2 its face from inside it ("...out", in the lava's
+// own cell, in the same place as the top). A new mission forgets them
+// (portal_setup_water_hack).
+extern int RenderRTGameTextureName(int i, char *out, int n);
+static unsigned char pt_lava_known[TEXMEM_MAX];   // kind + 1, 0 not looked at
+static int pt_lava_kind(int id)
+{
+   char name[256];
+   int kind = 0, i, len;
+   if (id < 0 || id >= TEXMEM_MAX)
+      return 0;
+   if (pt_lava_known[id])
+      return pt_lava_known[id] - 1;
+   if (RenderRTGameTextureName(id, name, sizeof(name))) {
+      for (i = 0; name[i]; ++i)
+         name[i] = name[i] == '\\' ? '/' : (char)tolower((unsigned char)name[i]);
+      len = (int)strlen(name);
+      if (strstr(name, "lava") || strstr(name, "waterhw/l3") || strstr(name, "waterhw/l4"))
+         kind = (len > 3 && !strcmp(name + len - 3, "out")) ? 2 : 1;
+   }
+   pt_lava_known[id] = (unsigned char)(kind + 1);
+   return kind;
+}
+
+int portal_lava_kind(int texture_id) { return pt_lava_kind(texture_id); }
+
+static const uchar *pt_water_texture_palette(grs_bitmap *bm)
+{
+   int i;
+   for (i = 0; water_info_list && i < num_water_textures; ++i) {
+      r3s_texture t = water_info_list[i].tex;
+      if (!t)
+         continue;
+      for (; t->w > 0; ++t)
+         if (t == bm)
+            return palmgr_get_pal(water_info_list[i].pal_index);
+   }
+   return NULL;
+}
+
 #ifdef DARK_RT
 // The ray tracer's copy of a water texture. Water textures are drawn through
 // their medium's alpha palette (and their bitmap's align is taken over as the
@@ -390,6 +438,8 @@ void portal_setup_water_hack(int num_textures, r3s_texture *tex_list, float *alp
       return;
 
    water_info_list = Calloc(num_water_textures * sizeof(*water_info_list));
+   memset(pt_lava_known, 0, sizeof(pt_lava_known));
+   lgd3d_water_texture_palette = pt_water_texture_palette;
 
    for (i = 0; i<num_water_textures; i++) {
       r3s_texture tex;
@@ -770,6 +820,15 @@ void draw_surface_lgd3d(PortalPolygonCore *poly, PortalPolygonRenderInfo *render
       Error(1, "Texture non-power-of-two in h!\n");
 #endif
 
+   // Lava glows: drawn without its light map, as the water it is (whole,
+   // through its own palette -- not lit as a dark floor). Its face from
+   // inside it, in the same place as its top, is not drawn: the two fought
+   // for each pixel.
+   if ((poly->flags & PORTAL_SPLITS_OBJECT) && pt_lava_kind(render->texture_id)) {
+      if (pt_lava_kind(render->texture_id) == 2)
+         {END_PROF; return;}
+      lt = NULL;
+   }
    if ((lt == NULL)||(poly->flags & RENDER_DOESNT_LIGHT)) {
       hw.lm = NULL;
    } else {
@@ -1124,6 +1183,15 @@ void draw_surface_multitexture(PortalPolygonCore *poly, PortalPolygonRenderInfo 
       Error(1, "Texture non-power-of-two in h!\n");
 #endif
 
+   // Lava glows: drawn without its light map, as the water it is (whole,
+   // through its own palette -- not lit as a dark floor). Its face from
+   // inside it, in the same place as its top, is not drawn: the two fought
+   // for each pixel.
+   if ((poly->flags & PORTAL_SPLITS_OBJECT) && pt_lava_kind(render->texture_id)) {
+      if (pt_lava_kind(render->texture_id) == 2)
+         {END_PROF; return;}
+      lt = NULL;
+   }
    if ((lt == NULL)||(poly->flags & RENDER_DOESNT_LIGHT)) {
       hw.lm = NULL;
    } else {

@@ -64,6 +64,10 @@ struct Texture {
    GLuint name{};
    int width{}, height{};
    int wrap{-1}, smooth{-1};
+   // its bump map (the path tracer's normal map, for the real-time lights):
+   // being made (mat), and once made (normal)
+   void *mat{};
+   GLuint normal{};
 };
 SDL_Window *g_window;
 SDL_GLContext g_context;
@@ -118,6 +122,7 @@ bool g_glFps = false;   // the OpenGL panel's frame counter
 int g_dynMaxSetting = 16;
 bool g_dynShadowsSetting = true;
 int g_dynShadowSizeSetting = 512;
+bool g_dynBumpSetting = true;
 void load_gl_settings()
 {
    const char *home = getenv("HOME");
@@ -144,6 +149,8 @@ void load_gl_settings()
             g_dynShadowsSetting = value != 0.0f;
          else if (!strcmp(key, "shadow_size"))
             g_dynShadowSizeSetting = std::clamp(int(value), 128, 2048);
+         else if (!strcmp(key, "bump_maps"))
+            g_dynBumpSetting = value != 0.0f;
       fclose(f);
    } else if (FILE *w = fopen(path.c_str(), "w")) {
       // (written once with the default, to be edited)
@@ -276,6 +283,21 @@ const char kSceneFragmentShader[] =
    "uniform samplerCubeArrayShadow dynShadowMaps;\n"
    "uniform samplerCubeArrayShadow dynCasterMaps;\n"
    "uniform float dynDebug;\n"
+   "uniform sampler2D dynNormalMap;\n"
+   "uniform float dynUseNormal;\n"
+   // the surface's normal bent by its bump map (Y up), in a frame made from
+   // the screen's derivatives of its place and texture coordinates
+   "vec3 dyn_bumped(vec3 p,vec3 n,vec2 uv){\n"
+   " if(dynUseNormal<0.5)return n;\n"
+   " vec3 dp1=dFdx(p),dp2=dFdy(p);vec2 du1=dFdx(uv),du2=dFdy(uv);\n"
+   " vec3 p2=cross(dp2,n),p1=cross(n,dp1);\n"
+   " vec3 T=p2*du1.x+p1*du2.x,B=p2*du1.y+p1*du2.y;\n"
+   " float k=inversesqrt(max(max(dot(T,T),dot(B,B)),1e-20));\n"
+   // (the maps made for the path tracer are deep: half as deep here, the
+   // light along a wall would otherwise leave half of each stone black)
+   " vec3 m=texture(dynNormalMap,uv).xyz*2.0-1.0;m.xy*=0.45;\n"
+   " return normalize(T*k*m.x-B*k*m.y+n*max(m.z,0.2));\n"
+   "}\n"
    "float dyn_shadow(int i,vec3 p){\n"
    " vec3 v=p-dynPos[i].xyz;float far=dynShadow[i].y;\n"
    " float ref=length(v)/far-0.0015;\n"
@@ -297,9 +319,10 @@ const char kSceneFragmentShader[] =
    "  s*=mix(1.0,m*0.25,dynSpot[i].w);}\n"
    " return s;\n"
    "}\n"
-   "vec3 dyn_light(vec3 p){\n"
+   "vec3 dyn_light(vec3 p,vec2 uv){\n"
    " vec3 n=normalize(cross(dFdx(p),dFdy(p)));\n"
    " if(dot(n,dynCamera-p)<0.0)n=-n;\n"
+   " vec3 nb=dyn_bumped(p,n,uv);\n"
    " vec3 sum=vec3(0.0);\n"
    " for(int i=0;i<dynCount;++i){\n"
    "  vec3 L=dynPos[i].xyz-p;float d=max(length(L),0.001);vec3 l=L/d;\n"
@@ -317,6 +340,8 @@ const char kSceneFragmentShader[] =
    "  if(dynPar[i].z>-0.999){float s=dot(-l,dynSpot[i].xyz);"
        "f*=clamp((s-dynPar[i].w)/max(dynPar[i].z-dynPar[i].w,0.0001),0.0,1.0);}\n"
    "  f=min(f,255.0)/255.0;\n"
+   // (its bumps: the light on the bent surface over that on the flat one)
+   "  if(dynUseNormal>0.5)f*=clamp((max(dot(nb,l),0.0)+0.1)/(c+0.1),0.25,2.0);\n"
    "  if(f<0.002)continue;\n"
    // (the point moved off its surface by a shadow map texel or so at its
    // distance, more at a glancing angle: no shadow of a surface on itself)
@@ -349,9 +374,9 @@ const char kSceneFragmentShader[] =
    " if(useTexture1>0.5){vec4 light=texture(texture1,uv1);\n"
    "#ifdef DYN_LIGHTS\n"
    "  if(dynEnabled>0.5&&dynCount>0&&worldPos.w>0.99)"
-        "light.rgb=min(light.rgb+dyn_light(worldPos.xyz),vec3(1.0));\n"
+        "light.rgb=min(light.rgb+dyn_light(worldPos.xyz,uv0),vec3(1.0));\n"
    // (DARK_GL_LIGHTS_DEBUG: 1 the real-time light alone, 2 the lightmap alone)
-   "  if(dynDebug>0.5){vec3 dl=(dynEnabled>0.5&&worldPos.w>0.99)?dyn_light(worldPos.xyz):vec3(0.0);"
+   "  if(dynDebug>0.5){vec3 dl=(dynEnabled>0.5&&worldPos.w>0.99)?dyn_light(worldPos.xyz,uv0):vec3(0.0);"
         "light.rgb=dynDebug<1.5?dl:texture(texture1,uv1).rgb;color.rgb=vec3(1.0);\n"
    // (3: the first light with models' shadows: where they fall, red)
    "   if(dynDebug>2.5&&dynEnabled>0.5&&worldPos.w>0.99){for(int i=0;i<dynCount;++i)if(dynShadow[i].w>=0.0){"
@@ -398,6 +423,7 @@ bool &g_shadows = g_dynShadowsSetting;
 int &g_shadowSize = g_dynShadowSizeSetting;
 constexpr int kMaxLights = 40;   // (the shader's arrays)
 
+GLint uNormal = -1;
 GLint uCount = -1, uEnabled = -1, uCamera = -1, uPos = -1, uCol = -1, uSpot = -1, uPar = -1,
       uShadow = -1, uMaps = -1;
 int g_count = 0;          // this frame's lights
@@ -465,6 +491,9 @@ void init(GLuint scene)
    if (uMaps >= 0) glUniform1i(uMaps, 2);
    uCasters = glGetUniformLocation(scene, "dynCasterMaps");
    if (uCasters >= 0) glUniform1i(uCasters, 3);
+   uNormal = glGetUniformLocation(scene, "dynUseNormal");
+   if (GLint u = glGetUniformLocation(scene, "dynNormalMap"); u >= 0) glUniform1i(u, 4);
+   if (uNormal >= 0) glUniform1f(uNormal, 0.0f);
    if (const char *d = getenv("DARK_GL_LIGHTS_DEBUG"))
       glUniform1f(glGetUniformLocation(scene, "dynDebug"), float(atof(d)));
    if (uCount >= 0) glUniform1i(uCount, 0);
@@ -681,6 +710,7 @@ void draw_shadow(const sRenderBackendLight &l, int slot, float farZ)
    }
 }
 
+void poll_normals();
 void lights(const sRenderBackendLight *in, int count)
 {
    g_active = false;
@@ -688,6 +718,7 @@ void lights(const sRenderBackendLight *in, int count)
    if (!wanted() || uCount < 0)
       return;
    ++g_frame;
+   poll_normals();
    count = std::min(count, kMaxLights);
    float pos[kMaxLights * 4], col[kMaxLights * 4], spot[kMaxLights * 4], par[kMaxLights * 4],
          sh[kMaxLights * 4];
@@ -752,6 +783,32 @@ void lights(const sRenderBackendLight *in, int count)
          s.used = 0;
    }
    int drawn = 0;
+   // flames flicker and sway a little, the nearest few's shadows with them
+   static std::vector<sRenderBackendLight> s_live;
+   s_live.assign(in, in + count);
+   {
+      const float t = float(std::fmod(std::chrono::duration<double>(now.time_since_epoch()).count(), 3600.0));
+      int swaying = 0;
+      for (sRenderBackendLight &l : s_live) {
+         if (!l.flicker)
+            continue;
+         auto noise = [&](float speed, int k) {
+            const float a = float((l.id * 7919 + k * 104729) % 1000) * 0.0063f;
+            const float b = float((l.id * 6151 + k * 7727) % 1000) * 0.0071f;
+            return 0.55f * std::sin(t * speed + a) + 0.3f * std::sin(t * speed * 1.93f + b) +
+                   0.15f * std::sin(t * speed * 3.71f + a * 1.7f);
+         };
+         const float k = 1.0f + 0.09f * noise(9.0f, 0);
+         for (float &c : l.color)
+            c *= k;
+         if (swaying++ < 6 && g_shadows) {
+            l.pos[0] += 0.09f * noise(5.3f, 1);
+            l.pos[1] += 0.09f * noise(5.9f, 2);
+            l.pos[2] += 0.05f * noise(7.1f, 3);
+         }
+      }
+      in = s_live.data();
+   }
    for (int i = 0; i < count; ++i) {
       const sRenderBackendLight &l = in[i];
       const float farZ = reach(l) + 1.0f;
@@ -841,6 +898,89 @@ void lights(const sRenderBackendLight *in, int count)
       s_logged = count;
       fprintf(stderr, "OpenGL: %d real-time lights, %d shadows drawn this frame; models' shadows for %d of them (%zu models kept)\n",
               count, drawn, casterSlot, g_objs.size());
+   }
+}
+
+// ---- bump maps ----
+std::vector<Texture *> g_matPending;
+bool g_normalBound = false;
+
+void texture_made(Texture *t, const void *rgba, int w, int h, int rowBytes)
+{
+#ifdef DARK_RT
+   float illum = 0.0f;
+   const std::string source = darkrt::GlMaterialSource(&illum);
+   // (a texture with a glow map has its maps under another name: left flat)
+   if (!g_dynSupported || !g_dynBumpSetting || g_max <= 0 || source.empty() || illum > 0.0f)
+      return;
+   t->mat = darkrt::GlMaterialStart(source, rgba, w, h, rowBytes);
+   if (t->mat)
+      g_matPending.push_back(t);
+#else
+   (void)t; (void)rgba; (void)w; (void)h; (void)rowBytes;
+#endif
+}
+
+void texture_gone(Texture *t)
+{
+#ifdef DARK_RT
+   if (t->mat) {
+      darkrt::GlMaterialFree(t->mat);
+      t->mat = nullptr;
+      g_matPending.erase(std::remove(g_matPending.begin(), g_matPending.end(), t), g_matPending.end());
+   }
+#endif
+   if (t->normal) {
+      glDeleteTextures(1, &t->normal);
+      t->normal = 0;
+   }
+}
+
+// the bump maps made since: a few a frame into textures
+void poll_normals()
+{
+#ifdef DARK_RT
+   int uploads = 0;
+   for (size_t i = 0; i < g_matPending.size() && uploads < 6;) {
+      Texture *t = g_matPending[i];
+      std::vector<uint8_t> n;
+      int w = 0, h = 0;
+      const int r = darkrt::GlMaterialPoll(t->mat, n, w, h);
+      if (r == 0) {
+         ++i;
+         continue;
+      }
+      darkrt::GlMaterialFree(t->mat);
+      t->mat = nullptr;
+      g_matPending.erase(g_matPending.begin() + long(i));
+      if (r == 1 && w > 0 && h > 0 && n.size() >= size_t(w) * h * 4) {
+         glGenTextures(1, &t->normal);
+         glActiveTexture(GL_TEXTURE4);
+         glBindTexture(GL_TEXTURE_2D, t->normal);
+         glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, w, h, 0, GL_RGBA, GL_UNSIGNED_BYTE, n.data());
+         glGenerateMipmap(GL_TEXTURE_2D);
+         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR_MIPMAP_LINEAR);
+         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_REPEAT);
+         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_REPEAT);
+         glActiveTexture(GL_TEXTURE0);
+         g_normalBound = false;
+         ++uploads;
+      }
+   }
+#endif
+}
+
+// the bump map of the texture a lightmapped draw has (or none)
+void bind_normal(Texture *t)
+{
+   const bool on = g_dynBumpSetting && t && t->normal;
+   glUseProgram(g_sceneProgram);
+   glUniform1f(uNormal, on ? 1.0f : 0.0f);
+   if (on) {
+      glActiveTexture(GL_TEXTURE4);
+      glBindTexture(GL_TEXTURE_2D, t->normal);
+      glActiveTexture(GL_TEXTURE0);
    }
 }
 
@@ -1150,7 +1290,7 @@ bool draw_vertices(GLenum primitive, const sRenderBackendVertex *vertices, int c
 namespace glpanel {
 bool g_open = false;
 int g_row = 0;
-enum { kShadow, kMinLight, kDynLights, kDynShadows, kFps, kRows };
+enum { kShadow, kMinLight, kDynLights, kDynShadows, kDynBump, kFps, kRows };
 Texture *g_font = nullptr, *g_white = nullptr;
 
 std::string settings_path()
@@ -1168,9 +1308,9 @@ std::string settings_path()
 void save()
 {
    if (FILE *w = fopen(settings_path().c_str(), "w")) {
-      fprintf(w, "min_light %.2f\nshadow_alert %d\nfps %d\ndynamic_lights %d\nlight_shadows %d\nshadow_size %d\n",
+      fprintf(w, "min_light %.2f\nshadow_alert %d\nfps %d\ndynamic_lights %d\nlight_shadows %d\nshadow_size %d\nbump_maps %d\n",
               g_minLight, g_PlayerShadowAlert, g_glFps ? 1 : 0, g_dynMaxSetting, g_dynShadowsSetting ? 1 : 0,
-              g_dynShadowSizeSetting);
+              g_dynShadowSizeSetting, g_dynBumpSetting ? 1 : 0);
       fclose(w);
    }
 }
@@ -1182,6 +1322,7 @@ const char *label(int row)
    case kMinLight: return "Unlit corners lifted to";
    case kDynLights: return "Real-time lights";
    case kDynShadows: return "Shadows from objects";
+   case kDynBump: return "Bump maps";
    default: return "FPS counter";
    }
 }
@@ -1201,6 +1342,7 @@ std::string value(int row)
       snprintf(b, sizeof(b), "The nearest %d", g_dynMaxSetting);
       return b;
    case kDynShadows: return g_dynShadowsSetting ? "On" : "Off";
+   case kDynBump: return g_dynBumpSetting ? "On (real-time lights)" : "Off";
    default: return g_glFps ? "On" : "Off";
    }
 }
@@ -1220,6 +1362,7 @@ void change(int row, int dir)
       break;
    }
    case kDynShadows: g_dynShadowsSetting = !g_dynShadowsSetting; break;
+   case kDynBump: g_dynBumpSetting = !g_dynBumpSetting; break;
    default: g_glFps = !g_glFps; break;
    }
    save();
@@ -1981,6 +2124,7 @@ static void present_legacy_frame(const void *pixels, int width, int height,
          rt_viewport_rect());
       if (g_scene && g_presentedGeneration != g_sceneGeneration) {
          g_presentedGeneration = g_sceneGeneration; ++g_hardwareFrameCount;
+         load_finish();   // (the world is up: no bar over it from late reads)
       }
       g_presentPending = true;
       return;
@@ -2057,6 +2201,10 @@ static void present_legacy_frame(const void *pixels, int width, int height,
       false, g_scene && depth == 16);
    if (g_scene && g_presentedGeneration != g_sceneGeneration) {
       g_presentedGeneration = g_sceneGeneration; ++g_hardwareFrameCount;
+      // The world is up: the load is over. Images read in the first seconds
+      // of play (objects' textures met late) used to carry it on, and the
+      // bar was put up again over the last loading-screen canvas: a flicker.
+      load_finish();
       const char *path = getenv("DARK_RENDER_CAPTURE");
       const char *frameText = getenv("DARK_RENDER_CAPTURE_FRAME");
       int frame = frameText ? std::max(atoi(frameText), 1) : 1;
@@ -2435,7 +2583,9 @@ void *RenderBackendCreateTexture(int width,int height,const void *rgba,int rowBy
    Texture *t=new Texture; glGenTextures(1,&t->name); t->width=width;t->height=height; glBindTexture(GL_TEXTURE_2D,t->name);
    glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_MIN_FILTER,GL_LINEAR);glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_MAG_FILTER,GL_LINEAR);
    glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_WRAP_S,GL_CLAMP_TO_EDGE);glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_WRAP_T,GL_CLAMP_TO_EDGE);
-   glTexImage2D(GL_TEXTURE_2D,0,GL_RGBA8,width,height,0,GL_RGBA,GL_UNSIGNED_BYTE,pixels);return t;
+   glTexImage2D(GL_TEXTURE_2D,0,GL_RGBA8,width,height,0,GL_RGBA,GL_UNSIGNED_BYTE,pixels);
+   dyn::texture_made(t, rgba, width, height, rowBytes);
+   return t;
 }
 int RenderBackendUpdateTexture(void *handle,int width,int height,const void *rgba,int rowBytes)
 {
@@ -2446,6 +2596,10 @@ int RenderBackendUpdateTexture(void *handle,int width,int height,const void *rgb
    if (!g_context || !texture || width <= 0 || height <= 0 || !rgba ||
        rowBytes < width * 4)
       return 0;
+   // (new pixels: its bump map made again, for a picture of its own)
+   if (texture->mat || texture->normal)
+      dyn::texture_gone(texture);
+   dyn::texture_made(texture, rgba, width, height, rowBytes);
 
    std::vector<uint8_t> storage;
    const void *pixels = tight_texture_pixels(width, height, rgba, rowBytes,
@@ -2505,7 +2659,9 @@ void RenderBackendDestroyTexture(void *handle) {
 #ifdef DARK_RT
    if (g_rt) { darkrt::DestroyTexture(handle); return; }
 #endif
-   Texture*t=static_cast<Texture*>(handle);if(!t)return;for(void*&bound:g_textures)if(bound==t)bound=nullptr;glDeleteTextures(1,&t->name);delete t; }
+   Texture*t=static_cast<Texture*>(handle);if(!t)return;for(void*&bound:g_textures)if(bound==t)bound=nullptr;
+   dyn::texture_gone(t);
+   glDeleteTextures(1,&t->name);delete t; }
 void RenderBackendBindTexture(int level,void *texture) {
 #ifdef DARK_RT
    if (g_rt) { if(level>=0&&level<2) g_textures[level]=texture; darkrt::BindTexture(level,texture); return; }
@@ -2521,6 +2677,7 @@ int RenderBackendDraw(int primitive,const sRenderBackendVertex *vertices,int cou
    glActiveTexture(GL_TEXTURE0);
    GLenum p=primitive==kRenderBackendLines?GL_LINES:primitive==kRenderBackendPoints?GL_POINTS:GL_TRIANGLES;
    if (dyn::g_collect) { dyn::collect(vertices,count,second!=0,primitive); return 1; }
+   if (dyn::uNormal >= 0 && dyn::g_active) dyn::bind_normal(second ? static_cast<Texture*>(g_textures[0]) : nullptr);
    return draw_vertices(p,vertices,count,second!=0,g_width,g_height,g_fog,
       g_fogColor,g_alphaTest);
 }
@@ -2540,8 +2697,17 @@ int RenderBackendDynamicLightsWanted(void)
 void RenderBackendSetWorldShadowMesh(const float *xyz, int triangles, const int *cellFirst,
                                      const float *cellSphere, int cells)
 {
-   if (g_context && !g_rt && xyz && cellFirst && cellSphere && cells > 0)
+   if (g_context && !g_rt && xyz && cellFirst && cellSphere && cells > 0) {
       dyn::mesh(xyz, triangles, cellFirst, cellSphere, cells);
+#ifdef DARK_RT
+      darkrt::GlEffectsReset();   // (a new world: its objects numbered anew)
+#endif
+   }
+}
+namespace { std::vector<float> g_lavaLights; }   // x, y, z, area (feet)
+void RenderBackendSetLavaLights(const float *xyza, int count)
+{
+   g_lavaLights.assign(xyza, xyza + (xyza && count > 0 ? count * 4 : 0));
 }
 void RenderBackendSetDynamicLights(const sRenderBackendLight *lights, int count, const float camera[3])
 {
@@ -2549,6 +2715,87 @@ void RenderBackendSetDynamicLights(const sRenderBackendLight *lights, int count,
       return;
    if (camera)
       dyn::camera(camera);
+#ifdef DARK_RT
+   // The effects' lights, as the path tracer has them (fx_lights): a fire
+   // elemental's and a fireball's flames, crystals, talismans, the Eye, a
+   // flash bomb or a mine going off, a fireball's burst where it hits. The
+   // game gives most of these no light (or a lightmap's); first in the list,
+   // the nearest few, before the lamps.
+   if (camera && dyn::wanted()) {
+      static std::vector<sRenderBackendLight> s_all;
+      darkrt::GlEffectLight fx[10];
+      int n = darkrt::GlEffectLights(camera, fx, 6);
+      // the lava's, the nearest three: orange, slowly swelling (as the path
+      // tracer's, 120 a square metre of it, at most 1600)
+      {
+         std::pair<float, int> near[3] = {{1e30f, -1}, {1e30f, -1}, {1e30f, -1}};
+         for (size_t i = 0; i + 3 < g_lavaLights.size(); i += 4) {
+            const float dx = g_lavaLights[i] - camera[0], dy = g_lavaLights[i + 1] - camera[1],
+                        dz = g_lavaLights[i + 2] - camera[2];
+            const float d = dx * dx + dy * dy + dz * dz;
+            if (d > 70.0f * 70.0f || d >= near[2].first)
+               continue;
+            near[2] = {d, int(i)};
+            std::sort(near, near + 3);
+         }
+         const double t = std::fmod(std::chrono::duration<double>(
+            std::chrono::steady_clock::now().time_since_epoch()).count(), 3600.0);
+         for (const auto &e : near) {
+            if (e.second < 0)
+               continue;
+            darkrt::GlEffectLight &L = fx[n++];
+            L = {};
+            const int i = e.second;
+            L.id = 0x05000000 + i / 4;
+            for (int k = 0; k < 3; ++k)
+               L.pos[k] = g_lavaLights[size_t(i + k)];
+            const float strength = std::min(120.0f * 0.0929f * g_lavaLights[size_t(i + 3)], 1600.0f) *
+                                   (1.0f + 0.12f * float(std::sin(t * 0.9 + i * 0.37)) *
+                                               float(std::sin(t * 0.31 + i * 0.11)));
+            L.rgb[0] = 1.0f * strength;
+            L.rgb[1] = 0.42f * strength;
+            L.rgb[2] = 0.10f * strength;
+            L.lava = true;
+         }
+      }
+      if (n > 0) {
+         s_all.clear();
+         for (int i = 0; i < n; ++i) {
+            const darkrt::GlEffectLight &e = fx[i];
+            const float strength = std::max({e.rgb[0], e.rgb[1], e.rgb[2]});
+            if (strength <= 0.5f)
+               continue;
+            sRenderBackendLight L{};
+            for (int k = 0; k < 3; ++k) {
+               L.pos[k] = e.pos[k];
+               L.color[k] = e.rgb[k] / strength;
+            }
+            // (the path tracer's strengths fall off with the square of the
+            // distance; the game's lights, these among them, as the distance:
+            // a fireball's 700 as a lamp's 80 or so, a flash's as far brighter)
+            // (the lava's a broad glow, lit already round it in the lightmaps:
+            // gentler, reaching less far)
+            const float br = (e.lava ? 2.0f : 3.0f) * std::sqrt(strength);
+            L.bright = 8.0f * br;
+            L.radius = e.lava ? std::clamp(1.4f * std::sqrt(strength), 10.0f, 40.0f)
+                              : std::clamp(2.2f * std::sqrt(strength), 10.0f, 60.0f);
+            L.inner_radius = 0.0f;
+            L.dir[2] = -1.0f;
+            L.spot_inner = L.spot_outer = -2.0f;
+            L.kind = 1;
+            L.id = e.id;
+            L.moving = e.moving ? 1 : 0;
+            L.owner = e.obj;
+            L.flicker = 0;
+            s_all.push_back(L);
+         }
+         if (lights)
+            s_all.insert(s_all.end(), lights, lights + count);
+         lights = s_all.data();
+         count = int(s_all.size());
+      }
+   }
+#endif
    dyn::lights(lights, lights ? count : 0);
 }
 void RenderBackendDynamicViewEnd(void)

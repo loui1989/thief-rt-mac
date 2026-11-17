@@ -43,6 +43,7 @@ typedef struct sRenderBackendLight {
   int id;        // the same light keeps its id (its shadow map kept)
   int moving;    // its shadow drawn anew each frame
   uint32_t owner; // its own object (a torch, a lamp): casts it no shadow
+  int flicker;    // a flame's: it flickers and sways a little (its shadows move)
 } sRenderBackendLight;
 
 enum eRenderBackendPrimitive {
@@ -102,6 +103,10 @@ extern int g_RenderGLWorldPositions;
 void RenderBackendSetWorldShadowMesh(const float *xyz, int triangles,
                                      const int *cellFirst, const float *cellSphere,
                                      int cells);
+// The level's lava, for its glow on the walls round it: one light over each
+// square of it (13 feet, 4 m, a side), place (feet) and its area there
+// (square feet) -- x, y, z, area each. Once a mission, after the mesh.
+void RenderBackendSetLavaLights(const float *xyza, int count);
 // This frame's real-time lights (before the view is drawn), and where the
 // camera is (feet).
 void RenderBackendSetDynamicLights(const sRenderBackendLight *lights, int count,

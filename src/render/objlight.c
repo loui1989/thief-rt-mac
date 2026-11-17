@@ -9,6 +9,8 @@
 #include <lg.h>
 #include <math.h>
 #include <string.h>
+#include <stdio.h>
+#include <ctype.h>
 #include <r3d.h>
 #include <mprintf.h>
 
@@ -817,6 +819,30 @@ static int gl_table_n = -1;           // the animated lights (-1: not known yet)
 static int gl_table_index[GL_ANIM_MAX];
 static float gl_table_max[GL_ANIM_MAX], gl_table_radius[GL_ANIM_MAX], gl_table_inner[GL_ANIM_MAX];
 static int gl_table_owner[GL_ANIM_MAX];
+static unsigned char gl_table_fire[GL_ANIM_MAX];
+extern void RenderRTGameObjectKind(unsigned int obj, char *arch, int an, char *model, int mn);
+
+// a flame's light, by its object's archetype or model (a torch, a candle, a
+// brazier, a lantern, a fireplace)
+static int gl_light_is_fire(int owner)
+{
+   static const char *words[] = { "torch", "fire", "flame", "candle", "brazier", "lantern",
+                                  "hearth", "campf", NULL };
+   char arch[128], model[64], both[200];
+   int i;
+   if (owner <= 0)
+      return 0;
+   RenderRTGameObjectKind((unsigned int)owner, arch, sizeof(arch), model, sizeof(model));
+   snprintf(both, sizeof(both), "%s %s", arch, model);
+   for (i = 0; both[i]; ++i)
+      both[i] = (char)tolower((unsigned char)both[i]);
+   if (strstr(both, "elec"))
+      return 0;
+   for (i = 0; words[i]; ++i)
+      if (strstr(both, words[i]))
+         return 1;
+   return 0;
+}
 static int gl_table_lights = -1;      // num_light when it was made
 
 static void objlight_gl_reset(void)
@@ -870,6 +896,8 @@ void objlight_gl_submit(const mxs_vector *cam)
       gl_table_n = ObjAnimLightTable(gl_table_index, gl_table_max, gl_table_radius,
                                      gl_table_inner, gl_table_owner, GL_ANIM_MAX);
       gl_table_lights = num_light;
+      for (k = 0; k < gl_table_n; ++k)
+         gl_table_fire[k] = (unsigned char)gl_light_is_fire(gl_table_owner[k]);
    }
    // the nearest animated lights (by how far their reach is from the
    // camera), those already real-time kept a little longer
@@ -914,6 +942,7 @@ void objlight_gl_submit(const mxs_vector *cam)
          o->id = i;
          o->moving = 0;
          o->owner = (uint32_t)gl_table_owner[j];
+         o->flicker = gl_table_fire[j];
       }
    }
    // the moving lights (their own light already left out of the lightmaps)
@@ -934,6 +963,7 @@ void objlight_gl_submit(const mxs_vector *cam)
       o->id = 100000 + k;
       o->moving = 1;
       o->owner = 0;
+      o->flicker = 0;
    }
    {
       float c[3] = { cam->x, cam->y, cam->z };

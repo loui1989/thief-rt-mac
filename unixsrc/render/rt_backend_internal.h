@@ -6,6 +6,8 @@
 // forwards every drawing operation here.
 
 #include <stdint.h>
+#include <string>
+#include <vector>
 #include <render_backend.h>
 
 struct SDL_Window;
@@ -55,5 +57,32 @@ bool FrameInProgress();
 bool HandleKey(int scancode, int mods, bool down, bool repeat);
 bool MovieFrame(const void *rgba, int width, int height, int rowBytes,
                 const Rect &viewport, int drawableWidth, int drawableHeight);
+
+// The OpenGL renderer's bump maps: the material maps the path tracer makes
+// (rt/mat_dev) for a texture of the game's, found or made the same way, off
+// the main thread. GlMaterialSource: the file of the texture made next
+// (RenderRTTextureSource), taken (illum: its glow map's strength).
+// GlMaterialStart: nullptr when it gets none. GlMaterialPoll: 0 not yet, 1 its
+// normal map (rgba, Y up), -1 none.
+std::string GlMaterialSource(float *illum);
+void *GlMaterialStart(const std::string &source, const void *rgba, int w, int h, int rowBytes);
+int GlMaterialPoll(void *handle, std::vector<uint8_t> &normal, int &w, int &h);
+void GlMaterialFree(void *handle);
+
+// The OpenGL renderer's lights of the effects the path tracer lights (fx_lights:
+// fire elementals, fireballs, crystals, talismans, flash bombs and mines going
+// off...): the nearest first, at most max. rgb: its colour times its strength
+// now (the path tracer's units, the game's light's brightness); pos in feet.
+// GlEffectsReset: a new world (objects' numbers used again).
+struct GlEffectLight {
+   int id;
+   uint32_t obj;
+   float pos[3], rgb[3];
+   float size, distance;
+   bool moving;
+   bool lava;   // (the OpenGL renderer's own: one over the lava)
+};
+int GlEffectLights(const float cam[3], GlEffectLight *out, int max);
+void GlEffectsReset();
 
 } // namespace darkrt

@@ -1239,6 +1239,7 @@ static const sRtTestSite gRtTestSites[] =
    { "gem",           9,  'o', "LC_Gem",         "The Lost City: its gems" },
    { "arc",           3,  'o', "BigZapArc",      "Cragscleft: the electric arc" },
    { "lamp",          3,  'o', "HangSpotFlush",  "Cragscleft: a flickering lamp" },
+   { "torch",         2,  'o', "torch",          "Lord Bafford's Manor: a wall torch (its flicker)" },
 };
 
 static const sRtTestSite* gRtTestPending = NULL;

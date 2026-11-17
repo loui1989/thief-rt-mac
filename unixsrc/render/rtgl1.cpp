@@ -783,6 +783,10 @@ struct MatJob {
    std::vector<uint8_t> creviced;   // its picture as given to RTGL1 (empty: the texture's own)
    std::vector<uint8_t> upscaled;   // stained glass: its picture made 4x as large (rt_materials.h scale2x)
    int cw = 0, ch = 0;
+   // for the OpenGL renderer (GlMaterialStart): its normal map read back
+   bool glNormal = false;
+   std::vector<uint8_t> normal;
+   int nw = 0, nh = 0;
    // 0 waiting, 1 being made, 2 done, 3 given up
    std::atomic<int> state{0};
 };
@@ -831,6 +835,12 @@ void run_job(MatJob &j)
    j.result = rtmat::prepare(g_matDir, j.name, *j.cls, j.rgba, j.w, j.h,
                              j.glowMap, j.gw, j.gh, j.illumStrength,
                              j.glass.empty() ? nullptr : &j.glass, j.glw, j.glh);
+   if (j.glNormal) {
+      // (the OpenGL renderer wants only the normal map)
+      if (j.result.none || !rtmat::read_png(g_matDir + "/" + j.name + "_n.png", j.normal, j.nw, j.nh))
+         j.normal.clear();
+      return;
+   }
    // crevices darkened in its colour (rt_materials.h)
    if (j.crevice > 0.0f && !j.result.none && j.cls->bump > 0) {
       j.creviced.assign(j.rgba, j.rgba + size_t(j.w) * j.h * 4);
@@ -10932,17 +10942,32 @@ void fx_push(uint32_t id, const float pos[3], const float rgb[3], float level, f
    g_pendingLights.push_back(L);
 }
 
+// the effects' lights this frame, each given to emit (the path tracer's
+// fx_push; the OpenGL renderer's GlEffectLights): its id, its object (0 a
+// burst's), where (game units), its colour times its strength, its level now,
+// its size and whether it is moving
+using FxEmit = void (*)(void *user, uint32_t id, uint32_t obj, const float pos[3], const float rgb[3],
+                        float level, float size, bool moving);
+void fx_step(const float *cam, FxEmit emit, void *user);
+
 void fx_lights()
 {
    g_fxGlow.clear();
    if (!g_cfg.effects || !g_inScene)
       return;
+   fx_step(g_camera.pos,
+           [](void *, uint32_t id, uint32_t, const float pos[3], const float rgb[3], float level, float size,
+              bool) { fx_push(id, pos, rgb, level, size); },
+           nullptr);
+}
+
+void fx_step(const float *cam, FxEmit emit, void *user)
+{
    fx_scan();
    const double t = now_seconds();
    static double s_last = t;
    const float dt = float(std::clamp(t - s_last, 1e-3, 0.2));
    s_last = t;
-   const float *cam = g_camera.pos;
    for (auto it = g_fx.begin(); it != g_fx.end();) {
       const uint32_t obj = it->first;
       FxObj &f = it->second;
@@ -11009,7 +11034,7 @@ void fx_lights()
       float c[3];
       for (int k = 0; k < 3; ++k)
          c[k] = f.rgb[k] * strength;
-      fx_push(kFxLightIds + obj, p, c, level, f.size);
+      emit(user, kFxLightIds + obj, obj, p, c, level, f.size, t - f.lastMoved < 0.6);
       if (f.glow > 0.0f)
          g_fxGlow[obj] = f.glow * std::clamp(level, 0.3f, 1.5f);
    }
@@ -11025,7 +11050,7 @@ void fx_lights()
       float c[3];
       for (int k = 0; k < 3; ++k)
          c[k] = it->rgb[k] * it->peak;
-      fx_push(it->id, it->pos, c, level, 0.3f);
+      emit(user, it->id, 0, it->pos, c, level, 0.3f, false);
       ++it;
    }
 }
@@ -11465,3 +11490,139 @@ void ApplyOutputSize()
       apply_output_size();
 }
 } // namespace darkrt
+
+// ---- the OpenGL renderer's bump maps (rt_backend_internal.h) ----------------
+namespace darkrt {
+struct GlMat {
+   std::vector<uint8_t> rgba;
+   std::shared_ptr<MatJob> job;
+};
+
+std::string GlMaterialSource(float *illum)
+{
+   std::string out;
+   sResImageInfo info;
+   if (illum)
+      *illum = 0.0f;
+   if (g_pendingSource && ResImageInfoFind(g_pendingSource, &info) && info.name[0]) {
+      out = info.name;
+      if (illum)
+         *illum = info.illumStrength > 0 && info.illumMap[0] ? info.illumStrength : 0.0f;
+   }
+   g_pendingSource = nullptr;
+   return out;
+}
+
+void *GlMaterialStart(const std::string &source, const void *rgba, int w, int h, int rowBytes)
+{
+   if (source.empty() || !rgba || w < 4 || h < 4 || rowBytes < w * 4)
+      return nullptr;
+   static bool s_ready = false;
+   if (!s_ready) {
+      // (the path tracer not running: its folder and settings, for the maps'
+      // names to be those it gave them -- its crevices are in the hash)
+      s_ready = true;
+      if (g_rtDir.empty()) {
+         const char *env = getenv("THIEF_RT_DIR");
+         const std::string c = env && *env ? env : "rt";
+         char resolved[PATH_MAX];
+         g_rtDir = realpath(c.c_str(), resolved) ? resolved : c;
+      }
+      if (!g_active)
+         load_settings();
+   }
+   if (!g_cfg.materials || g_rtDir.empty())
+      return nullptr;
+   if (g_matDir.empty()) {
+      g_matDir = g_rtDir + "/mat_dev";
+      mkdir(g_matDir.c_str(), 0755);
+   }
+   rtmat::load_table(g_rtDir);
+   const rtmat::Class *c = rtmat::class_of(source);
+   // (no bumps; a window, its glass mask in its maps' name)
+   if (!c || c->none || c->bump <= 0 || c->window)
+      return nullptr;
+   GlMat *m = new GlMat;
+   m->rgba.resize(size_t(w) * h * 4);
+   for (int y = 0; y < h; ++y)
+      memcpy(m->rgba.data() + size_t(y) * w * 4, static_cast<const uint8_t *>(rgba) + size_t(y) * rowBytes,
+             size_t(w) * 4);
+   m->job = std::make_shared<MatJob>();
+   m->job->rgba = m->rgba.data();
+   m->job->w = w;
+   m->job->h = h;
+   m->job->cls = c;
+   m->job->source = source;
+   m->job->crevice = g_cfg.crevice;
+   m->job->glNormal = true;
+   job_name(*m->job);
+   mat_pool().push(m->job);
+   return m;
+}
+
+int GlMaterialPoll(void *handle, std::vector<uint8_t> &normal, int &w, int &h)
+{
+   GlMat *m = static_cast<GlMat *>(handle);
+   if (!m)
+      return -1;
+   const int s = m->job->state.load();
+   if (s == 3)
+      return -1;
+   if (s != 2)
+      return 0;
+   if (m->job->normal.empty())
+      return -1;
+   normal.swap(m->job->normal);
+   w = m->job->nw;
+   h = m->job->nh;
+   return 1;
+}
+
+void GlMaterialFree(void *handle)
+{
+   GlMat *m = static_cast<GlMat *>(handle);
+   if (!m)
+      return;
+   int waiting = 0;
+   if (!m->job->state.compare_exchange_strong(waiting, 3))
+      while (m->job->state.load() == 1)
+         std::this_thread::sleep_for(std::chrono::milliseconds(1));
+   delete m;
+}
+
+int GlEffectLights(const float cam[3], GlEffectLight *out, int max)
+{
+   if (!cam || !out || max <= 0)
+      return 0;
+   struct Got { std::vector<GlEffectLight> v; const float *cam; } got{{}, cam};
+   fx_step(cam,
+           [](void *user, uint32_t id, uint32_t obj, const float pos[3], const float rgb[3], float level,
+              float size, bool moving) {
+              Got &g = *static_cast<Got *>(user);
+              if (level <= 0.01f)
+                 return;
+              GlEffectLight L{};
+              L.id = int(id);
+              L.obj = obj;
+              L.moving = moving;
+              L.size = size;
+              for (int k = 0; k < 3; ++k) {
+                 L.pos[k] = pos[k];
+                 L.rgb[k] = rgb[k] * level;
+              }
+              const float dx = pos[0] - g.cam[0], dy = pos[1] - g.cam[1], dz = pos[2] - g.cam[2];
+              L.distance = std::sqrt(dx * dx + dy * dy + dz * dz);
+              if (L.distance < 90.0f)
+                 g.v.push_back(L);
+           },
+           &got);
+   g_fxGlow.clear();   // (the path tracer's: no models of its own here)
+   std::sort(got.v.begin(), got.v.end(),
+             [](const GlEffectLight &a, const GlEffectLight &b) { return a.distance < b.distance; });
+   const int n = std::min(max, int(got.v.size()));
+   std::copy(got.v.begin(), got.v.begin() + n, out);
+   return n;
+}
+
+void GlEffectsReset() { fx_reset(); }
+}   // namespace darkrt
