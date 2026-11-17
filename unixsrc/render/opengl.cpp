@@ -108,6 +108,10 @@ GLint g_minLightUniform = -1;
 float g_minLight = 0.06f;
 extern "C" int g_PlayerShadowAlert;   // (src/render/objlight.c: the guards seeing the player's shadow)
 bool g_glFps = false;   // the OpenGL panel's frame counter
+// the real-time lights' settings (dyn:: has them in use)
+int g_dynMaxSetting = 16;
+bool g_dynShadowsSetting = true;
+int g_dynShadowSizeSetting = 512;
 void load_gl_settings()
 {
    const char *home = getenv("HOME");
@@ -128,6 +132,12 @@ void load_gl_settings()
             g_PlayerShadowAlert = value != 0.0f ? 1 : 0;
          else if (!strcmp(key, "fps"))
             g_glFps = value != 0.0f;
+         else if (!strcmp(key, "dynamic_lights"))
+            g_dynMaxSetting = std::clamp(int(value), 0, 32);
+         else if (!strcmp(key, "light_shadows"))
+            g_dynShadowsSetting = value != 0.0f;
+         else if (!strcmp(key, "shadow_size"))
+            g_dynShadowSizeSetting = std::clamp(int(value), 128, 2048);
       fclose(f);
    } else if (FILE *w = fopen(path.c_str(), "w")) {
       // (written once with the default, to be edited)
@@ -214,6 +224,11 @@ const char kShaderPreamble[] =
 #else
 const char kShaderPreamble[] = "#version 330 core\n";
 #endif
+// OpenGL 4 (macOS's 4.1): the scene's shaders with the real-time lights
+// (their shadows in a cube map array)
+const char kShaderPreambleLights[] = "#version 410 core\n#define DYN_LIGHTS 1\n";
+bool g_dynSupported = false;
+const char *shader_preamble() { return g_dynSupported ? kShaderPreambleLights : kShaderPreamble; }
 
 const char kSceneVertexShader[] =
    "layout(location=0) in vec4 position;\n"
@@ -221,7 +236,9 @@ const char kSceneVertexShader[] =
    "layout(location=2) in float fog;\n"
    "layout(location=3) in vec2 texcoord0;\n"
    "layout(location=4) in vec2 texcoord1;\n"
+   "layout(location=5) in vec4 world;\n"
    "uniform vec2 viewportSize;\n"
+   "out vec4 worldPos;\n"
    "out vec4 linearColor;\n"
    "out float linearFog;\n"
    "out float linearWeight;\n"
@@ -234,9 +251,76 @@ const char kSceneVertexShader[] =
       "(position.z*2.0-1.0)*q,q);\n"
    " linearColor=color*q;linearFog=fog*q;linearWeight=q;\n"
    " uv0=texcoord0;uv1=texcoord1;gl_PointSize=1.0;\n"
+   " worldPos=world;\n"
    "}\n";
 
 const char kSceneFragmentShader[] =
+   "in vec4 worldPos;\n"
+   "#ifdef DYN_LIGHTS\n"
+   // The real-time lights (sRenderBackendLight): the light a level's lamp
+   // gives its lightmap, or a moving light's, per pixel, with its shadow.
+   "uniform int dynCount;\n"
+   "uniform float dynEnabled;\n"
+   "uniform vec3 dynCamera;\n"
+   "uniform vec4 dynPos[40];\n"      // xyz, radius
+   "uniform vec4 dynCol[40];\n"      // rgb, bright
+   "uniform vec4 dynSpot[40];\n"     // spot direction
+   "uniform vec4 dynPar[40];\n"      // kind, inner radius, spot inner, spot outer
+   "uniform vec4 dynShadow[40];\n"   // cube layer (-1 none), far, softness
+   "uniform samplerCubeArrayShadow dynShadowMaps;\n"
+   "uniform samplerCubeArrayShadow dynCasterMaps;\n"
+   "uniform float dynDebug;\n"
+   "float dyn_shadow(int i,vec3 p){\n"
+   " vec3 v=p-dynPos[i].xyz;float far=dynShadow[i].y;\n"
+   " float ref=length(v)/far-0.0015;\n"
+   " vec3 d=normalize(v);\n"
+   " vec3 t=normalize(cross(d,abs(d.z)<0.9?vec3(0.0,0.0,1.0):vec3(1.0,0.0,0.0)));\n"
+   " vec3 b=cross(d,t);float r=dynShadow[i].z;float s=1.0;\n"
+   " if(dynShadow[i].x>=0.0){s=0.0;\n"
+   "  s+=texture(dynShadowMaps,vec4(d+(t+b)*r,dynShadow[i].x),ref);\n"
+   "  s+=texture(dynShadowMaps,vec4(d+(t-b)*r,dynShadow[i].x),ref);\n"
+   "  s+=texture(dynShadowMaps,vec4(d+(-t+b)*r,dynShadow[i].x),ref);\n"
+   "  s+=texture(dynShadowMaps,vec4(d+(-t-b)*r,dynShadow[i].x),ref);\n"
+   "  s*=0.25;}\n"
+   // the models' shadows (dynShadow.w: their layer, -1 none)
+   " if(dynShadow[i].w>=0.0){float m=0.0;float r2=r*1.5;\n"
+   "  m+=texture(dynCasterMaps,vec4(d+(t+b)*r2,dynShadow[i].w),ref);\n"
+   "  m+=texture(dynCasterMaps,vec4(d+(t-b)*r2,dynShadow[i].w),ref);\n"
+   "  m+=texture(dynCasterMaps,vec4(d+(-t+b)*r2,dynShadow[i].w),ref);\n"
+   "  m+=texture(dynCasterMaps,vec4(d+(-t-b)*r2,dynShadow[i].w),ref);\n"
+   "  s*=m*0.25;}\n"
+   " return s;\n"
+   "}\n"
+   "vec3 dyn_light(vec3 p){\n"
+   " vec3 n=normalize(cross(dFdx(p),dFdy(p)));\n"
+   " if(dot(n,dynCamera-p)<0.0)n=-n;\n"
+   " vec3 sum=vec3(0.0);\n"
+   " for(int i=0;i<dynCount;++i){\n"
+   "  vec3 L=dynPos[i].xyz-p;float d=max(length(L),0.001);vec3 l=L/d;\n"
+   "  float c=dot(n,l);if(c<=0.0)continue;\n"
+   "  float R=dynPos[i].w,B=dynCol[i].w,f;\n"
+   "  if(dynPar[i].x<0.5){\n"
+   "   if(R>0.0&&d>R)continue;\n"
+   "   f=(0.5+0.5*c)*B/max(d,0.5);\n"
+   "   float inner=dynPar[i].y;\n"
+   "   if(R>0.0&&inner>0.0&&d>inner)f*=(R-d)/(R-inner);\n"
+   "  }else{\n"
+   "   if(R<=0.0||d>=R)continue;\n"
+   "   f=c*B/max(d,0.5)*(1.0-d*d/(R*R));\n"
+   "  }\n"
+   "  if(dynPar[i].z>-0.999){float s=dot(-l,dynSpot[i].xyz);"
+       "f*=clamp((s-dynPar[i].w)/max(dynPar[i].z-dynPar[i].w,0.0001),0.0,1.0);}\n"
+   "  f=min(f,255.0)/255.0;\n"
+   "  if(f<0.002)continue;\n"
+   // (the point moved off its surface by a shadow map texel or so at its
+   // distance, more at a glancing angle: no shadow of a surface on itself)
+   "  if(dynShadow[i].x>=0.0||dynShadow[i].w>=0.0)"
+        "f*=dyn_shadow(i,p+n*(0.06+d*dynShadow[i].z*(1.0+2.0*(1.0-c))));\n"
+   "  sum+=dynCol[i].rgb*f;\n"
+   " }\n"
+   " return sum;\n"
+   "}\n"
+   "#endif\n"
    "in vec4 linearColor;\n"
    "in float linearFog;\n"
    "in float linearWeight;\n"
@@ -256,8 +340,20 @@ const char kSceneFragmentShader[] =
    " vec4 texel=texture(texture0,uv0);\n"
    " if(transparentBlack>0.5&&all(equal(texel.rgb,vec3(0.0))))texel.a=0.0;\n"
    " vec4 color=(linearColor/weight)*texel;\n"
-   " if(useTexture1>0.5){vec4 light=texture(texture1,uv1);"
-      "light.rgb+=minLight*(vec3(1.0)-light.rgb);color*=light;}\n"
+   " if(useTexture1>0.5){vec4 light=texture(texture1,uv1);\n"
+   "#ifdef DYN_LIGHTS\n"
+   "  if(dynEnabled>0.5&&dynCount>0&&worldPos.w>0.99)"
+        "light.rgb=min(light.rgb+dyn_light(worldPos.xyz),vec3(1.0));\n"
+   // (DARK_GL_LIGHTS_DEBUG: 1 the real-time light alone, 2 the lightmap alone)
+   "  if(dynDebug>0.5){vec3 dl=(dynEnabled>0.5&&worldPos.w>0.99)?dyn_light(worldPos.xyz):vec3(0.0);"
+        "light.rgb=dynDebug<1.5?dl:texture(texture1,uv1).rgb;color.rgb=vec3(1.0);\n"
+   // (3: the first light with models' shadows: where they fall, red)
+   "   if(dynDebug>2.5&&dynEnabled>0.5&&worldPos.w>0.99){for(int i=0;i<dynCount;++i)if(dynShadow[i].w>=0.0){"
+        "vec3 nn=normalize(cross(dFdx(worldPos.xyz),dFdy(worldPos.xyz)));if(dot(nn,dynCamera-worldPos.xyz)<0.0)nn=-nn;"
+        "float dd=length(dynPos[i].xyz-worldPos.xyz);"
+        "float s=dyn_shadow(i,worldPos.xyz+nn*(0.06+dd*dynShadow[i].z*2.0));light.rgb=vec3(1.0,s,s);break;}}}\n"
+   "#endif\n"
+   "  light.rgb+=minLight*(vec3(1.0)-light.rgb);color*=light;}\n"
    " if(alphaTest>0.5&&texel.a<0.5)discard;\n"
    " if(fogEnabled>0.5)color.rgb=mix(fogColor,color.rgb,"
       "clamp(linearFog/weight,0.0,1.0));\n"
@@ -267,7 +363,7 @@ const char kSceneFragmentShader[] =
 GLuint compile_shader(GLenum type, const char *source)
 {
    GLuint shader = glCreateShader(type);
-   const GLchar *parts[] = {kShaderPreamble, source};
+   const GLchar *parts[] = {shader_preamble(), source};
    glShaderSource(shader, 2, parts, nullptr);
    glCompileShader(shader);
    GLint compiled = GL_FALSE;
@@ -284,9 +380,485 @@ GLuint compile_shader(GLenum type, const char *source)
    return 0;
 }
 
+// ---------------------------------------------------------------------------
+// The real-time lights (as NewDark's hardware renderer has them): the
+// animated and moving lights light the world per pixel, with shadows from
+// the level's walls in a cube map each, their own light taken out of the
+// lightmaps (objlight.c). gl_settings.txt: dynamic_lights (how many at most,
+// 0 off), light_shadows (0/1), shadow_size (each cube face, pixels).
+namespace dyn {
+int &g_max = g_dynMaxSetting;            // the settings
+bool &g_shadows = g_dynShadowsSetting;
+int &g_shadowSize = g_dynShadowSizeSetting;
+constexpr int kMaxLights = 40;   // (the shader's arrays)
+
+GLint uCount = -1, uEnabled = -1, uCamera = -1, uPos = -1, uCol = -1, uSpot = -1, uPar = -1,
+      uShadow = -1, uMaps = -1;
+int g_count = 0;          // this frame's lights
+bool g_active = false;    // lights set this frame
+
+// the level's solid surfaces, by cell
+GLuint g_meshBuffer = 0, g_meshArray = 0;
+std::vector<int> g_cellFirst;
+std::vector<float> g_cellSphere;
+int g_meshTriangles = 0;
+unsigned g_meshGeneration = 0;
+
+// the shadows: a cube map array of depth, a slot (6 layers) per light
+GLuint g_shadowProgram = 0, g_shadowTex = 0, g_shadowFbo = 0;
+GLint suViewProj = -1, suLight = -1, suFar = -1;
+int g_slots = 0, g_slotSize = 0;
+struct Slot { int id = -1; unsigned generation = 0; float pos[3] = {0, 0, 0}; float far = 0; int used = 0; };
+std::vector<Slot> g_slot;
+int g_frame = 0;
+
+// The models the view drew (solid ones, their world triangles): this
+// frame's are gathered as it is drawn and cast shadows from the next frame
+// on, into a second cube map array (a slot each for the nearest lights)
+bool g_collect = false;
+float g_cam[3] = {0, 0, 0};
+std::vector<float> g_casters, g_castersUse;
+GLuint g_casterTex = 0, g_casterBuffer = 0, g_casterArray = 0;
+constexpr int kCasterSlots = 8;
+int g_casterSize = 0;
+GLint uCasters = -1;
+
+const char kShadowVertex[] =
+   "layout(location=0) in vec3 position;\n"
+   "uniform mat4 viewProj;\n"
+   "out vec3 wp;\n"
+   "void main(){wp=position;gl_Position=viewProj*vec4(position,1.0);}\n";
+const char kShadowFragment[] =
+   "in vec3 wp;\n"
+   "uniform vec3 lightPos;\n"
+   "uniform float far;\n"
+   "void main(){gl_FragDepth=clamp(length(wp-lightPos)/far,0.0,1.0);}\n";
+
+GLuint compile(GLenum type, const char *src) { return compile_shader(type, src); }
+
+void init(GLuint scene)
+{
+   if (!g_dynSupported || !scene)
+      return;
+   uCount = glGetUniformLocation(scene, "dynCount");
+   uEnabled = glGetUniformLocation(scene, "dynEnabled");
+   uCamera = glGetUniformLocation(scene, "dynCamera");
+   uPos = glGetUniformLocation(scene, "dynPos");
+   uCol = glGetUniformLocation(scene, "dynCol");
+   uSpot = glGetUniformLocation(scene, "dynSpot");
+   uPar = glGetUniformLocation(scene, "dynPar");
+   uShadow = glGetUniformLocation(scene, "dynShadow");
+   uMaps = glGetUniformLocation(scene, "dynShadowMaps");
+   glUseProgram(scene);
+   if (uMaps >= 0) glUniform1i(uMaps, 2);
+   uCasters = glGetUniformLocation(scene, "dynCasterMaps");
+   if (uCasters >= 0) glUniform1i(uCasters, 3);
+   if (const char *d = getenv("DARK_GL_LIGHTS_DEBUG"))
+      glUniform1f(glGetUniformLocation(scene, "dynDebug"), float(atof(d)));
+   if (uCount >= 0) glUniform1i(uCount, 0);
+   GLuint vs = compile(GL_VERTEX_SHADER, kShadowVertex), fs = compile(GL_FRAGMENT_SHADER, kShadowFragment);
+   if (vs && fs) {
+      g_shadowProgram = glCreateProgram();
+      glAttachShader(g_shadowProgram, vs);
+      glAttachShader(g_shadowProgram, fs);
+      glLinkProgram(g_shadowProgram);
+      GLint ok = GL_FALSE;
+      glGetProgramiv(g_shadowProgram, GL_LINK_STATUS, &ok);
+      if (ok != GL_TRUE) {
+         glDeleteProgram(g_shadowProgram);
+         g_shadowProgram = 0;
+      } else {
+         suViewProj = glGetUniformLocation(g_shadowProgram, "viewProj");
+         suLight = glGetUniformLocation(g_shadowProgram, "lightPos");
+         suFar = glGetUniformLocation(g_shadowProgram, "far");
+      }
+   }
+   if (vs) glDeleteShader(vs);
+   if (fs) glDeleteShader(fs);
+   glGenFramebuffers(1, &g_shadowFbo);
+   fprintf(stderr, "OpenGL: real-time lights %s (gl_settings.txt dynamic_lights %d, light_shadows %d, shadow_size %d)\n",
+           uCount >= 0 && g_shadowProgram ? "ready" : "not available", g_max, g_shadows ? 1 : 0, g_shadowSize);
+}
+
+bool wanted() { return g_dynSupported && uCount >= 0 && g_max > 0 && !g_rt; }
+
+// the shadow maps' storage, for this many lights at this size
+void ensure_slots(int slots)
+{
+   if (slots == g_slots && g_shadowSize == g_slotSize && g_shadowTex)
+      return;
+   if (!g_shadowTex)
+      glGenTextures(1, &g_shadowTex);
+   glActiveTexture(GL_TEXTURE2);
+   glBindTexture(GL_TEXTURE_CUBE_MAP_ARRAY, g_shadowTex);
+   glTexImage3D(GL_TEXTURE_CUBE_MAP_ARRAY, 0, GL_DEPTH_COMPONENT16, g_shadowSize, g_shadowSize,
+                slots * 6, 0, GL_DEPTH_COMPONENT, GL_UNSIGNED_SHORT, nullptr);
+   glTexParameteri(GL_TEXTURE_CUBE_MAP_ARRAY, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+   glTexParameteri(GL_TEXTURE_CUBE_MAP_ARRAY, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+   glTexParameteri(GL_TEXTURE_CUBE_MAP_ARRAY, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+   glTexParameteri(GL_TEXTURE_CUBE_MAP_ARRAY, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+   glTexParameteri(GL_TEXTURE_CUBE_MAP_ARRAY, GL_TEXTURE_COMPARE_MODE, GL_COMPARE_REF_TO_TEXTURE);
+   glTexParameteri(GL_TEXTURE_CUBE_MAP_ARRAY, GL_TEXTURE_COMPARE_FUNC, GL_LEQUAL);
+   glActiveTexture(GL_TEXTURE0);
+   g_slots = slots;
+   g_slotSize = g_shadowSize;
+   g_slot.assign(size_t(slots), Slot());
+}
+
+void mesh(const float *xyz, int triangles, const int *cellFirst, const float *cellSphere, int cells)
+{
+   if (!g_dynSupported)
+      return;
+   if (!g_meshBuffer) {
+      glGenVertexArrays(1, &g_meshArray);
+      glGenBuffers(1, &g_meshBuffer);
+   }
+   GLint array = 0, buffer = 0;
+   glGetIntegerv(GL_VERTEX_ARRAY_BINDING, &array);
+   glGetIntegerv(GL_ARRAY_BUFFER_BINDING, &buffer);
+   glBindVertexArray(g_meshArray);
+   glBindBuffer(GL_ARRAY_BUFFER, g_meshBuffer);
+   glBufferData(GL_ARRAY_BUFFER, GLsizeiptr(size_t(triangles) * 9 * sizeof(float)), xyz, GL_STATIC_DRAW);
+   glEnableVertexAttribArray(0);
+   glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 3 * sizeof(float), nullptr);
+   glBindVertexArray(GLuint(array));
+   glBindBuffer(GL_ARRAY_BUFFER, GLuint(buffer));
+   g_cellFirst.assign(cellFirst, cellFirst + cells + 1);
+   g_cellSphere.assign(cellSphere, cellSphere + size_t(cells) * 4);
+   g_meshTriangles = triangles;
+   ++g_meshGeneration;   // (every shadow drawn again)
+   fprintf(stderr, "OpenGL: the level's walls for the lights' shadows: %d triangles in %d cells\n",
+           triangles, cells);
+}
+
+// column-major 4x4: perspective (90 degrees, square) times look-at
+void face_matrix(float out[16], const float eye[3], int face, float nearZ, float farZ)
+{
+   static const float dirs[6][3] = {{1, 0, 0}, {-1, 0, 0}, {0, 1, 0}, {0, -1, 0}, {0, 0, 1}, {0, 0, -1}};
+   static const float ups[6][3] = {{0, -1, 0}, {0, -1, 0}, {0, 0, 1}, {0, 0, -1}, {0, -1, 0}, {0, -1, 0}};
+   const float *f = dirs[face], *u0 = ups[face];
+   // s = f x up, u = s x f
+   float s[3] = {f[1] * u0[2] - f[2] * u0[1], f[2] * u0[0] - f[0] * u0[2], f[0] * u0[1] - f[1] * u0[0]};
+   float u[3] = {s[1] * f[2] - s[2] * f[1], s[2] * f[0] - s[0] * f[2], s[0] * f[1] - s[1] * f[0]};
+   float view[16] = {s[0], u[0], -f[0], 0, s[1], u[1], -f[1], 0, s[2], u[2], -f[2], 0,
+                     -(s[0] * eye[0] + s[1] * eye[1] + s[2] * eye[2]),
+                     -(u[0] * eye[0] + u[1] * eye[1] + u[2] * eye[2]),
+                     (f[0] * eye[0] + f[1] * eye[1] + f[2] * eye[2]), 1};
+   const float a = (farZ + nearZ) / (nearZ - farZ), b = 2.0f * farZ * nearZ / (nearZ - farZ);
+   float proj[16] = {1, 0, 0, 0, 0, 1, 0, 0, 0, 0, a, -1, 0, 0, b, 0};
+   for (int c = 0; c < 4; ++c)
+      for (int r = 0; r < 4; ++r) {
+         float v = 0;
+         for (int k = 0; k < 4; ++k)
+            v += proj[k * 4 + r] * view[c * 4 + k];
+         out[c * 4 + r] = v;
+      }
+}
+
+// how far a light reaches (its shadow's far plane)
+float reach(const sRenderBackendLight &l)
+{
+   if (l.radius > 0.0f)
+      return l.radius;
+   // (no radius: out to where it gives a lightmap less than 2 of 255)
+   return std::clamp(l.bright / 2.0f, 10.0f, 80.0f);
+}
+
+void ensure_casters()
+{
+   if (g_casterTex && g_casterSize == g_shadowSize)
+      return;
+   if (!g_casterTex) {
+      glGenTextures(1, &g_casterTex);
+      glGenVertexArrays(1, &g_casterArray);
+      glGenBuffers(1, &g_casterBuffer);
+      GLint array = 0, buffer = 0;
+      glGetIntegerv(GL_VERTEX_ARRAY_BINDING, &array);
+      glGetIntegerv(GL_ARRAY_BUFFER_BINDING, &buffer);
+      glBindVertexArray(g_casterArray);
+      glBindBuffer(GL_ARRAY_BUFFER, g_casterBuffer);
+      glEnableVertexAttribArray(0);
+      glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 3 * sizeof(float), nullptr);
+      glBindVertexArray(GLuint(array));
+      glBindBuffer(GL_ARRAY_BUFFER, GLuint(buffer));
+   }
+   glActiveTexture(GL_TEXTURE3);
+   glBindTexture(GL_TEXTURE_CUBE_MAP_ARRAY, g_casterTex);
+   glTexImage3D(GL_TEXTURE_CUBE_MAP_ARRAY, 0, GL_DEPTH_COMPONENT16, g_shadowSize, g_shadowSize,
+                kCasterSlots * 6, 0, GL_DEPTH_COMPONENT, GL_UNSIGNED_SHORT, nullptr);
+   glTexParameteri(GL_TEXTURE_CUBE_MAP_ARRAY, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+   glTexParameteri(GL_TEXTURE_CUBE_MAP_ARRAY, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+   glTexParameteri(GL_TEXTURE_CUBE_MAP_ARRAY, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+   glTexParameteri(GL_TEXTURE_CUBE_MAP_ARRAY, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+   glTexParameteri(GL_TEXTURE_CUBE_MAP_ARRAY, GL_TEXTURE_COMPARE_MODE, GL_COMPARE_REF_TO_TEXTURE);
+   glTexParameteri(GL_TEXTURE_CUBE_MAP_ARRAY, GL_TEXTURE_COMPARE_FUNC, GL_LEQUAL);
+   glActiveTexture(GL_TEXTURE0);
+   g_casterSize = g_shadowSize;
+}
+
+// the models near a light, into its slot of the models' shadows; false: none
+bool draw_casters(const sRenderBackendLight &l, int slot, float farZ)
+{
+   static std::vector<float> mine;
+   mine.clear();
+   const float reach2 = farZ * farZ;
+   for (size_t t = 0; t + 9 <= g_castersUse.size(); t += 9) {
+      const float *v = &g_castersUse[t];
+      bool near = false;
+      for (int k = 0; k < 3 && !near; ++k) {
+         const float dx = v[k * 3] - l.pos[0], dy = v[k * 3 + 1] - l.pos[1], dz = v[k * 3 + 2] - l.pos[2];
+         near = dx * dx + dy * dy + dz * dz < reach2;
+      }
+      if (near)
+         mine.insert(mine.end(), v, v + 9);
+   }
+   if (mine.empty())
+      return false;
+   glUseProgram(g_shadowProgram);
+   glUniform3f(suLight, l.pos[0], l.pos[1], l.pos[2]);
+   glUniform1f(suFar, farZ);
+   glBindVertexArray(g_casterArray);
+   glBindBuffer(GL_ARRAY_BUFFER, g_casterBuffer);
+   glBufferData(GL_ARRAY_BUFFER, GLsizeiptr(mine.size() * sizeof(float)), mine.data(), GL_STREAM_DRAW);
+   for (int face = 0; face < 6; ++face) {
+      glFramebufferTextureLayer(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, g_casterTex, 0, slot * 6 + face);
+      glClear(GL_DEPTH_BUFFER_BIT);
+      float m[16];
+      // (from a foot out: a lamp's own fixture, round its light, casts nothing)
+      face_matrix(m, l.pos, face, 1.0f, farZ);
+      glUniformMatrix4fv(suViewProj, 1, GL_FALSE, m);
+      glDrawArrays(GL_TRIANGLES, 0, GLsizei(mine.size() / 3));
+   }
+   return true;
+}
+
+void draw_shadow(const sRenderBackendLight &l, int slot, float farZ)
+{
+   glUseProgram(g_shadowProgram);
+   glUniform3f(suLight, l.pos[0], l.pos[1], l.pos[2]);
+   glUniform1f(suFar, farZ);
+   glBindVertexArray(g_meshArray);
+   // the cells near enough
+   static std::vector<std::pair<int, int>> runs;
+   runs.clear();
+   const int cells = int(g_cellFirst.size()) - 1;
+   for (int c = 0; c < cells; ++c) {
+      const float *sp = &g_cellSphere[size_t(c) * 4];
+      const float dx = sp[0] - l.pos[0], dy = sp[1] - l.pos[1], dz = sp[2] - l.pos[2];
+      if (dx * dx + dy * dy + dz * dz > (farZ + sp[3]) * (farZ + sp[3]))
+         continue;
+      const int a = g_cellFirst[size_t(c)], b = g_cellFirst[size_t(c) + 1];
+      if (b <= a)
+         continue;
+      if (!runs.empty() && runs.back().second == a)
+         runs.back().second = b;
+      else
+         runs.push_back({a, b});
+   }
+   for (int face = 0; face < 6; ++face) {
+      glFramebufferTextureLayer(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, g_shadowTex, 0, slot * 6 + face);
+      glClear(GL_DEPTH_BUFFER_BIT);
+      float m[16];
+      face_matrix(m, l.pos, face, 0.2f, farZ);
+      glUniformMatrix4fv(suViewProj, 1, GL_FALSE, m);
+      for (const auto &r : runs)
+         glDrawArrays(GL_TRIANGLES, r.first * 3, (r.second - r.first) * 3);
+   }
+}
+
+void lights(const sRenderBackendLight *in, int count)
+{
+   g_active = false;
+   g_count = 0;
+   if (!wanted() || uCount < 0)
+      return;
+   ++g_frame;
+   count = std::min(count, kMaxLights);
+   float pos[kMaxLights * 4], col[kMaxLights * 4], spot[kMaxLights * 4], par[kMaxLights * 4],
+         sh[kMaxLights * 4];
+   const bool shadows = g_shadows && g_shadowProgram && g_meshTriangles > 0;
+   GLint program = 0, array = 0, buffer = 0, fbo = 0, view[4];
+   GLboolean depthTest = GL_FALSE, blend = GL_FALSE, depthMask = GL_TRUE, colorMask[4];
+   GLint depthFunc = GL_LESS;
+   const bool casters = shadows && !g_castersUse.empty();
+   int casterSlot = 0;
+   if (shadows) {
+      // (enough for the setting's lights and a few moving ones; grown, never
+      // shrunk -- made again, every shadow is drawn again)
+      ensure_slots(std::max(g_slots, std::min(kMaxLights, std::max(count, g_max + 8))));
+      if (casters)
+         ensure_casters();
+      glGetIntegerv(GL_CURRENT_PROGRAM, &program);
+      glGetIntegerv(GL_VERTEX_ARRAY_BINDING, &array);
+      glGetIntegerv(GL_ARRAY_BUFFER_BINDING, &buffer);
+      glGetIntegerv(GL_DRAW_FRAMEBUFFER_BINDING, &fbo);
+      glGetIntegerv(GL_VIEWPORT, view);
+      glGetBooleanv(GL_DEPTH_TEST, &depthTest);
+      glGetBooleanv(GL_BLEND, &blend);
+      glGetBooleanv(GL_DEPTH_WRITEMASK, &depthMask);
+      glGetBooleanv(GL_COLOR_WRITEMASK, colorMask);
+      glGetIntegerv(GL_DEPTH_FUNC, &depthFunc);
+      glBindFramebuffer(GL_FRAMEBUFFER, g_shadowFbo);
+      glDrawBuffer(GL_NONE);
+      glReadBuffer(GL_NONE);
+      glViewport(0, 0, g_shadowSize, g_shadowSize);
+      glEnable(GL_DEPTH_TEST);
+      glDepthFunc(GL_LESS);
+      glDepthMask(GL_TRUE);
+      glDisable(GL_BLEND);
+      glColorMask(GL_FALSE, GL_FALSE, GL_FALSE, GL_FALSE);
+      for (Slot &s : g_slot)
+         s.used = 0;
+   }
+   int drawn = 0;
+   for (int i = 0; i < count; ++i) {
+      const sRenderBackendLight &l = in[i];
+      const float farZ = reach(l) + 1.0f;
+      pos[i * 4] = l.pos[0]; pos[i * 4 + 1] = l.pos[1]; pos[i * 4 + 2] = l.pos[2]; pos[i * 4 + 3] = l.radius;
+      col[i * 4] = l.color[0]; col[i * 4 + 1] = l.color[1]; col[i * 4 + 2] = l.color[2]; col[i * 4 + 3] = l.bright;
+      spot[i * 4] = l.dir[0]; spot[i * 4 + 1] = l.dir[1]; spot[i * 4 + 2] = l.dir[2]; spot[i * 4 + 3] = 0;
+      par[i * 4] = float(l.kind); par[i * 4 + 1] = l.inner_radius;
+      par[i * 4 + 2] = l.spot_inner; par[i * 4 + 3] = l.spot_outer;
+      sh[i * 4] = -1.0f; sh[i * 4 + 1] = farZ; sh[i * 4 + 2] = 2.5f / float(g_shadowSize); sh[i * 4 + 3] = -1.0f;
+      if (!shadows)
+         continue;
+      if (casters && casterSlot < kCasterSlots && draw_casters(l, casterSlot, farZ))
+         sh[i * 4 + 3] = float(casterSlot++);
+      // its slot: the one it had (still good if it has not moved), else a free one
+      int slot = -1;
+      for (int s = 0; s < g_slots; ++s)
+         if (g_slot[size_t(s)].id == l.id && !g_slot[size_t(s)].used) { slot = s; break; }
+      if (slot < 0)
+         for (int s = 0; s < g_slots; ++s)
+            if (!g_slot[size_t(s)].used) {
+               // (the one least likely wanted again: not a light of this frame)
+               bool mine = false;
+               for (int j = i + 1; j < count && !mine; ++j)
+                  mine = in[j].id == g_slot[size_t(s)].id;
+               if (!mine) { slot = s; g_slot[size_t(s)].id = -1; break; }
+            }
+      if (slot < 0)
+         continue;
+      Slot &s = g_slot[size_t(slot)];
+      s.used = 1;
+      const bool same = s.id == l.id && s.generation == g_meshGeneration && !l.moving &&
+                        s.pos[0] == l.pos[0] && s.pos[1] == l.pos[1] && s.pos[2] == l.pos[2] && s.far == farZ;
+      if (!same) {
+         draw_shadow(l, slot, farZ);
+         s.id = l.id;
+         s.generation = g_meshGeneration;
+         s.pos[0] = l.pos[0]; s.pos[1] = l.pos[1]; s.pos[2] = l.pos[2];
+         s.far = farZ;
+         ++drawn;
+      }
+      sh[i * 4] = float(slot);
+   }
+   if (shadows) {
+      glBindFramebuffer(GL_FRAMEBUFFER, GLuint(fbo));
+      if (fbo == 0) { glDrawBuffer(GL_BACK); glReadBuffer(GL_BACK); }
+      glViewport(view[0], view[1], view[2], view[3]);
+      if (depthTest) glEnable(GL_DEPTH_TEST); else glDisable(GL_DEPTH_TEST);
+      if (blend) glEnable(GL_BLEND); else glDisable(GL_BLEND);
+      glDepthMask(depthMask);
+      glDepthFunc(GLenum(depthFunc));
+      glColorMask(colorMask[0], colorMask[1], colorMask[2], colorMask[3]);
+      glBindVertexArray(GLuint(array));
+      glBindBuffer(GL_ARRAY_BUFFER, GLuint(buffer));
+      glUseProgram(GLuint(program));
+   }
+   glUseProgram(g_sceneProgram);
+   glUniform1i(uCount, count);
+   if (count > 0) {
+      glUniform4fv(uPos, count, pos);
+      glUniform4fv(uCol, count, col);
+      glUniform4fv(uSpot, count, spot);
+      glUniform4fv(uPar, count, par);
+      glUniform4fv(uShadow, count, sh);
+   }
+   if (g_shadowTex) {
+      glActiveTexture(GL_TEXTURE2);
+      glBindTexture(GL_TEXTURE_CUBE_MAP_ARRAY, g_shadowTex);
+      glActiveTexture(GL_TEXTURE0);
+   }
+   if (g_casterTex) {
+      glActiveTexture(GL_TEXTURE3);
+      glBindTexture(GL_TEXTURE_CUBE_MAP_ARRAY, g_casterTex);
+      glActiveTexture(GL_TEXTURE0);
+   }
+   // the view's models gathered as it is drawn
+   g_collect = count > 0 && shadows;
+   g_casters.clear();
+   g_count = count;
+   g_active = count > 0;
+   if (getenv("DARK_GL_LIGHTS_LIST") && (g_frame % 50) == 0)
+      for (int i = 0; i < count; ++i)
+         fprintf(stderr, "  light %d id %d kind %d at (%.1f %.1f %.1f) bright %.0f colour %.2f %.2f %.2f radius %.1f inner %.1f spot %.2f %.2f shadow %.0f\n",
+                 i, in[i].id, in[i].kind, in[i].pos[0], in[i].pos[1], in[i].pos[2], in[i].bright,
+                 in[i].color[0], in[i].color[1], in[i].color[2], in[i].radius, in[i].inner_radius,
+                 in[i].spot_inner, in[i].spot_outer, sh[i * 4]);
+   static int s_logged = -1;
+   if (count != s_logged && (g_frame % 120) == 1) {
+      s_logged = count;
+      fprintf(stderr, "OpenGL: %d real-time lights, %d shadows drawn this frame; models' shadows for %d of them (%zu triangles)\n",
+              count, drawn, casterSlot, g_castersUse.size() / 9);
+   }
+}
+
+// a draw of the view's: its solid triangles kept, for the models' shadows
+void collect(const sRenderBackendVertex *v, int count, bool second, int primitive)
+{
+   if (!g_collect || second || primitive != kRenderBackendTriangles || count < 3)
+      return;
+   if (g_blendMode != kRenderBackendBlendOpaque && !g_alphaTest)
+      return;
+   for (int t = 0; t + 2 < count; t += 3) {
+      const sRenderBackendVertex *a = &v[t], *b = &v[t + 1], *c = &v[t + 2];
+      if (a->wvalid < 0.5f || b->wvalid < 0.5f || c->wvalid < 0.5f)
+         continue;
+      // (not the player's own arm and weapon, held at the camera)
+      const float mx = (a->wx + b->wx + c->wx) / 3 - g_cam[0], my = (a->wy + b->wy + c->wy) / 3 - g_cam[1],
+                  mz = (a->wz + b->wz + c->wz) / 3 - g_cam[2];
+      if (mx * mx + my * my + mz * mz < 2.5f * 2.5f)
+         continue;
+      const float tri[9] = {a->wx, a->wy, a->wz, b->wx, b->wy, b->wz, c->wx, c->wy, c->wz};
+      g_casters.insert(g_casters.end(), tri, tri + 9);
+   }
+   if (g_casters.size() > size_t(9) * 200000)
+      g_collect = false;   // (enough)
+}
+
+void view_end()
+{
+   g_castersUse.swap(g_casters);
+   g_casters.clear();
+   g_collect = false;
+}
+
+void camera(const float pos[3])
+{
+   g_cam[0] = pos[0]; g_cam[1] = pos[1]; g_cam[2] = pos[2];
+   if (uCamera >= 0 && g_sceneProgram) {
+      glUseProgram(g_sceneProgram);
+      glUniform3f(uCamera, pos[0], pos[1], pos[2]);
+   }
+}
+}   // namespace dyn
+
 bool create_scene_pipeline()
 {
    while (glGetError() != GL_NO_ERROR) {}
+#ifndef DARK_OPENGL_ES
+   {
+      // OpenGL 4 (cube map arrays): the real-time lights
+      GLint major = 0, minor = 0;
+      glGetIntegerv(GL_MAJOR_VERSION, &major);
+      glGetIntegerv(GL_MINOR_VERSION, &minor);
+#ifdef DARK_RT
+      g_dynSupported = major >= 4 && !getenv("DARK_GL_NO_LIGHTS");
+#endif
+      fprintf(stderr, "OpenGL %d.%d%s\n", major, minor, g_dynSupported ? ": the real-time lights' shaders" : "");
+   }
+#endif
    GLuint vertexShader = compile_shader(GL_VERTEX_SHADER, kSceneVertexShader);
    GLuint fragmentShader = compile_shader(GL_FRAGMENT_SHADER, kSceneFragmentShader);
    if (!vertexShader || !fragmentShader) {
@@ -321,6 +893,8 @@ bool create_scene_pipeline()
    g_useTexture1Uniform = glGetUniformLocation(g_sceneProgram, "useTexture1");
    g_minLightUniform = glGetUniformLocation(g_sceneProgram, "minLight");
    load_gl_settings();
+   dyn::init(g_sceneProgram);
+   glUseProgram(g_sceneProgram);
    g_fogEnabledUniform = glGetUniformLocation(g_sceneProgram, "fogEnabled");
    g_fogColorUniform = glGetUniformLocation(g_sceneProgram, "fogColor");
    g_alphaTestUniform = glGetUniformLocation(g_sceneProgram, "alphaTest");
@@ -335,9 +909,9 @@ bool create_scene_pipeline()
    const size_t offsets[] = {
       offsetof(sRenderBackendVertex, x), offsetof(sRenderBackendVertex, r),
       offsetof(sRenderBackendVertex, fog), offsetof(sRenderBackendVertex, u0),
-      offsetof(sRenderBackendVertex, u1)};
-   const GLint sizes[] = {4, 4, 1, 2, 2};
-   for (GLuint i = 0; i < 5; ++i) {
+      offsetof(sRenderBackendVertex, u1), offsetof(sRenderBackendVertex, wx)};
+   const GLint sizes[] = {4, 4, 1, 2, 2, 4};
+   for (GLuint i = 0; i < 6; ++i) {
       glEnableVertexAttribArray(i);
       glVertexAttribPointer(i, sizes[i], GL_FLOAT, GL_FALSE, stride,
          reinterpret_cast<const void *>(offsets[i]));
@@ -509,7 +1083,7 @@ bool draw_vertices(GLenum primitive, const sRenderBackendVertex *vertices, int c
 namespace glpanel {
 bool g_open = false;
 int g_row = 0;
-enum { kShadow, kMinLight, kFps, kRows };
+enum { kShadow, kMinLight, kDynLights, kDynShadows, kFps, kRows };
 Texture *g_font = nullptr, *g_white = nullptr;
 
 std::string settings_path()
@@ -527,7 +1101,9 @@ std::string settings_path()
 void save()
 {
    if (FILE *w = fopen(settings_path().c_str(), "w")) {
-      fprintf(w, "min_light %.2f\nshadow_alert %d\nfps %d\n", g_minLight, g_PlayerShadowAlert, g_glFps ? 1 : 0);
+      fprintf(w, "min_light %.2f\nshadow_alert %d\nfps %d\ndynamic_lights %d\nlight_shadows %d\nshadow_size %d\n",
+              g_minLight, g_PlayerShadowAlert, g_glFps ? 1 : 0, g_dynMaxSetting, g_dynShadowsSetting ? 1 : 0,
+              g_dynShadowSizeSetting);
       fclose(w);
    }
 }
@@ -537,6 +1113,8 @@ const char *label(int row)
    switch (row) {
    case kShadow: return "Guards notice your shadow";
    case kMinLight: return "Unlit corners lifted to";
+   case kDynLights: return "Real-time lights (lamps, torches)";
+   case kDynShadows: return "Their shadows";
    default: return "FPS counter";
    }
 }
@@ -550,6 +1128,12 @@ std::string value(int row)
       if (g_minLight <= 0.0f) return "Off (black, as the game)";
       snprintf(b, sizeof(b), "%.0f%% of full light", g_minLight * 100.0f);
       return b;
+   case kDynLights:
+      if (!g_dynSupported) return "Off (needs OpenGL 4)";
+      if (g_dynMaxSetting <= 0) return "Off (lightmaps, as the game)";
+      snprintf(b, sizeof(b), "The nearest %d", g_dynMaxSetting);
+      return b;
+   case kDynShadows: return g_dynShadowsSetting ? "On" : "Off";
    default: return g_glFps ? "On" : "Off";
    }
 }
@@ -559,6 +1143,16 @@ void change(int row, int dir)
    switch (row) {
    case kShadow: g_PlayerShadowAlert = !g_PlayerShadowAlert; break;
    case kMinLight: g_minLight = std::clamp(std::round((g_minLight + 0.02f * dir) * 50.0f) / 50.0f, 0.0f, 0.5f); break;
+   case kDynLights: {
+      static const int steps[] = {0, 8, 16, 24, 32};
+      int at = 0;
+      for (int i = 0; i < 5; ++i)
+         if (steps[i] <= g_dynMaxSetting) at = i;
+      at = (at + (dir > 0 ? 1 : 4)) % 5;
+      g_dynMaxSetting = steps[at];
+      break;
+   }
+   case kDynShadows: g_dynShadowsSetting = !g_dynShadowsSetting; break;
    default: g_glFps = !g_glFps; break;
    }
    save();
@@ -850,6 +1444,8 @@ bool draw_vertices(GLenum primitive, const sRenderBackendVertex *vertices,
       ((fogColor >> 8) & 255) / 255.0f, (fogColor & 255) / 255.0f);
    glUniform1f(g_alphaTestUniform, alphaTest ? 1.0f : 0.0f);
    glUniform1f(g_transparentBlackUniform, transparentBlack ? 1.0f : 0.0f);
+   if (dyn::uEnabled >= 0)
+      glUniform1f(dyn::uEnabled, second && dyn::g_active ? 1.0f : 0.0f);
    glBindVertexArray(g_sceneVertexArray);
    glBindBuffer(GL_ARRAY_BUFFER, g_sceneBuffer);
    glBufferData(GL_ARRAY_BUFFER,
@@ -1857,10 +2453,39 @@ int RenderBackendDraw(int primitive,const sRenderBackendVertex *vertices,int cou
    bind_texture(1,second?static_cast<Texture*>(g_textures[1]):nullptr);
    glActiveTexture(GL_TEXTURE0);
    GLenum p=primitive==kRenderBackendLines?GL_LINES:primitive==kRenderBackendPoints?GL_POINTS:GL_TRIANGLES;
+   if (dyn::g_collect) dyn::collect(vertices,count,second!=0,primitive);
    return draw_vertices(p,vertices,count,second!=0,g_width,g_height,g_fog,
       g_fogColor,g_alphaTest);
 }
 void RenderBackendTraceReset(void) { if(g_trace){fclose(g_trace);g_trace=nullptr;} const char*p=getenv("DARK_RENDER_TRACE");if(p&&*p)g_trace=fopen(p,"w"); }
 void RenderBackendTrace(const char *format,...) { if(!g_trace)return;va_list args;va_start(args,format);vfprintf(g_trace,format,args);va_end(args);fputc('\n',g_trace);fflush(g_trace); }
 int RenderBackendCaptureComplete(void) { return g_captureComplete; }
+}
+
+// ---- the OpenGL renderer's real-time lights (render_backend.h) -------------
+extern "C" int g_RenderGLWorldPositions = 0;
+int RenderBackendDynamicLightsWanted(void)
+{
+   const bool on = g_context && dyn::wanted();
+   g_RenderGLWorldPositions = on ? 1 : 0;
+   return on ? dyn::g_max : 0;
+}
+void RenderBackendSetWorldShadowMesh(const float *xyz, int triangles, const int *cellFirst,
+                                     const float *cellSphere, int cells)
+{
+   if (g_context && !g_rt && xyz && cellFirst && cellSphere && cells > 0)
+      dyn::mesh(xyz, triangles, cellFirst, cellSphere, cells);
+}
+void RenderBackendSetDynamicLights(const sRenderBackendLight *lights, int count, const float camera[3])
+{
+   if (!g_context || g_rt)
+      return;
+   if (camera)
+      dyn::camera(camera);
+   dyn::lights(lights, lights ? count : 0);
+}
+void RenderBackendDynamicViewEnd(void)
+{
+   if (g_context && !g_rt)
+      dyn::view_end();
 }

@@ -7,6 +7,8 @@
 // code for multiple light source lighting
 
 #include <lg.h>
+#include <math.h>
+#include <string.h>
 #include <r3d.h>
 #include <mprintf.h>
 
@@ -59,8 +61,14 @@ static BOOL mission_uses_sunlight(void)
 }
 
 
+#ifdef DARK_RT
+static void objlight_gl_reset(void);
+#endif
 void reset_object_lighting(void)
 {
+#ifdef DARK_RT
+   objlight_gl_reset();
+#endif
    num_light=FIRST_LIGHT;
    // Mission transitions can rebuild static lighting before the render
    // loop's first BeginFrame reset.  Do not carry dynamic object lights from
@@ -77,10 +85,27 @@ void reset_dynamic_lighting(void)
 
 extern int hack_red, hack_green, hack_blue;
 float light_scale=32.0;
+#ifdef DARK_RT
+// The OpenGL renderer's real-time lights: a moving light's brightness,
+// colour (hack_red.., 0..256) and reach, as add_dynamic_light was given them
+static struct { float bright, radius; int rgb[3]; } dyn_gl[MAX_DYNAMIC];
+extern int g_RenderGLWorldPositions;
+#endif
 void add_dynamic_light(Location *loc, float bright, float clamp_radius)
 {
+#ifdef DARK_RT
+   // (lit in real time by the OpenGL renderer instead of into the lightmaps)
+   if (!g_RenderGLWorldPositions)
+#endif
    portal_add_simple_dynamic_light(bright, 0, loc, clamp_radius);
    if (num_dyn < MAX_DYNAMIC) {
+#ifdef DARK_RT
+      dyn_gl[num_dyn].bright = bright;
+      dyn_gl[num_dyn].radius = clamp_radius;
+      dyn_gl[num_dyn].rgb[0] = hack_red;
+      dyn_gl[num_dyn].rgb[1] = hack_green;
+      dyn_gl[num_dyn].rgb[2] = hack_blue;
+#endif
       light_data[num_light + num_dyn].loc = loc->vec;
 #ifdef RGB_LIGHTING
       bright /= 255;
@@ -766,6 +791,150 @@ void objlight_rt_submit(void)
                        i >= num_light || portal_rt_light_relevant(i),
                        walk == -2.0f ? -2.0f : walk < 0.0f ? -1.0f : walk * 0.3048f);
       }
+   }
+}
+#endif
+
+#ifdef DARK_RT
+/* ----- the OpenGL renderer's real-time lights ----------------------------
+
+   Like NewDark's hardware renderer: the animated lights (lamps that flicker
+   or are switched on and off) and the moving ones (a torch carried, a fire
+   arrow) light the world per pixel, with shadows, their own light taken out
+   of the lightmaps (portal_light_realtime: the lightmaps they reach built
+   again without it). The nearest few animated lights only; the others stay
+   in the lightmaps as they always were.
+*/
+#include <render_backend.h>
+extern unsigned char portal_light_realtime[2048];
+extern uchar *portal_anim_light_intensity;
+extern int ObjAnimLightTable(int *index, float *max_bright, float *radius,
+                             float *inner_radius, int max);
+extern void ObjAnimLightRefresh(int light_index);
+
+#define GL_ANIM_MAX 2048
+static int gl_table_n = -1;           // the animated lights (-1: not known yet)
+static int gl_table_index[GL_ANIM_MAX];
+static float gl_table_max[GL_ANIM_MAX], gl_table_radius[GL_ANIM_MAX], gl_table_inner[GL_ANIM_MAX];
+static int gl_table_lights = -1;      // num_light when it was made
+
+static void objlight_gl_reset(void)
+{
+   // a new mission: its lightmaps are built afresh
+   memset(portal_light_realtime, 0, sizeof(portal_light_realtime));
+   gl_table_n = -1;
+   gl_table_lights = -1;
+}
+
+extern void portal_gl_verify_light(int li, const float pos[3], float B, float R, float inner);
+static void objlight_gl_set(int i, int on)
+{
+   if (i < 0 || i >= 2048 || !portal_light_realtime[i] == !on)
+      return;
+   if (on && getenv("DARK_GL_LIGHTS_VERIFY")) {
+      int k;
+      for (k = 0; k < gl_table_n; ++k)
+         if (gl_table_index[k] == i) {
+            const float p[3] = { light_data[i].loc.x, light_data[i].loc.y, light_data[i].loc.z };
+            portal_gl_verify_light(i, p, 8.0f * gl_table_max[k], gl_table_radius[k], gl_table_inner[k]);
+         }
+   }
+   portal_light_realtime[i] = on ? 1 : 0;
+   ObjAnimLightRefresh(i);
+}
+
+typedef struct { int k; float score; } gl_pick;
+static int gl_pick_cmp(const void *a, const void *b)
+{
+   float d = ((const gl_pick *)a)->score - ((const gl_pick *)b)->score;
+   return d < 0 ? -1 : d > 0 ? 1 : 0;
+}
+
+void objlight_gl_submit(const mxs_vector *cam)
+{
+   static gl_pick picks[GL_ANIM_MAX];
+   static sRenderBackendLight out[64];
+   int want = RenderBackendDynamicLightsWanted();
+   int k, n = 0, count = 0;
+   if (want <= 0) {
+      float c[3] = { cam->x, cam->y, cam->z };
+      for (k = 0; k < 2048; ++k)
+         objlight_gl_set(k, 0);
+      RenderBackendSetDynamicLights(NULL, 0, c);
+      return;
+   }
+   if (want > 32)
+      want = 32;
+   if (gl_table_n < 0 || gl_table_lights != num_light) {
+      gl_table_n = ObjAnimLightTable(gl_table_index, gl_table_max, gl_table_radius,
+                                     gl_table_inner, GL_ANIM_MAX);
+      gl_table_lights = num_light;
+   }
+   // the nearest animated lights (by how far their reach is from the
+   // camera), those already real-time kept a little longer
+   for (k = 0; k < gl_table_n; ++k) {
+      int i = gl_table_index[k];
+      const mls_multi_light *l;
+      float dx, dy, dz, reach;
+      if (i < 0 || i >= num_light || i >= 2048)
+         continue;
+      l = &light_data[i];
+      dx = l->loc.x - cam->x; dy = l->loc.y - cam->y; dz = l->loc.z - cam->z;
+      reach = gl_table_radius[k] > 0.0f ? gl_table_radius[k] : 40.0f;
+      picks[n].k = k;
+      picks[n].score = (float)sqrt(dx * dx + dy * dy + dz * dz) - reach -
+                       (portal_light_realtime[i] ? 8.0f : 0.0f);
+      ++n;
+   }
+   qsort(picks, n, sizeof(picks[0]), gl_pick_cmp);
+   for (k = 0; k < n; ++k) {
+      int j = picks[k].k, i = gl_table_index[j];
+      int on = count < want && picks[k].score < 30.0f;
+      objlight_gl_set(i, on);
+      if (on) {
+         const mls_multi_light *l = &light_data[i];
+         sRenderBackendLight *o = &out[count++];
+         float m = gl_table_max[j];
+         o->pos[0] = l->loc.x; o->pos[1] = l->loc.y; o->pos[2] = l->loc.z;
+#ifdef RGB_LIGHTING
+         o->color[0] = l->bright.x * light_scale / m;
+         o->color[1] = l->bright.y * light_scale / m;
+         o->color[2] = l->bright.z * light_scale / m;
+#else
+         o->color[0] = o->color[1] = o->color[2] = l->bright * light_scale / m;
+#endif
+         o->bright = 8.0f * m;
+         o->radius = gl_table_radius[j];
+         o->inner_radius = gl_table_inner[j];
+         o->dir[0] = l->dir.x; o->dir[1] = l->dir.y; o->dir[2] = l->dir.z;
+         o->spot_inner = l->inner;
+         o->spot_outer = l->outer;
+         o->kind = 0;
+         o->id = i;
+         o->moving = 0;
+      }
+   }
+   // the moving lights (their own light already left out of the lightmaps)
+   for (k = 0; k < num_dyn && k < MAX_DYNAMIC && count < 64; ++k) {
+      const mls_multi_light *l = &light_data[num_light + k];
+      sRenderBackendLight *o = &out[count++];
+      o->pos[0] = l->loc.x; o->pos[1] = l->loc.y; o->pos[2] = l->loc.z;
+      o->color[0] = dyn_gl[k].rgb[0] / 256.0f;
+      o->color[1] = dyn_gl[k].rgb[1] / 256.0f;
+      o->color[2] = dyn_gl[k].rgb[2] / 256.0f;
+      o->bright = 8.0f * dyn_gl[k].bright;
+      o->radius = dyn_gl[k].radius;
+      o->inner_radius = 0.0f;
+      o->dir[0] = o->dir[1] = 0.0f; o->dir[2] = -1.0f;
+      o->spot_inner = -2.0f;
+      o->spot_outer = -2.0f;
+      o->kind = 1;
+      o->id = 100000 + k;
+      o->moving = 1;
+   }
+   {
+      float c[3] = { cam->x, cam->y, cam->z };
+      RenderBackendSetDynamicLights(out, count, c);
    }
 }
 #endif

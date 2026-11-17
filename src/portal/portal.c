@@ -2702,6 +2702,186 @@ int portal_rt_light_relevant(int light)
    return (portal_rt_light_bits[light >> 3] >> (light & 7)) & 1;
 }
 
+// ---- the OpenGL renderer's real-time lights ----------------------------------
+#include <render_backend.h>
+extern void objlight_gl_submit(const mxs_vector *cam);
+
+// The level's solid surfaces for the lights' shadows, once a mission: every
+// cell's opaque polygons (not its portals -- water, openings -- which the
+// game's own light passes through when it lights the lightmaps)
+static void portal_gl_world_mesh(void)
+{
+   static int known_cells = -1;
+   static void *known_first = NULL, *known_pool = NULL;
+   static float known_at[3];
+   PortalCell *first = wr_num_cells > 0 ? WR_CELL(0) : NULL;
+   int c, tris = 0, at = 0;
+   float *xyz, *spheres;
+   int *firsts;
+   if (!first || !first->vpool)
+      return;
+   if (known_cells == wr_num_cells && known_first == (void *)first &&
+       known_pool == (void *)first->vpool && known_at[0] == first->vpool[0].x &&
+       known_at[1] == first->vpool[0].y && known_at[2] == first->vpool[0].z)
+      return;
+   known_cells = wr_num_cells;
+   known_first = first;
+   known_pool = first->vpool;
+   known_at[0] = first->vpool[0].x; known_at[1] = first->vpool[0].y; known_at[2] = first->vpool[0].z;
+   for (c = 0; c < wr_num_cells; ++c) {
+      PortalCell *r = WR_CELL(c);
+      int p, solid;
+      if (!r)
+         continue;
+      solid = r->num_polys - r->num_portal_polys;
+      for (p = 0; p < solid; ++p)
+         if (r->poly_list[p].num_vertices >= 3)
+            tris += r->poly_list[p].num_vertices - 2;
+   }
+   xyz = (float *)malloc(sizeof(float) * 9 * (tris > 0 ? tris : 1));
+   firsts = (int *)malloc(sizeof(int) * (wr_num_cells + 1));
+   spheres = (float *)malloc(sizeof(float) * 4 * wr_num_cells);
+   if (!xyz || !firsts || !spheres) {
+      free(xyz); free(firsts); free(spheres);
+      return;
+   }
+   for (c = 0; c < wr_num_cells; ++c) {
+      PortalCell *r = WR_CELL(c);
+      int p, k, solid, voff = 0;
+      firsts[c] = at;
+      spheres[c * 4] = spheres[c * 4 + 1] = spheres[c * 4 + 2] = spheres[c * 4 + 3] = 0.0f;
+      if (!r)
+         continue;
+      spheres[c * 4] = r->sphere_center.x;
+      spheres[c * 4 + 1] = r->sphere_center.y;
+      spheres[c * 4 + 2] = r->sphere_center.z;
+      spheres[c * 4 + 3] = r->sphere_radius;
+      solid = r->num_polys - r->num_portal_polys;
+      for (p = 0; p < solid; ++p) {
+         int n = r->poly_list[p].num_vertices;
+         for (k = 2; k < n; ++k) {
+            const mxs_vector *a = &r->vpool[r->vertex_list[voff]];
+            const mxs_vector *b = &r->vpool[r->vertex_list[voff + k - 1]];
+            const mxs_vector *d = &r->vpool[r->vertex_list[voff + k]];
+            float *o = &xyz[at * 9];
+            o[0] = a->x; o[1] = a->y; o[2] = a->z;
+            o[3] = b->x; o[4] = b->y; o[5] = b->z;
+            o[6] = d->x; o[7] = d->y; o[8] = d->z;
+            ++at;
+         }
+         voff += n;
+      }
+   }
+   firsts[wr_num_cells] = at;
+   RenderBackendSetWorldShadowMesh(xyz, at, firsts, spheres, wr_num_cells);
+   free(xyz); free(firsts); free(spheres);
+}
+
+// (DARK_GL_LIGHTS_VERIFY) an animated light's own lightmaps against the
+// real-time light's reckoning, without shadows: its lit texels, the ratio
+void portal_gl_verify_light(int li, const float pos[3], float B, float R, float inner)
+{
+   int c, n = 0, close = 0, cells = 0, polys = 0, wrext = 0;
+   double sum = 0.0, sum2 = 0.0;
+   for (c = 0; c < wr_num_cells; ++c) {
+      PortalCell *r = WR_CELL(c);
+      int k, p, voff = 0, pal = -1;
+      if (!r || !r->light_list || !r->anim_light_index_list)
+         continue;
+      for (k = 0; k < r->num_anim_lights; ++k)
+         if (r->anim_light_index_list[k] == li)
+            pal = k;
+      if (pal < 0)
+         continue;
+      ++cells;
+      for (p = 0; p < r->num_render_polys; ++p) {
+         PortalLightMap *lt = &r->light_list[p];
+         PortalPolygonRenderInfo *ri = &r->render_list[p];
+         const int nv = r->poly_list[p].num_vertices;
+         const mxs_vector *anchor = &r->vpool[r->vertex_list[voff + r->render_list[p].texture_anchor]];
+         const mxs_vector *nrm = &r->plane_list[r->poly_list[p].planeid].normal;
+         voff += nv;
+         if (!(lt->anim_light_bitmask & (1u << pal)))
+            continue;
+         ++polys;
+         if (portal_wrext_u_base[c])
+            ++wrext;
+         {
+            int before = 0, b, i, j;
+            const int size = lt->h * lt->pixel_row;
+            LightmapEntry *layer;
+            const float tbu = portal_wrext_u_base[c] ? portal_wrext_u_base[c][p] : ri->u_base / 4096.0f;
+            const float tbv = portal_wrext_v_base[c] ? portal_wrext_v_base[c][p] : ri->v_base / 4096.0f;
+            for (b = 0; b < pal; ++b)
+               if (lt->anim_light_bitmask & (1u << b))
+                  ++before;
+            layer = lt->data + size * (1 + before);
+            for (j = 0; j < lt->h; ++j)
+               for (i = 0; i < lt->w; ++i) {
+                  const LightmapEntry e = layer[j * lt->pixel_row + i];
+#if defined(RGB_LIGHTING) && defined(RGB_888)
+                  int have = e.A[0] > e.A[1] ? e.A[0] : e.A[1];
+                  if (e.A[2] > have) have = e.A[2];
+#elif defined(RGB_LIGHTING)
+                  int have = (e & 0x1f) > ((e >> 5) & 0x1f) ? (e & 0x1f) : ((e >> 5) & 0x1f);
+                  if (((e >> 10) & 0x1f) > have) have = (e >> 10) & 0x1f;
+                  have = have * 255 / 31;
+#else
+                  int have = e;
+#endif
+                  float U = (lt->base_u + i) * 0.25f, V = (lt->base_v + j) * 0.25f, w[3], L[3], d, cs, f;
+                  if (have < 12)
+                     continue;
+                  w[0] = anchor->x + ri->tex_u.x * (U - tbu) + ri->tex_v.x * (V - tbv);
+                  w[1] = anchor->y + ri->tex_u.y * (U - tbu) + ri->tex_v.y * (V - tbv);
+                  w[2] = anchor->z + ri->tex_u.z * (U - tbu) + ri->tex_v.z * (V - tbv);
+                  L[0] = pos[0] - w[0]; L[1] = pos[1] - w[1]; L[2] = pos[2] - w[2];
+                  d = (float)sqrt(L[0] * L[0] + L[1] * L[1] + L[2] * L[2]);
+                  if (d < 0.01f)
+                     continue;
+                  cs = (L[0] * nrm->x + L[1] * nrm->y + L[2] * nrm->z) / d;
+                  if (cs <= 0.0f)
+                     continue;
+                  f = (0.5f + 0.5f * cs) * B / (d > 0.5f ? d : 0.5f);
+                  if (R > 0.0f && inner > 0.0f && d > inner)
+                     f *= (R - d) / (R - inner);
+                  if (f > 255.0f)
+                     f = 255.0f;
+                  if (f < 12.0f)
+                     continue;
+                  {
+                     const double ratio = have / f;
+                     sum += ratio;
+                     sum2 += ratio * ratio;
+                     if (ratio > 0.85 && ratio < 1.15)
+                        ++close;
+                     ++n;
+                  }
+               }
+         }
+      }
+   }
+   if (n > 0) {
+      const double mean = sum / n;
+      mprintf("Real-time light %d: its lightmaps against the reckoning: %d lit texels, "
+              "ratio %.2f (spread %.2f), %d%% within 15%%\n", li, n, mean,
+              sqrt(sum2 / n - mean * mean > 0 ? sum2 / n - mean * mean : 0), close * 100 / n);
+   } else
+      mprintf("Real-time light %d: no lit texels of its own to compare (%d cells, %d polygons, %d WREXT)\n",
+              li, cells, polys, wrext);
+}
+
+static void portal_gl_begin(void)
+{
+   if (RenderRTActive())
+      return;
+   // (with the setting off too: the lights it had in real time put back
+   // into the lightmaps)
+   if (RenderBackendDynamicLightsWanted())
+      portal_gl_world_mesh();
+   objlight_gl_submit(&portal_camera_loc);
+}
+
 static void portal_rt_begin(float zoom, int cell)
 {
    mxs_matrix *slew;
@@ -2784,6 +2964,7 @@ void portal_render_scene(Position *pos, float zoom)
    r3_set_zoom (zoom);
 #ifdef DARK_RT
    portal_rt_begin(zoom, cell);
+   portal_gl_begin();
    double portal_part_last = portal_part_clock();
 #endif
 
@@ -3051,6 +3232,8 @@ cleanup:
    if (cell != CELL_INVALID)
       PORTAL_PART(5);
    RenderRTSceneEnd();
+   if (!RenderRTActive())
+      RenderBackendDynamicViewEnd();
 #endif
    portal_fog_on = fog_was_on;
    portal_end_3d();

@@ -19,7 +19,30 @@ typedef struct sRenderBackendVertex {
   float fog;
   float u0, v0;
   float u1, v1;
+  // the point's place in the world (feet), for the OpenGL renderer's
+  // real-time lights; wvalid 1 when known
+  float wx, wy, wz, wvalid;
 } sRenderBackendVertex;
+
+// A light the OpenGL renderer lights the world with in real time (a lamp
+// that flickers or is switched, a torch carried, a fire arrow), its own
+// light taken out of the lightmaps -- as NewDark's hardware renderer does.
+// In feet. kind 0: a level's light, lit as its lightmap was (lux =
+// (0.5 + cos/2) * bright / dist, out to radius, fading past inner_radius);
+// kind 1: a moving light, as the game lights the lightmaps with one
+// (cos * bright / dist * (1 - dist^2 / radius^2)). color: each channel 0..1,
+// its brightness now as a share of bright. spot_inner <= -1: not a spot.
+typedef struct sRenderBackendLight {
+  float pos[3];
+  float color[3];
+  float bright;
+  float radius, inner_radius;
+  float dir[3];
+  float spot_inner, spot_outer;
+  int kind;
+  int id;        // the same light keeps its id (its shadow map kept)
+  int moving;    // its shadow drawn anew each frame
+} sRenderBackendLight;
 
 enum eRenderBackendPrimitive {
   kRenderBackendTriangles = 0,
@@ -66,6 +89,25 @@ void RenderBackendBindTexture(int level, void *texture);
 
 int RenderBackendDraw(int primitive, const sRenderBackendVertex *vertices,
                       int vertexCount, int useSecondTexture);
+
+// The OpenGL renderer's real-time lights: how many at most (0: off, the
+// setting, or no OpenGL 4 or the path tracer running). While nonzero lgd3d
+// gives vertices their world positions (g_RenderGLWorldPositions).
+int RenderBackendDynamicLightsWanted(void);
+extern int g_RenderGLWorldPositions;
+// The level's solid surfaces, for the lights' shadows: triangles (xyz, feet),
+// in runs by cell: cell c's are cellFirst[c] .. cellFirst[c + 1] - 1, inside
+// the sphere cellSphere[c * 4 ..] (centre, radius). Once a mission.
+void RenderBackendSetWorldShadowMesh(const float *xyz, int triangles,
+                                     const int *cellFirst, const float *cellSphere,
+                                     int cells);
+// This frame's real-time lights (before the view is drawn), and where the
+// camera is (feet).
+void RenderBackendSetDynamicLights(const sRenderBackendLight *lights, int count,
+                                   const float camera[3]);
+// The view drawn: the models it drew (their world triangles, solid ones)
+// cast the lights' shadows from the next frame.
+void RenderBackendDynamicViewEnd(void);
 
 // Optional diagnostics for automated render checks. Set DARK_RENDER_TRACE to
 // opt in to the plain-text trace; normal game and viewer runs create no log.

@@ -591,6 +591,10 @@ void add_to_temp_lightmap(LightmapEntry *source, uchar intensity)
    polygon's _cell_.
 
 \* ----- \-\-\-\-\-\-\-\-\ <<< (((((( \/ )))))) >>> /-/-/-/-/-/-/-/-/ ----- */
+// Lights the OpenGL renderer lights in real time (by their light_data
+// index): their own light left out of the lightmaps (objlight.c sets them)
+unsigned char portal_light_realtime[2048];
+
 void compute_lightmap(PortalLightMap *lightmap)
 {
    ushort *anim_light_index = cur_anim_light_index_list;
@@ -613,7 +617,8 @@ void compute_lightmap(PortalLightMap *lightmap)
          bits += size;             // advance to next lightmap data
 
          intensity = portal_anim_light_intensity[*anim_light_index];
-         if (intensity > LIGHTMAP_ADD_CUTOFF)
+         if (intensity > LIGHTMAP_ADD_CUTOFF &&
+             !(*anim_light_index < 2048 && portal_light_realtime[*anim_light_index]))
             add_to_temp_lightmap(bits, intensity);
       }
       anim_light_index++;

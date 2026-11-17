@@ -80,7 +80,7 @@ do { \
    (_d)->wx = _m[0]*_x + _m[1]*_y + _m[2]*_z + _m[3]; \
    (_d)->wy = _m[4]*_x + _m[5]*_y + _m[6]*_z + _m[7]; \
    (_d)->wz = _m[8]*_x + _m[9]*_y + _m[10]*_z + _m[11]; \
-   (_d)->wvalid = r3d_rt_c2w_valid && g_RenderRTCaptureVertices; \
+   (_d)->wvalid = r3d_rt_c2w_valid && (g_RenderRTCaptureVertices || g_RenderGLWorldPositions); \
    (_d)->wback = r3d_rt_backface; \
 } while (0)
 #define rt_clear_world(_d) ((_d)->wvalid = 0)
@@ -694,6 +694,13 @@ static void ModernConvertVertex(sRenderBackendVertex *d, const sLgd3dVertex *s)
    d->a=((s->color>>24)&255)/255.0f;
    d->fog=((s->specular>>24)&255)/255.0f;
    d->u0=s->tu*modern_uv_scale[0]; d->v0=s->tv*modern_uv_scale[1]; d->u1=d->v1=0.0f;
+#ifdef DARK_RT
+   // (the OpenGL renderer's real-time lights: where the point is)
+   if (s->wvalid && g_RenderGLWorldPositions) {
+      d->wx=s->wx; d->wy=s->wy; d->wz=s->wz; d->wvalid=1.0f;
+   } else
+#endif
+   d->wx=d->wy=d->wz=d->wvalid=0.0f;
 }
 
 #ifdef DARK_RT

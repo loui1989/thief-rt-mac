@@ -1098,6 +1098,60 @@ extern "C" int ObjAnimLightDescribe(int light_index, char *buf, int n)
    return found;
 }
 
+// The animated lights (the OpenGL renderer lights them in real time): each
+// one's light_data index, its maximum brightness (the one its lightmaps were
+// made with), radius and inner radius (feet). Returns how many.
+extern "C" int ObjAnimLightTable(int *index, float *max_bright, float *radius,
+                                 float *inner_radius, int max)
+{
+   sPropertyObjIter iter;
+   ObjID obj;
+   sAnimLightProp *anim_light;
+   int n = 0;
+   if (!g_AnimLightProp)
+      return 0;
+   g_AnimLightProp->IterStart(&iter);
+   while (n < max && g_AnimLightProp->IterNext(&iter, &obj))
+   {
+      if (OBJ_IS_ABSTRACT(obj))
+         continue;
+      g_AnimLightProp->Get(obj, &anim_light);
+      if (anim_light->animation.light_data_index < 0 || anim_light->animation.max_brightness <= 0)
+         continue;
+      index[n] = anim_light->animation.light_data_index;
+      max_bright[n] = anim_light->animation.max_brightness;
+      radius[n] = anim_light->radius;
+      inner_radius[n] = anim_light->inner_radius;
+      ++n;
+   }
+   g_AnimLightProp->IterStop(&iter);
+   return n;
+}
+
+// The lightmaps an animated light reaches built anew (its light taken out of
+// them, or put back: portal_light_realtime)
+extern "C" void ObjAnimLightRefresh(int light_index)
+{
+   sPropertyObjIter iter;
+   ObjID obj;
+   sAnimLightProp *anim_light;
+   if (!g_AnimLightProp)
+      return;
+   g_AnimLightProp->IterStart(&iter);
+   while (g_AnimLightProp->IterNext(&iter, &obj))
+   {
+      if (OBJ_IS_ABSTRACT(obj))
+         continue;
+      g_AnimLightProp->Get(obj, &anim_light);
+      if (anim_light->animation.light_data_index == light_index)
+      {
+         AnimLightFlagCells(&anim_light->animation, obj);
+         break;
+      }
+   }
+   g_AnimLightProp->IterStop(&iter);
+}
+
 // the object whose anim light is this light (0: none -- a static light)
 extern "C" int ObjAnimLightOwner(int light_index)
 {
