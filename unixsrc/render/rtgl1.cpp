@@ -1512,6 +1512,25 @@ int object_special(uint32_t obj)
    return kind;
 }
 bool object_is_gas(uint32_t obj) { return object_special(obj) == 1; }
+extern "C" int RenderRTGameObjectModelType(uint32_t obj);
+float gem_value(const float pos[3], std::vector<struct GemPart> *parts);
+extern uint32_t g_frameNumber;
+// the light at a picture (rt: the place, in metres), by the light gem's
+// reckoning: anew every few frames
+float picture_light(uint32_t obj, const float rt[3])
+{
+   struct Seen { uint32_t frame; float value; };
+   static std::unordered_map<uint32_t, Seen> s_seen;
+   auto it = s_seen.find(obj);
+   if (it != s_seen.end() && g_frameNumber - it->second.frame < 6u)
+      return it->second.value;
+   if (s_seen.size() > 512)
+      s_seen.clear();
+   const float pos[3] = {rt[0] / kMetersPerUnit, rt[1] / kMetersPerUnit, rt[2] / kMetersPerUnit};
+   const float v = gem_value(pos, nullptr);
+   s_seen[obj] = {g_frameNumber, v};
+   return v;
+}
 bool g_spriteGas = false;   // the sprite being drawn is a gas cloud's
 // a light's flame: the particle group whose flame was seen at it (a candle's
 // light, often a plain static one the game never turns off when the candle
@@ -8536,6 +8555,28 @@ void RenderRTDrawWorld(int primitive, const sRenderBackendVertex *v, const float
       // bushes, at half -- 0.498, as the game gives it -- were see-through)
    } else if (tex && tex->cutout && (g_alphaTest || g_blend == kRenderBackendBlendAlpha)) {
       prim.flags |= RG_MESH_PRIMITIVE_ALPHA_TESTED;
+   }
+
+   // A picture (a bitmap model: blood spurting from a hit, a splash) the game
+   // draws at full brightness, whatever the light: see-through, so drawn
+   // unlit, it shone -- a zombie's blood glowing like lava in a dark cave.
+   // Given the light where it is (the light gem's reckoning, with the traced
+   // shadows). Not fire's (its orange or yellow), nor a gas cloud's.
+   if (!sprite && !g_RenderRTShadowOnly && g_currentObject && tex && allWhite &&
+       (prim.flags & RG_MESH_PRIMITIVE_TRANSLUCENT) && g_blend == kRenderBackendBlendAlpha &&
+       prim.emissive == 0.0f && RenderRTGameObjectModelType(g_currentObject) == 6 &&
+       !object_is_gas(g_currentObject)) {
+      texture_mean(*tex);
+      const bool fiery = tex->mean[0] >= tex->mean[1] && tex->mean[1] > 0.3f && tex->mean[1] >= tex->mean[2];
+      if (!fiery) {
+         float c[3] = {0, 0, 0};
+         for (int i = 0; i < count; ++i)
+            for (int k = 0; k < 3; ++k)
+               c[k] += prim.verts[size_t(i)].position[k] / float(count);
+         const float lit = std::clamp(1.5f * picture_light(g_currentObject, c), 0.05f, 1.0f);
+         for (int i = 0; i < count; ++i)
+            prim.verts[size_t(i)].color = pack_color(lit, lit, lit, v[i].a);
+      }
    }
 
    // an elemental crystal: solid (its added shimmer stays see-through)

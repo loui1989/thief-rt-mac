@@ -3413,6 +3413,15 @@ extern "C" void RenderRTGameObjectKind(uint32_t obj, char *arch, int an, char *m
       snprintf(model, mn, "%s", m);
 }
 
+// an object's kind of model (OM_TYPE_: 6 a picture, a bitmap), -1 none loaded
+extern "C" int RenderRTGameObjectModelType(uint32_t obj)
+{
+   int idx = -1;
+   if (!ObjGetModelNumber((ObjID)obj, &idx))
+      return -1;
+   return rendobj_type((ObjID)obj);
+}
+
 extern "C" int RenderRTGameObjectArchetype(uint32_t obj)
 {
    AutoAppIPtr(TraitManager);
