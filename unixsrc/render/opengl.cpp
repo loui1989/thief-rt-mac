@@ -346,7 +346,11 @@ const char kSceneFragmentShader[] =
    "  float R=dynPos[i].w,B=dynCol[i].w,f;\n"
    "  if(dynPar[i].x<0.5){\n"
    "   if(R>0.0&&d>R)continue;\n"
-   "   f=(0.5+0.5*c)*B/max(d,0.5);\n"
+   // (the game's own half-Lambert -- half its light on a surface edge-on --
+   // faded to nothing as the surface turns edge-on to it: else a wall
+   // flush with a torch's niche, its flame swaying an inch in and out of
+   // the niche, went from half lit to dark at once)
+   "   f=(0.5+0.5*c)*B/max(d,0.5)*clamp(c*20.0,0.0,1.0);\n"
    "   float inner=dynPar[i].y;\n"
    "   if(R>0.0&&inner>0.0&&d>inner)f*=(R-d)/(R-inner);\n"
    "  }else{\n"
@@ -824,9 +828,9 @@ void lights(const sRenderBackendLight *in, int count)
          for (float &c : l.color)
             c *= k;
          if (swaying++ < 6 && g_shadows) {
-            l.pos[0] += 0.09f * noise(5.3f, 1);
-            l.pos[1] += 0.09f * noise(5.9f, 2);
-            l.pos[2] += 0.05f * noise(7.1f, 3);
+            l.pos[0] += 0.05f * noise(5.3f, 1);
+            l.pos[1] += 0.05f * noise(5.9f, 2);
+            l.pos[2] += 0.06f * noise(7.1f, 3);
          }
       }
       in = s_live.data();
