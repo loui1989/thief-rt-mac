@@ -394,7 +394,9 @@ const char kSceneFragmentShader[] =
    " if(useTexture1>0.5){vec4 light=texture(texture1,uv1);\n"
    "#ifdef DYN_LIGHTS\n"
    "  if(dynEnabled>0.5&&dynCount>0&&worldPos.w>0.99)"
-        "light.rgb=min(light.rgb+dyn_light(worldPos.xyz,uv0),vec3(1.0));\n"
+        // (over full, brought down whole, not each colour to full: an orange
+        // light near a wall made it white)
+        "{vec3 t=light.rgb+dyn_light(worldPos.xyz,uv0);light.rgb=t/max(1.0,max(t.r,max(t.g,t.b)));}\n"
    // (DARK_GL_LIGHTS_DEBUG: 1 the real-time light alone, 2 the lightmap alone)
    "  if(dynDebug>0.5){vec3 dl=(dynEnabled>0.5&&worldPos.w>0.99)?dyn_light(worldPos.xyz,uv0):vec3(0.0);"
         "light.rgb=dynDebug<1.5?dl:texture(texture1,uv1).rgb;color.rgb=vec3(1.0);\n"
@@ -2790,17 +2792,26 @@ void RenderBackendSetDynamicLights(const sRenderBackendLight *lights, int count,
       int n = darkrt::GlEffectLights(camera, fx, 5);
       // the lava's, the nearest three: orange, slowly swelling (as the path
       // tracer's, 120 a square metre of it, at most 1600)
+      // (the three kept a while: one only a little nearer takes no place --
+      // the lights changing hands lit and unlit the walls as you walked)
       {
+         static std::vector<int> s_lavaNear;
          std::pair<float, int> near[3] = {{1e30f, -1}, {1e30f, -1}, {1e30f, -1}};
          for (size_t i = 0; i + 3 < g_lavaLights.size(); i += 4) {
             const float dx = g_lavaLights[i] - camera[0], dy = g_lavaLights[i + 1] - camera[1],
                         dz = g_lavaLights[i + 2] - camera[2];
-            const float d = dx * dx + dy * dy + dz * dz;
+            float d = dx * dx + dy * dy + dz * dz;
+            if (std::find(s_lavaNear.begin(), s_lavaNear.end(), int(i)) != s_lavaNear.end())
+               d *= 0.6f;
             if (d > 70.0f * 70.0f || d >= near[2].first)
                continue;
             near[2] = {d, int(i)};
             std::sort(near, near + 3);
          }
+         s_lavaNear.clear();
+         for (const auto &e : near)
+            if (e.second >= 0)
+               s_lavaNear.push_back(e.second);
          const double t = std::fmod(std::chrono::duration<double>(
             std::chrono::steady_clock::now().time_since_epoch()).count(), 3600.0);
          for (const auto &e : near) {
@@ -2820,6 +2831,36 @@ void RenderBackendSetDynamicLights(const sRenderBackendLight *lights, int count,
             L.rgb[2] = 0.10f * strength;
             L.lava = true;
          }
+      }
+      // Each eased: in from nothing over half a second when it first comes,
+      // and its flicker smoothed (an elemental's, three times a second at
+      // full and down to 0.4, lit the cave in flashes); a burst as it is.
+      static std::unordered_map<int, float> s_ease;
+      static auto s_easeAt = std::chrono::steady_clock::now();
+      const auto easeNow = std::chrono::steady_clock::now();
+      const float easeDt = std::clamp(std::chrono::duration<float>(easeNow - s_easeAt).count(), 0.0f, 0.1f);
+      s_easeAt = easeNow;
+      {
+         std::unordered_map<int, float> next;
+         for (int i = 0; i < n; ++i) {
+            darkrt::GlEffectLight &e = fx[i];
+            if (!e.lava && e.obj == 0)
+               continue;
+            const float target = std::max({e.rgb[0], e.rgb[1], e.rgb[2]});
+            if (target <= 0.0f)
+               continue;
+            const auto it = s_ease.find(e.id);
+            const float was = it != s_ease.end() ? it->second : 0.0f;
+            const float now = it != s_ease.end()
+                                 ? was + (target - was) * std::min(1.0f, easeDt * 4.0f)
+                                 : 0.0f;
+            const float in = std::min(now, was + target * easeDt * 2.0f);   // (coming in)
+            const float v = it != s_ease.end() ? std::max(0.0f, in) : 0.0f;
+            next[e.id] = v;
+            for (float &c : e.rgb)
+               c *= v / target;
+         }
+         s_ease.swap(next);
       }
       if (n > 0) {
          // (after the lamps, as many as there is room for: a lamp left out --
@@ -2843,12 +2884,13 @@ void RenderBackendSetDynamicLights(const sRenderBackendLight *lights, int count,
             // (the lava's a broad glow, lit already round it in the lightmaps:
             // gentler, reaching less far; a burst -- a fireball hitting, a
             // flash bomb -- a moment's, near it, not the whole cave white)
+            // (gentler again: an elemental's took the walls round it to white)
             const bool burst = !e.lava && e.obj == 0;
-            const float br = (e.lava ? 2.0f : burst ? 1.4f : 3.0f) * std::sqrt(strength);
+            const float br = (e.lava ? 2.0f : burst ? 1.0f : 2.0f) * std::sqrt(strength);
             L.bright = 8.0f * br;
             L.radius = e.lava ? std::clamp(1.4f * std::sqrt(strength), 10.0f, 40.0f)
-                     : burst  ? std::clamp(0.5f * std::sqrt(strength), 10.0f, 30.0f)
-                              : std::clamp(2.2f * std::sqrt(strength), 10.0f, 60.0f);
+                     : burst  ? std::clamp(0.3f * std::sqrt(strength), 8.0f, 20.0f)
+                              : std::clamp(1.5f * std::sqrt(strength), 10.0f, 45.0f);
             // its size, its shadows' softness (feet): the lava's broad
             L.size = e.lava ? 3.0f : std::clamp(e.size * 3.28f, 0.2f, 3.0f);
             L.inner_radius = 0.0f;

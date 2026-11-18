@@ -2897,11 +2897,27 @@ static void rq_queue_water_poly()
 
 // This is the qsort callback for comparing queued objects.
 // Is queued object i further from the camera than queued object j?
+// (a particle group, a sprite, sparks: as if a foot and a half nearer --
+// an elemental's flames, round its core at the same place, were drawn now
+// before it, now after, the core hiding the flames in front of it; equal,
+// the lower object first, the same order each frame)
+static float rq_alpha_key(const rqs_elem *e)
+{
+   float d = sqrtf(e->distance2);
+   const int type = rendobj_type(e->obj);
+   if (type == OM_TYPE_PARTICLES || type == OM_TYPE_BITMAP || type == OM_TYPE_SPARK)
+      d -= 1.5f;
+   return d;
+}
+
 static int rq_alpha_compare(const void *elem_i, const void *elem_j)
 {
    rqs_elem *i = (rqs_elem *) elem_i;
    rqs_elem *j = (rqs_elem *) elem_j;
-   return (i->distance2 > j->distance2)? 1 : -1;
+   const float a = rq_alpha_key(i), b = rq_alpha_key(j);
+   if (a != b)
+      return (a > b)? 1 : -1;
+   return (i->obj > j->obj) ? 1 : (i->obj < j->obj) ? -1 : 0;
 }
 
 

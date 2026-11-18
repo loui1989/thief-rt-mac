@@ -10788,6 +10788,7 @@ struct FxObj {
    float pos[3] = {0, 0, 0};
    bool posKnown = false;
    double lastMoved = -10; // when it last moved fast (thrown, flying)
+   bool explosion = false; // a fireball's burst itself: no second burst when it goes
 };
 struct FxBurst {
    uint32_t id;
@@ -10844,7 +10845,11 @@ bool fx_classify(uint32_t obj, FxObj &f)
       set(kFxElemental, kFire, 900, 0.35f, 1.0f);
    else if (m.rfind("fireb", 0) == 0 || m == "fireball" || m == "hamball" || has(a, "magebolt") ||
             has(a, "firebolt") || has(a, "fireball") || has(a, "elementalsummon"))
+   {
       set(kFxFireBolt, kFire, 700, 0.15f, 1.5f);
+      // (FireBoltExplosion: the fireball's burst, already lit as it went)
+      f.explosion = has(a, "explosion") || m.rfind("expl", 0) == 0;
+   }
    else if (m == "arrowfir")
       set(kFxFireArrow, kFire, 30, 0.05f, 0.0f);
    else if (m == "flashbom" || m == "flshmine" || has(a, "flashbomb") || has(a, "flashmine") || has(a, "flash mine")) {
@@ -10986,7 +10991,7 @@ void fx_step(const float *cam, FxEmit emit, void *user)
                fx_burst(f.pos, f.rgb, 60000.0f, 0.7f);
             else if (f.kind == kFxMine && (flying || away > 5.0f))
                fx_burst(f.pos, f.rgb, 20000.0f, 0.8f);
-            else if (f.kind == kFxFireBolt || (f.kind == kFxFireArrow && flying))
+            else if ((f.kind == kFxFireBolt && !f.explosion) || (f.kind == kFxFireArrow && flying))
                fx_burst(f.pos, kHit, 5000.0f, 0.5f);
          }
          it = g_fx.erase(it);
