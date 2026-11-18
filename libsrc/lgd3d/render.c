@@ -308,6 +308,11 @@ void lgd3d_set_iterated_alpha(BOOL enabled)
    lgd3d_iterated_alpha = enabled;
 }
 
+// (the state as it is: kept and put back round a pass of the OpenGL
+// renderer's own -- the models drawn for the lights' shadows)
+float lgd3d_get_alpha(void) { return lgd3d_alpha / 255.0f; }
+BOOL lgd3d_is_iterated_alpha_on(void) { return lgd3d_iterated_alpha; }
+
 static int get_vertex_alpha(const g2s_point *point)
 {
    float alpha = (float)lgd3d_alpha;
@@ -960,6 +965,8 @@ void lgd3d_set_zlinear(BOOL lin)
 {
    zlinear = lin;
 }
+
+int lgd3d_is_alpha_blending_on(void) { return lgd3d_blend; }
 
 void lgd3d_set_blend(BOOL blend_enable)
 {

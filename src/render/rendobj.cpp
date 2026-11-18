@@ -3518,6 +3518,18 @@ extern "C" void RenderGLGameDrawShadowObjects(void)
    // (what the view left queued drawn first: captured with the models, it
    // was never drawn -- an elemental's flames now and then gone)
    lgd3d_render_flush();
+   // (the models drawn here set what they set -- blending, an alpha, the
+   // depth buffer's use, a fog, a colour table -- as for the view; all put
+   // back as it was after: a translucent model's left the next frame's
+   // walls drawn faint or not at all, a moment)
+   const BOOL wasZWrite = lgd3d_is_zwrite_on(), wasZCompare = lgd3d_is_zcompare_on();
+   const BOOL wasBlend = lgd3d_is_alpha_blending_on(), wasFog = lgd3d_is_fog_on();
+   const float wasAlpha = lgd3d_get_alpha();
+   const BOOL wasIterated = lgd3d_is_iterated_alpha_on();
+   const double wasBias = lgd3d_set_zbias(0.0);
+   lgd3d_set_zbias(wasBias);
+   uchar *wasClut = lgd3d_set_clut(NULL);
+   lgd3d_set_clut(wasClut);
    RenderBackendCaptureObjects(1);
    for (ObjID obj : s_near)
    {
@@ -3548,5 +3560,13 @@ extern "C" void RenderGLGameDrawShadowObjects(void)
       --budget;
    }
    RenderBackendCaptureObjects(0);
+   lgd3d_set_zwrite(wasZWrite);
+   lgd3d_set_zcompare(wasZCompare);
+   lgd3d_set_blend(wasBlend);
+   lgd3d_set_alpha(wasAlpha);
+   lgd3d_set_iterated_alpha(wasIterated);
+   lgd3d_set_fog_enable(wasFog);
+   lgd3d_set_zbias(wasBias);
+   lgd3d_set_clut(wasClut);
 }
 #endif

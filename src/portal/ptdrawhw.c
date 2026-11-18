@@ -21,6 +21,7 @@
 #include <porthw.h>
 #include <portsky.h>
 #include <texmem.h>
+#include <mprintf.h>
 #include <ctype.h>
 #include <string.h>
 #include <wrdbrend.h>
@@ -487,8 +488,11 @@ void portal_cleanup_water_hack(void)
 
 // this is quite hateful.
 
-#define MAX_WATER_POINTS 1024
-#define MAX_WATER_POLYS 256
+// (lava is drawn as the water it is now, unlit, glowing: the Lost City's
+// river is many more faces than a pool -- past 256 the rest were left out,
+// pieces of it gone, black, a moment as the view moved)
+#define MAX_WATER_POINTS 32768
+#define MAX_WATER_POLYS 8192
 static r3s_point water_points[MAX_WATER_POINTS];
 static int water_polys[MAX_WATER_POLYS];
 static r3s_texture water_textures[MAX_WATER_POLYS];
@@ -505,12 +509,11 @@ static void queue_water_poly(r3s_texture tex, int n, r3s_phandle *vlist)
    r3s_point *dest;
    float u_offset, v_offset;
 
-   if (num_water_polys >= MAX_WATER_POLYS) {
-      Warning(("Too many water polys! increase MAX_WATER_POLYS\n"));
-      return;
-   }
-   if (num_water_points + n > MAX_WATER_POINTS) {
-      Warning(("Too many water points! increase MAX_WATER_POINTS\n"));
+   if (num_water_polys >= MAX_WATER_POLYS || num_water_points + n > MAX_WATER_POINTS) {
+      static int told;
+      if (!told++)
+         mprintf("portal: too many water faces in a view (%d, %d points): the rest left out\n",
+                 num_water_polys, num_water_points);
       return;
    }
 

@@ -187,6 +187,8 @@ extern "C" {
     // Modulate the global alpha by the alpha stored in each g2s_point.  Most
     // geometry does not initialize that field, so callers must opt in.
     extern void lgd3d_set_iterated_alpha(BOOL enabled);
+    extern float lgd3d_get_alpha(void);
+    extern BOOL lgd3d_is_iterated_alpha_on(void);
     extern void lgd3d_set_blend(BOOL do_blend);
     extern void lgd3d_blend_normal(void);
 
