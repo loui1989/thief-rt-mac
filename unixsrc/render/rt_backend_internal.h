@@ -74,14 +74,19 @@ void GlMaterialFree(void *handle);
 // off...): the nearest first, at most max. rgb: its colour times its strength
 // now (the path tracer's units, the game's light's brightness); pos in feet.
 // GlEffectsReset: a new world (objects' numbers used again).
+// (four bytes each, nothing between: rtgl1.cpp and opengl.cpp are built
+// with different struct packing -- with two bools at the end the one wrote
+// 44-byte entries, the other read 42, and every effect light after the
+// first was garbage: inf and NaN lights, walls black or white a moment)
 struct GlEffectLight {
    int id;
    uint32_t obj;
    float pos[3], rgb[3];
    float size, distance;
-   bool moving;
-   bool lava;   // (the OpenGL renderer's own: one over the lava)
+   int moving;
+   int lava;    // (the OpenGL renderer's own: one over the lava)
 };
+static_assert(sizeof(GlEffectLight) == 48, "GlEffectLight: the same in every file");
 int GlEffectLights(const float cam[3], GlEffectLight *out, int max);
 void GlEffectsReset();
 
