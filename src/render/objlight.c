@@ -456,6 +456,24 @@ void setup_object_lighting(ObjID o, mxs_vector *newlight, float bright)
 #endif // ~SHIP
    }
 
+#ifdef DARK_RT
+   // An effect's model glowing (a crystal, an elemental's core, a fireball),
+   // as the path tracer has it: with the OpenGL renderer's real-time lights,
+   // its light lifted by its glow (else a water crystal was faint)
+   if (g_RenderGLWorldPositions) {
+      extern float RenderGLObjectGlow(unsigned int obj);
+      const float glow = RenderGLObjectGlow((unsigned int)o);
+      if (glow > 0.0f) {
+#ifdef RGB_LIGHTING
+         int i;
+         for (i = 0; i < 3; ++i)
+            mld_multi_rgb_ambient.el[i] = __min(mld_multi_rgb_ambient.el[i] + 0.45f * glow, 1.0f - mld_multi_hilight);
+#else
+         mld_multi_ambient = __min(mld_multi_ambient + 0.45f * glow, 1.0f - mld_multi_hilight);
+#endif
+      }
+   }
+#endif
    if (!mld_multi_unlit && CellFromLoc(loc) != CELL_INVALID)
       setup_location_lighting(loc,newlight,objGetShadows(o),ObjGetRadius(o));
 }

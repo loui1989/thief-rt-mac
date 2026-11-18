@@ -11595,6 +11595,13 @@ void GlMaterialFree(void *handle)
    delete m;
 }
 
+std::unordered_map<uint32_t, float> g_glGlow;   // (GlEffectLights': by object)
+float GlObjectGlow(uint32_t obj)
+{
+   const auto it = g_glGlow.find(obj);
+   return it != g_glGlow.end() ? it->second : 0.0f;
+}
+
 int GlEffectLights(const float cam[3], GlEffectLight *out, int max)
 {
    if (!cam || !out || max <= 0)
@@ -11621,7 +11628,10 @@ int GlEffectLights(const float cam[3], GlEffectLight *out, int max)
                  g.v.push_back(L);
            },
            &got);
-   g_fxGlow.clear();   // (the path tracer's: no models of its own here)
+   // (the path tracer's glow of the effects' models: the OpenGL renderer's
+   // own copy, their lighting lifted -- a water crystal faint on its shelf)
+   g_glGlow.swap(g_fxGlow);
+   g_fxGlow.clear();
    std::sort(got.v.begin(), got.v.end(),
              [](const GlEffectLight &a, const GlEffectLight &b) { return a.distance < b.distance; });
    const int n = std::min(max, int(got.v.size()));
@@ -11629,5 +11639,13 @@ int GlEffectLights(const float cam[3], GlEffectLight *out, int max)
    return n;
 }
 
-void GlEffectsReset() { fx_reset(); }
+void GlEffectsReset()
+{
+   fx_reset();
+   g_glGlow.clear();
+}
 }   // namespace darkrt
+
+// The glow of an effect's model (a crystal, an elemental, a fireball) for the
+// OpenGL renderer's model lighting (objlight.c); 0 none
+extern "C" float RenderGLObjectGlow(uint32_t obj) { return darkrt::GlObjectGlow(obj); }

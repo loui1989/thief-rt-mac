@@ -833,16 +833,17 @@ void draw_surface_lgd3d(PortalPolygonCore *poly, PortalPolygonRenderInfo *render
       lt = NULL;
    }
 #ifdef DARK_RT
-   // Water lit as a surface (its light map's: the sewers', a pool's) is
-   // drawn from the side it faces only: its face from the other cell, in
-   // the same place, fought it for each pixel -- the water there one
-   // moment, gone the next. (OpenGL's: the path tracer has its own.)
-   if ((poly->flags & PORTAL_SPLITS_OBJECT) && lt && !(poly->flags & RENDER_DOESNT_LIGHT) &&
-       !RenderRTActive()) {
+   // Water (OpenGL's; the path tracer has its own): drawn from the side it
+   // faces only -- its face from the other cell, in the same place, fought
+   // it for each pixel -- and always as water, see-through, never lit as
+   // a solid surface by its light map: a light-mapped channel's water went
+   // from clear to dark and solid as the view tipped up or down.
+   if ((poly->flags & PORTAL_SPLITS_OBJECT) && !RenderRTActive()) {
       extern mxs_vector portal_camera_loc;
       PortalPlane *pl = &cur_cell->plane_list[poly->planeid];
       if (mx_dot_vec(&pl->normal, &portal_camera_loc) + pl->plane_constant < 0.0f)
          {END_PROF; return;}
+      lt = NULL;
    }
 #endif
    if ((lt == NULL)||(poly->flags & RENDER_DOESNT_LIGHT)) {
@@ -1209,16 +1210,17 @@ void draw_surface_multitexture(PortalPolygonCore *poly, PortalPolygonRenderInfo 
       lt = NULL;
    }
 #ifdef DARK_RT
-   // Water lit as a surface (its light map's: the sewers', a pool's) is
-   // drawn from the side it faces only: its face from the other cell, in
-   // the same place, fought it for each pixel -- the water there one
-   // moment, gone the next. (OpenGL's: the path tracer has its own.)
-   if ((poly->flags & PORTAL_SPLITS_OBJECT) && lt && !(poly->flags & RENDER_DOESNT_LIGHT) &&
-       !RenderRTActive()) {
+   // Water (OpenGL's; the path tracer has its own): drawn from the side it
+   // faces only -- its face from the other cell, in the same place, fought
+   // it for each pixel -- and always as water, see-through, never lit as
+   // a solid surface by its light map: a light-mapped channel's water went
+   // from clear to dark and solid as the view tipped up or down.
+   if ((poly->flags & PORTAL_SPLITS_OBJECT) && !RenderRTActive()) {
       extern mxs_vector portal_camera_loc;
       PortalPlane *pl = &cur_cell->plane_list[poly->planeid];
       if (mx_dot_vec(&pl->normal, &portal_camera_loc) + pl->plane_constant < 0.0f)
          {END_PROF; return;}
+      lt = NULL;
    }
 #endif
    if ((lt == NULL)||(poly->flags & RENDER_DOESNT_LIGHT)) {
