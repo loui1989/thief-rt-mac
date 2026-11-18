@@ -298,52 +298,41 @@ const char kSceneFragmentShader[] =
    " vec3 m=texture(dynNormalMap,uv).xyz*2.0-1.0;m.xy*=0.45;\n"
    " return normalize(T*k*m.x-B*k*m.y+n*max(m.z,0.2));\n"
    "}\n"
-   // The wall's shadows soft as a light of its size gives them (dynShadow.z:
-   // its size in hundredths of a foot, whole, and the map's texel, the
-   // fraction): what lies between the point and the light found first (8
-   // looks about it), its distance giving the edge its width -- wide for a
-   // ledge near the light, narrow for a post at the floor -- then 12 looks
-   // across that, turned a little from pixel to pixel. A shadow's edge is
-   // gradual, not a surface lit or dark whole as a flame's light moved.
-   "uniform samplerCubeArray dynShadowDepth;\n"
-   "const vec2 kDisk[12]=vec2[](vec2(-0.326,-0.406),vec2(-0.840,-0.074),vec2(-0.696,0.457),"
-       "vec2(-0.203,0.621),vec2(0.962,-0.195),vec2(0.473,-0.480),vec2(0.519,0.767),"
-       "vec2(0.185,-0.893),vec2(0.507,0.064),vec2(0.896,0.412),vec2(-0.322,-0.933),vec2(-0.792,-0.598));\n"
-   // (each look compared with the surface's own plane along it, not the
-   // point's distance: a wall the light runs along otherwise shadowed
-   // itself across the wider looks)
+   // The shadows: 4 looks round the point's direction, each compared with
+   // the surface's own plane along it (not the point's distance: a wall the
+   // light runs along shadowed itself across the looks). dynShadow.z: the
+   // map's texel (the fraction); a flame's looks half as wide again. The
+   // models' maps are made from where the light is before a flame's sway
+   // (dynCasterPos): a fixture by the flame went in and out of them.
+   "uniform vec4 dynCasterPos[40];\n"
    "float dyn_plane(vec3 v,vec3 n,vec3 dd,float dr,float far){\n"
    " float den=dot(normalize(dd),n);float pv=dot(v,n);\n"
    " float z=(den*pv>0.0)?pv/den:dr*4.0;\n"
    " return min(z,dr*4.0)/far-0.0015;\n"
    "}\n"
-   "float dyn_shadow(int i,vec3 p,vec3 n){\n"
-   " vec3 v=p-dynPos[i].xyz;float far=dynShadow[i].y;\n"
-   " float dr=max(length(v),0.001);float ref=dr/far-0.0015;\n"
-   " vec3 d=v/dr;\n"
+   "float dyn_look(int i,vec3 v,vec3 n,float L,bool models){\n"
+   " float far=dynShadow[i].y;float dr=max(length(v),0.001);vec3 d=v/dr;\n"
    " vec3 t=normalize(cross(d,abs(d.z)<0.9?vec3(0.0,0.0,1.0):vec3(1.0,0.0,0.0)));\n"
-   " vec3 b=cross(d,t);float r=fract(dynShadow[i].z);float size=floor(dynShadow[i].z)*0.01;float s=1.0;\n"
-   " if(dynShadow[i].x>=0.0){float L=dynShadow[i].x;\n"
-   "  float a=6.2831853*fract(52.9829189*fract(dot(gl_FragCoord.xy,vec2(0.06711056,0.00583715))));\n"
-   "  mat2 rot=mat2(cos(a),sin(a),-sin(a),cos(a));\n"
-   "  float rs=clamp(size*(1.0-1.0/max(dr,1.0)),r,0.15);\n"
-   "  float db=0.0;float nb=0.0;\n"
-   "  for(int k=0;k<8;++k){vec2 o=rot*kDisk[k]*rs;vec3 dd=d+t*o.x+b*o.y;\n"
-   "   float z=texture(dynShadowDepth,vec4(dd,L)).r;\n"
-   "   if(z<dyn_plane(v,n,dd,dr,far)){db+=z;nb+=1.0;}}\n"
-   "  if(nb>0.0){db=db/nb*far;\n"
-   "   float rp=clamp(size*(dr-db)/max(db*dr,0.05),r,0.15);\n"
-   "   s=0.0;\n"
-   "   for(int k=0;k<12;++k){vec2 o=rot*kDisk[k]*rp;vec3 dd=d+t*o.x+b*o.y;\n"
-   "    s+=texture(dynShadowMaps,vec4(dd,L),dyn_plane(v,n,dd,dr,far));}\n"
-   "   s*=1.0/12.0;}}\n"
+   " vec3 b=cross(d,t);float r=fract(dynShadow[i].z)*(dynShadow[i].z>=1.0?1.5:1.0)*(models?1.5:1.0);\n"
+   " vec3 o0=d+(t+b)*r,o1=d+(t-b)*r,o2=d+(-t+b)*r,o3=d+(-t-b)*r;float s=0.0;\n"
+   " if(models){\n"
+   "  s+=texture(dynCasterMaps,vec4(o0,L),dyn_plane(v,n,o0,dr,far));\n"
+   "  s+=texture(dynCasterMaps,vec4(o1,L),dyn_plane(v,n,o1,dr,far));\n"
+   "  s+=texture(dynCasterMaps,vec4(o2,L),dyn_plane(v,n,o2,dr,far));\n"
+   "  s+=texture(dynCasterMaps,vec4(o3,L),dyn_plane(v,n,o3,dr,far));\n"
+   " }else{\n"
+   "  s+=texture(dynShadowMaps,vec4(o0,L),dyn_plane(v,n,o0,dr,far));\n"
+   "  s+=texture(dynShadowMaps,vec4(o1,L),dyn_plane(v,n,o1,dr,far));\n"
+   "  s+=texture(dynShadowMaps,vec4(o2,L),dyn_plane(v,n,o2,dr,far));\n"
+   "  s+=texture(dynShadowMaps,vec4(o3,L),dyn_plane(v,n,o3,dr,far));\n"
+   " }\n"
+   " return s*0.25;\n"
+   "}\n"
+   "float dyn_shadow(int i,vec3 p,vec3 n){\n"
+   " float s=1.0;\n"
+   " if(dynShadow[i].x>=0.0)s=dyn_look(i,p-dynPos[i].xyz,n,dynShadow[i].x,false);\n"
    // the models' shadows (dynShadow.w: their layer, -1 none)
-   " if(dynShadow[i].w>=0.0){float m=0.0;float r2=r*1.5;\n"
-   "  m+=texture(dynCasterMaps,vec4(d+(t+b)*r2,dynShadow[i].w),ref);\n"
-   "  m+=texture(dynCasterMaps,vec4(d+(t-b)*r2,dynShadow[i].w),ref);\n"
-   "  m+=texture(dynCasterMaps,vec4(d+(-t+b)*r2,dynShadow[i].w),ref);\n"
-   "  m+=texture(dynCasterMaps,vec4(d+(-t-b)*r2,dynShadow[i].w),ref);\n"
-   "  s*=mix(1.0,m*0.25,dynSpot[i].w);}\n"
+   " if(dynShadow[i].w>=0.0&&s>0.0)s*=mix(1.0,dyn_look(i,p-dynCasterPos[i].xyz,n,dynShadow[i].w,true),dynSpot[i].w);\n"
    " return s;\n"
    "}\n"
    "vec3 dyn_light(vec3 p,vec2 uv){\n"
@@ -464,7 +453,8 @@ int g_meshTriangles = 0;
 unsigned g_meshGeneration = 0;
 
 // the shadows: a cube map array of depth, a slot (6 layers) per light
-GLuint g_shadowProgram = 0, g_shadowTex = 0, g_shadowFbo = 0, g_rawSampler = 0;
+GLuint g_shadowProgram = 0, g_shadowTex = 0, g_shadowFbo = 0;
+GLint uCasterPos = -1;
 GLint suViewProj = -1, suLight = -1, suFar = -1;
 int g_slots = 0, g_slotSize = 0;
 struct Slot { int id = -1; unsigned generation = 0; float pos[3] = {0, 0, 0}; float far = 0; int used = 0; };
@@ -518,15 +508,7 @@ void init(GLuint scene)
    if (uMaps >= 0) glUniform1i(uMaps, 2);
    uCasters = glGetUniformLocation(scene, "dynCasterMaps");
    if (uCasters >= 0) glUniform1i(uCasters, 3);
-   if (GLint u = glGetUniformLocation(scene, "dynShadowDepth"); u >= 0) glUniform1i(u, 5);
-   // (the walls' shadow maps read as they are, their depths, for the soft
-   // shadows: the same texture on unit 5 through a sampler not comparing)
-   glGenSamplers(1, &g_rawSampler);
-   glSamplerParameteri(g_rawSampler, GL_TEXTURE_COMPARE_MODE, GL_NONE);
-   glSamplerParameteri(g_rawSampler, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
-   glSamplerParameteri(g_rawSampler, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
-   glSamplerParameteri(g_rawSampler, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
-   glSamplerParameteri(g_rawSampler, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+   uCasterPos = glGetUniformLocation(scene, "dynCasterPos");
    uNormal = glGetUniformLocation(scene, "dynUseNormal");
    if (GLint u = glGetUniformLocation(scene, "dynNormalMap"); u >= 0) glUniform1i(u, 4);
    if (uNormal >= 0) glUniform1f(uNormal, 0.0f);
@@ -739,7 +721,7 @@ void draw_shadow(const sRenderBackendLight &l, int slot, float farZ)
       glFramebufferTextureLayer(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, g_shadowTex, 0, slot * 6 + face);
       glClear(GL_DEPTH_BUFFER_BIT);
       float m[16];
-      face_matrix(m, l.pos, face, 0.2f, farZ);
+      face_matrix(m, l.pos, face, 0.05f, farZ);   // (a wall right behind a swaying flame kept whole)
       glUniformMatrix4fv(suViewProj, 1, GL_FALSE, m);
       for (const auto &r : runs)
          glDrawArrays(GL_TRIANGLES, r.first * 3, (r.second - r.first) * 3);
@@ -757,7 +739,7 @@ void lights(const sRenderBackendLight *in, int count)
    poll_normals();
    count = std::min(count, kMaxLights);
    float pos[kMaxLights * 4], col[kMaxLights * 4], spot[kMaxLights * 4], par[kMaxLights * 4],
-         sh[kMaxLights * 4];
+         sh[kMaxLights * 4], cpos[kMaxLights * 4];
    // (the walls' shadows always: without them the lights, their own light
    // taken out of the lightmaps, shone through every wall; the setting is
    // the models' shadows)
@@ -825,6 +807,7 @@ void lights(const sRenderBackendLight *in, int count)
    // flames flicker and sway a little, the nearest few's shadows with them
    static std::vector<sRenderBackendLight> s_live;
    s_live.assign(in, in + count);
+   const sRenderBackendLight *base = in;   // (as given: before a flame's sway)
    {
       const float t = float(std::fmod(std::chrono::duration<double>(now.time_since_epoch()).count(), 3600.0));
       int swaying = 0;
@@ -848,6 +831,27 @@ void lights(const sRenderBackendLight *in, int count)
       }
       in = s_live.data();
    }
+   // Which lights the models' shadows (kCasterSlots of them): those whose
+   // light reaches nearest the camera, the ones that had them keeping them
+   // (with dynamic_lights 32 the 16 changed hands as the view moved, and the
+   // models' shadows of a light went and came back)
+   static std::unordered_map<int, bool> s_hadCasters;
+   bool wantCasters[kMaxLights] = {};
+   if (shadows && casters) {
+      std::pair<float, int> rank[kMaxLights];
+      for (int i = 0; i < count; ++i) {
+         const sRenderBackendLight &b = base[i];
+         const float dx = b.pos[0] - g_cam[0], dy = b.pos[1] - g_cam[1], dz = b.pos[2] - g_cam[2];
+         float score = std::sqrt(dx * dx + dy * dy + dz * dz) - reach(b);
+         if (s_hadCasters.count(b.id))
+            score -= 12.0f;
+         rank[i] = {score, i};
+      }
+      std::sort(rank, rank + count);
+      for (int k = 0; k < count && k < kCasterSlots; ++k)
+         wantCasters[rank[k].second] = true;
+   }
+   s_hadCasters.clear();
    for (int i = 0; i < count; ++i) {
       const sRenderBackendLight &l = in[i];
       const float farZ = reach(l) + 1.0f;
@@ -858,15 +862,20 @@ void lights(const sRenderBackendLight *in, int count)
       par[i * 4] = float(l.kind); par[i * 4 + 1] = l.inner_radius;
       par[i * 4 + 2] = l.spot_inner; par[i * 4 + 3] = l.spot_outer;
       sh[i * 4] = -1.0f; sh[i * 4 + 1] = farZ; sh[i * 4 + 3] = -1.0f;
-      // (its size in hundredths of a foot, whole; a texel's angle, the fraction)
-      {
-         const float size = l.size > 0.0f ? l.size : (l.flicker ? 0.35f : 0.2f);
-         sh[i * 4 + 2] = std::floor(std::clamp(size, 0.0f, 20.0f) * 100.0f) + 2.5f / float(g_shadowSize);
-      }
+      // (a texel's angle; 1 more, a flame's: its shadows' edges softer)
+      sh[i * 4 + 2] = (l.flicker ? 1.0f : 0.0f) + 2.5f / float(g_shadowSize);
+      cpos[i * 4] = base[i].pos[0]; cpos[i * 4 + 1] = base[i].pos[1]; cpos[i * 4 + 2] = base[i].pos[2];
+      cpos[i * 4 + 3] = 0.0f;
       if (!shadows)
          continue;
-      if (casters && casterSlot < kCasterSlots && draw_casters(l, casterSlot, farZ))
+      // (the models' maps from where the light is before its sway: a torch's
+      // bracket, a foot from the flame, went in and out of them, and its
+      // shadow over the walls above with it)
+      if (wantCasters[i] && casterSlot < kCasterSlots && draw_casters(base[i], casterSlot, farZ)) {
          sh[i * 4 + 3] = float(casterSlot++);
+         s_hadCasters[l.id] = true;
+      } else
+         g_fade[l.id] = 0.0f;   // (its models' shadows fade in when it has them again)
       // its slot: the one it had (still good if it has not moved), else a free one
       int slot = -1;
       for (int s = 0; s < g_slots; ++s)
@@ -919,13 +928,12 @@ void lights(const sRenderBackendLight *in, int count)
       glUniform4fv(uSpot, count, spot);
       glUniform4fv(uPar, count, par);
       glUniform4fv(uShadow, count, sh);
+      if (uCasterPos >= 0)
+         glUniform4fv(uCasterPos, count, cpos);
    }
    if (g_shadowTex) {
       glActiveTexture(GL_TEXTURE2);
       glBindTexture(GL_TEXTURE_CUBE_MAP_ARRAY, g_shadowTex);
-      glActiveTexture(GL_TEXTURE5);
-      glBindTexture(GL_TEXTURE_CUBE_MAP_ARRAY, g_shadowTex);
-      glBindSampler(5, g_rawSampler);
       glActiveTexture(GL_TEXTURE0);
    }
    if (g_casterTex) {
@@ -2810,8 +2818,12 @@ void RenderBackendSetDynamicLights(const sRenderBackendLight *lights, int count,
          }
       }
       if (n > 0) {
+         // (after the lamps, as many as there is room for: a lamp left out --
+         // its light already out of the lightmaps -- left its corner dark)
          s_all.clear();
-         for (int i = 0; i < n; ++i) {
+         if (lights)
+            s_all.insert(s_all.end(), lights, lights + count);
+         for (int i = 0; i < n && int(s_all.size()) < dyn::kMaxLights; ++i) {
             const darkrt::GlEffectLight &e = fx[i];
             const float strength = std::max({e.rgb[0], e.rgb[1], e.rgb[2]});
             if (strength <= 0.5f)
@@ -2845,8 +2857,6 @@ void RenderBackendSetDynamicLights(const sRenderBackendLight *lights, int count,
             L.flicker = 0;
             s_all.push_back(L);
          }
-         if (lights)
-            s_all.insert(s_all.end(), lights, lights + count);
          lights = s_all.data();
          count = int(s_all.size());
       }

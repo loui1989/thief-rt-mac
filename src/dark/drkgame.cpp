@@ -1240,6 +1240,7 @@ static const sRtTestSite gRtTestSites[] =
    { "arc",           3,  'o', "BigZapArc",      "Cragscleft: the electric arc" },
    { "lamp",          3,  'o', "HangSpotFlush",  "Cragscleft: a flickering lamp" },
    { "torch",         2,  'o', "torch",          "Lord Bafford's Manor: a wall torch (its flicker)" },
+   { "water",         2,  't', "waterhw\\",      "water (any mission: rt_test water,n)" },
 };
 
 static const sRtTestSite* gRtTestPending = NULL;
