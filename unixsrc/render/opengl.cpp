@@ -123,6 +123,13 @@ int g_dynMaxSetting = 16;
 bool g_dynShadowsSetting = true;
 int g_dynShadowSizeSetting = 512;
 bool g_dynBumpSetting = true;
+// V-sync (gl_settings.txt vsync): 0 off (60 a second at most, the frame's
+// end not waited for), 1 on, 2 adaptive -- on while the frames keep up, off
+// while they don't: with it on, a frame a little over 16.7 ms waited for the
+// next refresh, and 60 a second fell straight to 30
+int g_vsyncSetting = 2;
+int g_adaptiveInterval = 1;
+int scene_interval() { return g_vsyncSetting == 2 ? g_adaptiveInterval : g_vsyncSetting; }
 void load_gl_settings()
 {
    const char *home = getenv("HOME");
@@ -151,6 +158,8 @@ void load_gl_settings()
             g_dynShadowSizeSetting = std::clamp(int(value), 128, 2048);
          else if (!strcmp(key, "bump_maps"))
             g_dynBumpSetting = value != 0.0f;
+         else if (!strcmp(key, "vsync"))
+            g_vsyncSetting = std::clamp(int(value), 0, 2);
       fclose(f);
    } else if (FILE *w = fopen(path.c_str(), "w")) {
       // (written once with the default, to be edited)
@@ -1259,6 +1268,43 @@ void logical_point(int &x, int &y)
    y = std::clamp(y, 0, std::max(g_height - 1, 0));
 }
 
+void set_swap_interval(int interval);
+// Adaptive v-sync: the time from one shown frame to the next, the last 30.
+// With v-sync on and most of them a refresh and more late (taking 2), off;
+// with it off and nearly all of them inside a refresh (the cap's 16 ms), on
+// again -- each change held 2 seconds at least.
+void adapt_vsync()
+{
+   using clock = std::chrono::steady_clock;
+   static clock::time_point s_last, s_changed;
+   static float s_ms[30];
+   static int s_n = 0;
+   const auto now = clock::now();
+   const float ms = s_last.time_since_epoch().count() ? std::chrono::duration<float, std::milli>(now - s_last).count() : 0.0f;
+   s_last = now;
+   if (ms <= 0.0f || ms > 250.0f)
+      return;   // (a load, a pause)
+   s_ms[s_n++ % 30] = ms;
+   if (s_n < 30 || now - s_changed < std::chrono::seconds(2))
+      return;
+   int slow = 0, quick = 0;
+   for (float m : s_ms) {
+      slow += m > 24.0f;
+      quick += m < 17.5f;
+   }
+   int want = g_adaptiveInterval;
+   if (g_adaptiveInterval == 1 && slow >= 10)
+      want = 0;
+   else if (g_adaptiveInterval == 0 && quick >= 29)
+      want = 1;
+   if (want != g_adaptiveInterval) {
+      g_adaptiveInterval = want;
+      set_swap_interval(want);
+      s_changed = now;
+      s_n = 0;
+   }
+}
+
 void set_swap_interval(int interval)
 {
    if (g_rt) { g_swapInterval = interval; return; }
@@ -1353,7 +1399,7 @@ bool draw_vertices(GLenum primitive, const sRenderBackendVertex *vertices, int c
 namespace glpanel {
 bool g_open = false;
 int g_row = 0;
-enum { kShadow, kMinLight, kDynLights, kDynShadows, kDynBump, kFps, kRows };
+enum { kShadow, kMinLight, kDynLights, kDynShadows, kDynBump, kVsync, kFps, kRows };
 Texture *g_font = nullptr, *g_white = nullptr;
 
 std::string settings_path()
@@ -1371,9 +1417,9 @@ std::string settings_path()
 void save()
 {
    if (FILE *w = fopen(settings_path().c_str(), "w")) {
-      fprintf(w, "min_light %.2f\nshadow_alert %d\nfps %d\ndynamic_lights %d\nlight_shadows %d\nshadow_size %d\nbump_maps %d\n",
+      fprintf(w, "min_light %.2f\nshadow_alert %d\nfps %d\ndynamic_lights %d\nlight_shadows %d\nshadow_size %d\nbump_maps %d\nvsync %d\n",
               g_minLight, g_PlayerShadowAlert, g_glFps ? 1 : 0, g_dynMaxSetting, g_dynShadowsSetting ? 1 : 0,
-              g_dynShadowSizeSetting, g_dynBumpSetting ? 1 : 0);
+              g_dynShadowSizeSetting, g_dynBumpSetting ? 1 : 0, g_vsyncSetting);
       fclose(w);
    }
 }
@@ -1386,6 +1432,7 @@ const char *label(int row)
    case kDynLights: return "Real-time lights";
    case kDynShadows: return "Shadows from objects";
    case kDynBump: return "Bump maps";
+   case kVsync: return "V-sync";
    default: return "FPS counter";
    }
 }
@@ -1406,6 +1453,7 @@ std::string value(int row)
       return b;
    case kDynShadows: return g_dynShadowsSetting ? "On" : "Off";
    case kDynBump: return g_dynBumpSetting ? "On (real-time lights)" : "Off";
+   case kVsync: return g_vsyncSetting == 2 ? "Adaptive" : g_vsyncSetting ? "On" : "Off (may tear)";
    default: return g_glFps ? "On" : "Off";
    }
 }
@@ -1426,6 +1474,11 @@ void change(int row, int dir)
    }
    case kDynShadows: g_dynShadowsSetting = !g_dynShadowsSetting; break;
    case kDynBump: g_dynBumpSetting = !g_dynBumpSetting; break;
+   case kVsync:
+      g_vsyncSetting = (g_vsyncSetting + (dir > 0 ? 1 : 2)) % 3;
+      g_adaptiveInterval = 1;
+      if (g_scene) set_swap_interval(scene_interval());
+      break;
    default: g_glFps = !g_glFps; break;
    }
    save();
@@ -1632,6 +1685,8 @@ void swap_presented_frame()
       g_lastPresentTicks = 0;
    }
    g_presentPending = false;
+   if (g_scene && g_vsyncSetting == 2)
+      adapt_vsync();
 }
 
 void bind_texture(int level, Texture *texture)
@@ -2599,7 +2654,7 @@ int RenderBackendBeginFrame(void)
    if (g_rt) { set_swap_interval(1); g_scene=true; ++g_sceneGeneration; darkrt::BeginSceneFrame(); return 1; }
 #endif
    if (!g_context) return 0; SDL_GL_MakeCurrent(g_window, g_context);
-   set_swap_interval(1);
+   set_swap_interval(scene_interval());
    int x,y,w,h; viewport(x,y,w,h); set_gl_viewport(x,y,w,h); glClearColor(0,0,0,1);
    glDepthMask(GL_TRUE); glClear(GL_COLOR_BUFFER_BIT|GL_DEPTH_BUFFER_BIT);
    apply_depth_state(); apply_blend_state();

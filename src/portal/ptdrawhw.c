@@ -603,10 +603,30 @@ static void render_water_poly(r3s_texture tex, int n, r3s_phandle *vlist)
    gr_set_fill_type(FILL_NORM);
 }
 
+static int water_start = 0;
+static r3s_point *water_next_poly = water_points;
+
+// A new view: the water faces queued from the last one, all drawn or not,
+// forgotten. (The queue's place had been kept from view to view: a face
+// queued and never drawn -- its queue entry not made -- left it behind its
+// faces from then on, and a pool's water drawn from the faces of a view
+// before or not at all, now and then.)
+void portal_water_frame_begin(void)
+{
+   static int told;
+   if ((num_water_polys || water_start) && !told++)
+      mprintf("portal: water faces left from a view (%d queued, %d drawn): forgotten\n",
+              num_water_polys, water_start);
+   water_start = 0;
+   water_next_poly = water_points;
+   num_water_polys = 0;
+   num_water_points = 0;
+}
+
 void portal_render_water_polys(int n)
 {
-   static int start=0;
-   static r3s_point *next_poly = water_points;
+#define start water_start
+#define next_poly water_next_poly
    int i, end;
 
    end = start + n;
@@ -661,6 +681,8 @@ void portal_render_water_polys(int n)
       num_water_polys = 0;
       num_water_points = 0;
    }
+#undef start
+#undef next_poly
 }
 
 

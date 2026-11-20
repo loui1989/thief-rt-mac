@@ -3068,9 +3068,11 @@ void init_object_rendering(void)
 }
 
 // We need to clear the visibility array before each frame.
+extern "C" void portal_water_frame_begin(void);
 void rendobj_init_frame(void)
 {
    if (g_lgd3d && g_zbuffer) {
+      portal_water_frame_begin();
       // Put objects on queue when they would normally be rendered;
       // instead render them at the end of the frame after all terrain
       // has been rendered.  Objects don't need to be sorted or split- Yay!
