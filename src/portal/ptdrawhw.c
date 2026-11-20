@@ -638,6 +638,18 @@ void portal_render_water_polys(int n)
    const int rt_suppressed = RenderRTSuppressCapture(1);
 #endif
 
+   // (blended, no depth written, at full alpha -- set here, not taken from
+   // whatever the translucent object drawn before it left: a candle's or a
+   // sprite's left blending off, or its alpha, and the pool's water was
+   // drawn solid, or near not at all, as the view took one in or not)
+   const BOOL wasBlend = lgd3d_is_alpha_blending_on(), wasZWrite = lgd3d_is_zwrite_on();
+   const float wasAlpha = lgd3d_get_alpha();
+   const BOOL wasIterated = lgd3d_is_iterated_alpha_on();
+   lgd3d_set_blend(TRUE);
+   lgd3d_set_zwrite(FALSE);
+   lgd3d_set_alpha(1.0f);
+   lgd3d_set_iterated_alpha(FALSE);
+
    r3_start_block();
    r3_set_clipmode(R3_CLIP);
    r3_set_polygon_context(R3_PL_POLYGON | R3_PL_TEXTURE | R3_PL_UNLIT);
@@ -667,6 +679,10 @@ void portal_render_water_polys(int n)
    gr_set_fill_type(FILL_NORM);
 
    r3_end_block();
+   lgd3d_set_blend(wasBlend);
+   lgd3d_set_zwrite(wasZWrite);
+   lgd3d_set_alpha(wasAlpha);
+   lgd3d_set_iterated_alpha(wasIterated);
 #ifdef DARK_RT
    // the translucent pass goes on after the water: objects nearer than it
    // (a fountain's stream over its basin) were drawn with capture still off

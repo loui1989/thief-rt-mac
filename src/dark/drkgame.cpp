@@ -1310,6 +1310,11 @@ static BOOL rt_test_target(const sRtTestSite* site, int index, mxs_vector* targe
                   if (strstr(canonical, want))
                   {
                      ++n;
+                     if (getenv("DBG_SITES") && index == 1)
+                     {
+                        mxs_vector* v0 = &cell->vpool[cell->vertex_list[voff]];
+                        fprintf(stderr, "DBGSITE %s cell %d at %.0f %.0f %.0f\n", canonical, c, v0->x, v0->y, v0->z);
+                     }
                      // (one face in each ten: a wall or a river is many faces)
                      if (n == 1 + (index - 1) * 10)
                      {
@@ -1494,6 +1499,30 @@ static void rt_test_frame(void)
             if (*ch == ',')
                *ch = ' ';
          console_rt_test(start);
+      }
+   }
+   // (DARK_TEST_AT="x y z heading pitch": the player set there, the view
+   // tipped by pitch degrees, down positive, 20 frames in -- for a capture)
+   {
+      static int s_atFrames = 0;
+      const char* at = getenv("DARK_TEST_AT");
+      float x, y, z, h = 0.0f, pitch = 0.0f;
+      if (at && PlayerObjectExists() && wr_num_cells > 0 && ++s_atFrames >= 20 && s_atFrames <= 22 &&
+          sscanf(at, "%f %f %f %f %f", &x, &y, &z, &h, &pitch) >= 3)
+      {
+         mxs_vector pos;
+         mx_mk_vec(&pos, x, y, z);
+         mxs_angvec fac;
+         fac.tx = 0;
+         fac.ty = (mxs_ang)(int)(pitch * 65536.0f / 360.0f);
+         fac.tz = (mxs_ang)(int)(h * 65536.0f / 360.0f);
+         AutoAppIPtr(GameTools);
+         pGameTools->TeleportObject(PlayerObject(), &pos, &fac, OBJ_NULL);
+         if (PlayerCamera())
+         {
+            mxs_angvec cam = fac;
+            CameraSetLocation(PlayerCamera(), &pos, &cam);
+         }
       }
    }
    if (!gRtTestPending || !PlayerObjectExists() || wr_num_cells <= 0)
