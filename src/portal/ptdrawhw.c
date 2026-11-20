@@ -289,6 +289,7 @@ ushort pt_default_water_texture_flags = BMF_TRANS;
 // water texture's frames) -- its align now its water's number, not its
 // palette's -- for one drawn as an ordinary lit surface; NULL for any other
 extern const uchar *(*lgd3d_water_texture_palette)(grs_bitmap *bm);
+extern ushort *(*lgd3d_water_alpha_palette)(grs_bitmap *bm);
 // Lava (the Lost City's river, the Maw's pools): "water" whose texture is
 // lava's, by its name (as the path tracer finds it, rtgl1.cpp lava_kind). 0
 // not lava, 1 its top, 2 its face from inside it ("...out", in the lava's
@@ -327,6 +328,22 @@ static const uchar *pt_water_texture_palette(grs_bitmap *bm)
       for (; t->w > 0; ++t)
          if (t == bm)
             return palmgr_get_pal(water_info_list[i].pal_index);
+   }
+   return NULL;
+}
+
+// ... and its water's alpha palette (lgd3d's tmgr.c and modern.cpp: a water
+// texture always made see-through, through it)
+static ushort *pt_water_alpha_palette(grs_bitmap *bm)
+{
+   int i;
+   for (i = 0; water_info_list && i < num_water_textures; ++i) {
+      r3s_texture t = water_info_list[i].tex;
+      if (!t || !water_info_list[i].pal)
+         continue;
+      for (; t->w > 0; ++t)
+         if (t == bm)
+            return water_info_list[i].pal;
    }
    return NULL;
 }
@@ -441,6 +458,7 @@ void portal_setup_water_hack(int num_textures, r3s_texture *tex_list, float *alp
    water_info_list = Calloc(num_water_textures * sizeof(*water_info_list));
    memset(pt_lava_known, 0, sizeof(pt_lava_known));
    lgd3d_water_texture_palette = pt_water_texture_palette;
+   lgd3d_water_alpha_palette = pt_water_alpha_palette;
 
    for (i = 0; i<num_water_textures; i++) {
       r3s_texture tex;

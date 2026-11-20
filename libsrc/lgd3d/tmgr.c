@@ -207,12 +207,17 @@ static void release_texture(int i)
    }
 }
 
+extern ushort *(*lgd3d_water_alpha_palette)(grs_bitmap *bm);   /* modern.cpp */
+
 static void set_flags(tdrv_texture_info *info)
 {
    info->flags = 0;
    if (gr_get_fill_type() == FILL_BLEND) {
       info->flags |= TF_ALPHA;
    }
+   /* a water texture: see-through always, however it comes to be loaded */
+   if (info->bm && lgd3d_water_alpha_palette && lgd3d_water_alpha_palette(info->bm))
+      info->flags |= TF_ALPHA;
 
    if ((!(info->flags&TF_ALPHA)) && (info->bm->flags&BMF_TRANS)) {
       info->flags |= TF_TRANS;

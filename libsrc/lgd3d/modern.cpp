@@ -43,6 +43,12 @@ static ushort *g_alphaPalette = NULL;
 // for any other: its bitmap's align is made the number of its water's alpha
 // palette, not a palette slot
 extern "C" const uchar *(*lgd3d_water_texture_palette)(grs_bitmap *bm) = NULL;
+// ... and its water's alpha palette (NULL for any other bitmap): a water
+// texture is always made see-through through it (tmgr.c set_flags), whatever
+// was being drawn when it was (re)loaded -- reloaded as an ordinary texture
+// when a palette slot of its water's number changed, or through another
+// water's alpha palette, the pool went from clear to dark and back
+extern "C" ushort *(*lgd3d_water_alpha_palette)(grs_bitmap *bm) = NULL;
 // Dark's portal and model UVs routinely extend beyond the base texture and
 // rely on the primary texture stage repeating.  Starting stage zero clamped
 // turns every out-of-range surface into a stretched edge row/column until a
@@ -127,6 +133,8 @@ static uchar *ConvertTexture(tdrv_texture_info *info) {
   if (bm->type == BMT_FLAT8 && !(info->flags & TF_ALPHA) && lgd3d_water_texture_palette)
     if (const uchar *own = lgd3d_water_texture_palette(bm))
       ownPalette = own;
+  const ushort *waterAlpha = (bm->type == BMT_FLAT8 && (info->flags & TF_ALPHA) && lgd3d_water_alpha_palette)
+                                ? lgd3d_water_alpha_palette(bm) : NULL;
   for (y = 0; y < h; ++y)
     for (x = 0; x < w; ++x) {
       uchar r = 255, g = 255, b = 255, a = 255;
@@ -135,8 +143,8 @@ static uchar *ConvertTexture(tdrv_texture_info *info) {
         if (g_textureClut && !(info->flags & TF_ALPHA))
           index = g_textureClut[index];
         if (info->flags & TF_ALPHA) {
-          ushort p = g_alphaPalette ? g_alphaPalette[index]
-                                    : (ushort)((index >> 4) << 12 | 0x0fff);
+          const ushort *apal = waterAlpha ? waterAlpha : g_alphaPalette;
+          ushort p = apal ? apal[index] : (ushort)((index >> 4) << 12 | 0x0fff);
           Decode16(p, BMF_RGB_4444, &r, &g, &b, &a);
         } else {
           int slot = bm->align;
