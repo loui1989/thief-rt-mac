@@ -1,0 +1,213 @@
+/*
+@Copyright Looking Glass Studios, Inc.
+1996,1997,1998,1999,2000 Unpublished Work.
+*/
+
+// $Header: r:/t2repos/thief2/src/render/skyrend.cpp,v 1.11 2000/02/19 12:35:46 toml Exp $
+
+#include <stdio.h>
+#include <skyrend.h>
+#ifdef DARK_RT
+#include <render_rt.h>
+#endif
+#include <skyint.h>
+#include <skyobj.h>
+#include <starobj.h>
+#include <celstobj.h>
+#include <distobj.h>
+#include <cloudobj.h>
+#include <config.h>
+#include <scrnmode.h>
+
+#include <mprintf.h>
+#include <memall.h>
+#include <dbmem.h>   // must be last header! 
+
+extern "C" BOOL g_lgd3d;
+
+
+// @TBD: make this a UI element, or maybe just config-based.
+BOOL bUIOptionEnhancedSky = TRUE;
+
+
+///////////////////////////////////////////////////////////
+
+// Instantiations:
+
+static cSky SkyRenderer;
+static cStars StarRenderer;
+static cCelestialObject CelestialObjectRenderer1(0);
+static cCelestialObject CelestialObjectRenderer2(1);
+static cCelestialObject CelestialObjectRenderer3(2);
+static cCelestialObject CelestialObjectRenderer4(3);
+static cDistantArt DistantArtRenderer;
+static cCloudDeck CloudDeckRenderer;
+
+// Define in order rendered:
+static ISkyObject *(RenderedComponents[])=
+{
+   &SkyRenderer,
+   &StarRenderer,
+   &CelestialObjectRenderer1,
+   &CelestialObjectRenderer2,
+   &CelestialObjectRenderer3,
+   &CelestialObjectRenderer4,
+   &CloudDeckRenderer,
+   &DistantArtRenderer,
+   0
+};
+
+
+// Call when game inits
+void SkyRendererAppInit()
+{
+   int i = 0;
+ 
+   int cfgval;
+   config_get_int("enhanced_sky",&cfgval);
+   bUIOptionEnhancedSky = (cfgval==1);
+
+   while (RenderedComponents[i])
+   {
+      RenderedComponents[i]->AppInit();
+      i++;
+   }
+}
+
+static BOOL bDidInit = FALSE;
+
+// Call when mission loaded
+void SkyRendererInit()
+{
+   if (bDidInit || !g_lgd3d || !bUIOptionEnhancedSky)
+      return;
+
+   int i = 0;
+   while (RenderedComponents[i])
+   {
+      RenderedComponents[i]->Init();
+      i++;
+   }
+
+   bDidInit = TRUE;
+}
+
+
+// call when mission over
+void SkyRendererTerm()
+{
+   if (!bDidInit)
+      return;
+
+   int i = 0;
+   while (RenderedComponents[i])
+   {
+      RenderedComponents[i]->Term();
+      i++;
+   }
+
+   bDidInit = FALSE;
+}
+
+
+BOOL SkyDomeChanged();      // skyobj.cpp
+BOOL CloudDeckChanged();    // cloudobj.cpp
+
+void SkyRendererRender()
+{
+   if (!g_lgd3d)
+      return;
+
+   int i = 0;
+
+   // A new mission's sky, loaded after the sky was made from the last
+   // one's (the mode not left between them): all of it made again. The
+   // cloud deck drawn with the old mission's grid and the new one's glow
+   // crashed The Black Parade on its next mission's first frame.
+   if (bDidInit && (SkyDomeChanged() || CloudDeckChanged()))
+   {
+      fprintf(stderr, "Sky: the mission's sky changed - all of it made again\n");
+      SkyRendererTerm();
+   }
+
+   // Make sure we're inited:
+   SkyRendererInit();
+
+
+   // @TBD: time this to make sure it isn't slowing us down too much.
+   // Hey, this isn't implemented!
+   // lgd3d_zclear();
+   //
+   // So do this instead:
+   sScrnMode Mode;
+   ScrnModeGet(&Mode);
+   lgd3d_clear_z_rect(0, 0, Mode.w, Mode.h);
+
+   while (RenderedComponents[i])
+   {
+#ifdef DARK_RT
+      // (the path tracer's sky keeps the parts in this order: RenderRTSkyLayer)
+      RenderRTSkyLayer(i);
+#endif
+      RenderedComponents[i]->Render();
+      i++;
+   }
+}
+
+BOOL SkyRendererTryEnhanced()
+{
+   return(bUIOptionEnhancedSky);
+}
+
+void SkyRendererSetEnhanced(BOOL isenhanced)
+{
+  //hook called by UI to do dirty work.
+  if (isenhanced)
+    {
+      bUIOptionEnhancedSky = TRUE;
+      config_set_int("enhanced_sky",1);
+    }
+  else
+    {
+      bUIOptionEnhancedSky = FALSE;
+      config_set_int("enhanced_sky",0);   
+    }
+}
+
+BOOL SkyRendererUseEnhanced()
+{
+   return g_lgd3d && SkyRenderer.Enabled() && bUIOptionEnhancedSky;
+}
+
+float SkyRendererGetHorizonDip()
+{
+   return SkyRenderer.GetHorizonDip();
+}
+
+float SkyRendererGetSkyIntensity(mxs_vector *pDir)
+{
+   return SkyRenderer.GetSkyIntensity(pDir);
+}
+
+// the first of the mission's celestial objects (its moon), for the path
+// tracer's moonlight
+BOOL SkyRendererGetCelestialDir(float dir[3])
+{
+   if (!SkyRendererUseEnhanced())
+      return FALSE;
+   return CelestialObjectRenderer1.GetDirection(dir) ||
+          CelestialObjectRenderer2.GetDirection(dir) ||
+          CelestialObjectRenderer3.GetDirection(dir);
+}
+
+float SkyRendererGetSkyDist(mxs_vector *pDir)
+{
+   return SkyRenderer.GetSkyDist(pDir);
+}
+
+
+float SkyRendererGetClipLat()
+{
+   return SkyRenderer.GetClipLat();
+}
+

@@ -1,0 +1,1843 @@
+/*
+@Copyright Looking Glass Studios, Inc.
+1996,1997,1998,1999,2000 Unpublished Work.
+*/
+
+// $Header: r:/t2repos/thief2/src/portal/ptdrawhw.c,v 1.17 2000/02/19 13:18:43 toml Exp $
+
+#include <math.h>
+
+#include <g2pt.h>
+#include <r3d.h>
+#include <lgd3d.h>
+#include <matrix.h>
+#include <memall.h>
+#include <tmpalloc.h>
+
+#include <palmgr.h>
+#include <portwatr.h>
+#include <portal_.h>
+#include <portclip.h>
+#include <porthw.h>
+#include <portsky.h>
+#include <texmem.h>
+#include <mprintf.h>
+#include <ctype.h>
+#include <string.h>
+#include <wrdbrend.h>
+
+#include <profile.h>
+#include <memall.h>
+#ifdef DARK_RT
+#include <render_rt.h>
+#include <render_backend.h>
+#endif
+#include <dbmem.h>   // must be last header! 
+
+#define STATS_ON
+
+#ifdef STATS_ON
+  #define STAT(x)     x
+#else
+  #define STAT(x)
+#endif
+
+#define COLOR_WHITE 0x1ffffff
+
+#define MAX_VERT 32
+
+#ifdef STATS_ON
+extern int stat_num_poly_drawn;
+extern int stat_num_poly_raw;
+extern int stat_num_poly_considered;
+extern int stat_num_backface_tests;
+#endif
+
+int portal_sky_spans = 0;
+
+int portal_hack_blend = BLEND_SRC_DEST;
+
+BOOL pt_lightmap_first = FALSE;
+
+mxs_real two_to_n_minus_fifteen[31] =
+{
+   1.0/32768.0,
+   1.0/16384.0,
+   1.0/8192.0,
+   1.0/4096.0,
+   1.0/2048.0,
+   1.0/1024.0,
+   1.0/512.0,
+   1.0/256.0,
+   1.0/128.0,
+   0.015625,
+   0.03125,
+   0.0625,
+   0.125,
+   0.25,
+   0.5,
+   1.0,
+   2.0,
+   4.0,
+   8.0,
+   16.0,
+   32.0,
+   64.0,
+   128.0,
+   256.0,
+   512.0,
+   1024.0,
+   2048.0,
+   4096.0,
+   8192.0,
+   16384.0,
+   32768.0,
+};
+
+#ifdef DBG
+static mxs_real two_to_n(int n)
+{
+   AssertMsg1((n>=-12) && (n<=12), "two_to_n(): %i is out of range [-12 to 12]", n);
+   return two_to_n_minus_fifteen[n+15];
+}
+#else
+#define two_to_n(n) (two_to_n_minus_fifteen[(n)+15])
+#endif
+
+
+extern int ResImageTerrainScale(const void *bitmap, int *w, int *h);
+
+// The size the world lays a texture at, as the path tracer has it (portal.c):
+// an HD replacement at its .mtl's terrain_scale (its original's size), any
+// other true-colour texture at its own width -- not log2 of its row, which is
+// in bytes (twice its width at 16 bits). Laid at its row's size, an HD
+// replacement (HDMOD's .dds) was stretched over a floor many times over,
+// a blur, in OpenGL only. 8-bit textures (and their mip levels): as they were.
+static int hw_tex_log2(int v)
+{
+   int l = 0;
+   while (l < 14 && (1 << l) < v)
+      ++l;
+   return l;
+}
+static int hw_wlog(grs_bitmap *bm)
+{
+   int tw, th;
+   if (bm->type == BMT_FLAT8)
+      return bm->wlog;
+   if (ResImageTerrainScale(bm, &tw, &th))
+      return hw_tex_log2(tw);
+   return hw_tex_log2(bm->w);
+}
+static int hw_hlog(grs_bitmap *bm)
+{
+   int tw, th;
+   if (bm->type == BMT_FLAT8)
+      return bm->hlog;
+   if (ResImageTerrainScale(bm, &tw, &th))
+      return hw_tex_log2(th);
+   return hw_tex_log2(bm->h);
+}
+
+// The same at mip level `level` (bm: that level's bitmap, the level-0 one
+// `level` before it). A smaller level has no .mtl noted for it, and was laid
+// at its own size: an HD replacement's (512 for a terrain_scale of 128)
+// halves still four times its original's, magnified that much whenever the
+// distance picked one -- until the next level down.
+static int hw_wlog_at(grs_bitmap *bm, int level)
+{
+   int tw, th;
+   if (level > 0 && bm->type != BMT_FLAT8 && ResImageTerrainScale(bm - level, &tw, &th))
+      return hw_tex_log2(tw) - level;
+   return hw_wlog(bm);
+}
+static int hw_hlog_at(grs_bitmap *bm, int level)
+{
+   int tw, th;
+   if (level > 0 && bm->type != BMT_FLAT8 && ResImageTerrainScale(bm - level, &tw, &th))
+      return hw_tex_log2(th) - level;
+   return hw_hlog(bm);
+}
+
+extern BOOL g_zbuffer;
+extern int max_draw_polys;
+extern bool show_lightmap;
+extern bool portal_clip_poly;
+extern int portal_clip_num;
+extern PortalCell *cur_cell;
+extern float *portal_current_wrext_u_base;
+extern float *portal_current_wrext_v_base;
+
+extern int portbg_clip_sky(int, r3s_phandle *, r3s_phandle **);
+extern void draw_polygon_wireframe(r3s_phandle *points, int num_points, uint color);
+extern void draw_polygon_vertices(r3s_phandle *points, int num_points, uint color);
+extern void draw_background_hack();
+extern int compute_mip(PortalPolygonRenderInfo *render, PortalPlane *p);
+extern bool poly_outline_by_flags(PortalPolygonCore *poly, r3s_phandle *points,
+                           int MIP_level);
+extern mxs_vector *get_cached_vector(mxs_vector *where, mxs_vector *v);
+
+typedef struct scale_info {
+   double u0, v0, scale_u, scale_v;
+} scale_info;
+
+static mxs_real portal_texture_base_u(PortalPolygonRenderInfo *render)
+{
+   if (portal_current_wrext_u_base)
+      return portal_current_wrext_u_base[render - cur_cell->render_list];
+   return render->u_base / 4096.0f;
+}
+
+static mxs_real portal_texture_base_v(PortalPolygonRenderInfo *render)
+{
+   if (portal_current_wrext_v_base)
+      return portal_current_wrext_v_base[render - cur_cell->render_list];
+   return render->v_base / 4096.0f;
+}
+
+
+
+// this is to set up the sky hack under lgd3d
+int portal_sky_id=-1;
+static float portal_w_min;
+static float portal_z_max;
+void portal_setup_star_hack(int tex_id)
+{
+   portal_sky_id = tex_id;
+}
+
+void portal_set_znearfar(double z_near, double z_far)
+{
+   portal_w_min = (float)(1.0/z_far);
+   portal_z_max = (float)z_far;
+}
+
+
+
+static void ptlgd3d_calc_uv(int n, r3s_phandle *vlist, scale_info *info)
+{
+   int i;
+   for (i=0; i < n; ++i) {
+      double sx = vlist[i]->grp.sx / 65536.0;
+      double sy = vlist[i]->grp.sy / 65536.0;
+      double c = (g2pt_tmap_data[2] + g2pt_tmap_data[5]*sx + g2pt_tmap_data[8]*sy);
+      double ic = 1/c;
+
+      double u = g2pt_tmap_data[0]+g2pt_tmap_data[3]*sx + g2pt_tmap_data[6]*sy;
+      double v = g2pt_tmap_data[1]+g2pt_tmap_data[4]*sx + g2pt_tmap_data[7]*sy;
+      vlist[i]->grp.u = (mxs_real)((u*ic/65536) * info->scale_u + info->u0);
+      vlist[i]->grp.v = (mxs_real)((v*ic/65536) * info->scale_v + info->v0);
+      vlist[i]->grp.i = 1.0;
+      // if background hack, fixup w values to match texture not skypoly
+   }
+}
+
+static void ptlgd3d_recalc_uv_vlist(int n, r3s_phandle *vlist, scale_info *info)
+{
+   int i;
+   for (i=0; i < n; ++i) {
+      vlist[i]->grp.u = (mxs_real)(vlist[i]->grp.u + info->u0);
+      vlist[i]->grp.v = (mxs_real)(vlist[i]->grp.v + info->v0);
+      vlist[i]->grp.u = (mxs_real)(vlist[i]->grp.u * info->scale_u);
+      vlist[i]->grp.v = (mxs_real)(vlist[i]->grp.v * info->scale_v);
+   }
+}
+
+static void ptlgd3d_recalc_uv(int n, LGD3D_tex_coord *uvs, scale_info *info)
+{
+   int i;
+   for (i=0; i < n; ++i) {
+      uvs[i].u = (float)(uvs[i].u + info->u0);
+      uvs[i].v = (float)(uvs[i].v + info->v0);
+      uvs[i].u = (float)(uvs[i].u * info->scale_u);
+      uvs[i].v = (float)(uvs[i].v * info->scale_v);
+   }
+}
+
+typedef struct water_info {
+   ushort *pal;
+   r3s_texture tex;
+   uchar pal_index;
+   uchar pad;
+   short w;
+} water_info;
+
+
+static water_info *water_info_list=NULL;
+static int num_water_textures = 0;
+
+static void init_water_pal(water_info *info, ushort alpha, ushort argb, uchar *pal24)
+{
+   int i;
+   ushort *pal = info->pal;
+
+   if (pal == NULL) {
+      pal = (ushort *)Malloc(512);
+      info->pal = pal;
+   }
+
+   pal[0] = argb;
+   for (i=1; i<256; i++)
+      pal[i] = alpha + ((pal24[3*i]>>4)<<8) +
+                        ((pal24[3*i+1]>>4)<<4) +
+                        (pal24[3*i+2]>>4);
+}
+
+ushort pt_default_water_texture_flags = BMF_TRANS;
+
+// lgd3d's question (modern.cpp): the palette of a water texture (of one of a
+// water texture's frames) -- its align now its water's number, not its
+// palette's -- for one drawn as an ordinary lit surface; NULL for any other
+extern const uchar *(*lgd3d_water_texture_palette)(grs_bitmap *bm);
+extern ushort *(*lgd3d_water_alpha_palette)(grs_bitmap *bm);
+// Lava (the Lost City's river, the Maw's pools): "water" whose texture is
+// lava's, by its name (as the path tracer finds it, rtgl1.cpp lava_kind). 0
+// not lava, 1 its top, 2 its face from inside it ("...out", in the lava's
+// own cell, in the same place as the top). A new mission forgets them
+// (portal_setup_water_hack).
+extern int RenderRTGameTextureName(int i, char *out, int n);
+static unsigned char pt_lava_known[TEXMEM_MAX];   // kind + 1, 0 not looked at
+static int pt_lava_kind(int id)
+{
+   char name[256];
+   int kind = 0, i, len;
+   if (id < 0 || id >= TEXMEM_MAX)
+      return 0;
+   if (pt_lava_known[id])
+      return pt_lava_known[id] - 1;
+   if (RenderRTGameTextureName(id, name, sizeof(name))) {
+      for (i = 0; name[i]; ++i)
+         name[i] = name[i] == '\\' ? '/' : (char)tolower((unsigned char)name[i]);
+      len = (int)strlen(name);
+      if (strstr(name, "lava") || strstr(name, "waterhw/l3") || strstr(name, "waterhw/l4"))
+         kind = (len > 3 && !strcmp(name + len - 3, "out")) ? 2 : 1;
+   }
+   pt_lava_known[id] = (unsigned char)(kind + 1);
+   return kind;
+}
+
+int portal_lava_kind(int texture_id) { return pt_lava_kind(texture_id); }
+
+static const uchar *pt_water_texture_palette(grs_bitmap *bm)
+{
+   int i;
+   for (i = 0; water_info_list && i < num_water_textures; ++i) {
+      r3s_texture t = water_info_list[i].tex;
+      if (!t)
+         continue;
+      for (; t->w > 0; ++t)
+         if (t == bm)
+            return palmgr_get_pal(water_info_list[i].pal_index);
+   }
+   return NULL;
+}
+
+// ... and its water's alpha palette (lgd3d's tmgr.c and modern.cpp: a water
+// texture always made see-through, through it)
+static ushort *pt_water_alpha_palette(grs_bitmap *bm)
+{
+   int i;
+   for (i = 0; water_info_list && i < num_water_textures; ++i) {
+      r3s_texture t = water_info_list[i].tex;
+      if (!t || !water_info_list[i].pal)
+         continue;
+      for (; t->w > 0; ++t)
+         if (t == bm)
+            return water_info_list[i].pal;
+   }
+   return NULL;
+}
+
+#ifdef DARK_RT
+// The ray tracer's copy of a water texture. Water textures are drawn through
+// their medium's alpha palette (and their bitmap's align is taken over as the
+// index of that palette), so the ordinary texture of the same bitmap has the
+// wrong colours and no translucency.
+#define PT_RT_WATER_CACHE 64
+static struct { r3s_texture bm; ushort *pal; void *handle; } pt_rt_water[PT_RT_WATER_CACHE];
+static int pt_rt_water_n = 0, pt_rt_water_next = 0;
+
+static void pt_rt_water_flush(void)
+{
+   int i;
+   for (i = 0; i < pt_rt_water_n; ++i)
+      if (pt_rt_water[i].handle)
+         RenderBackendDestroyTexture(pt_rt_water[i].handle);
+   pt_rt_water_n = pt_rt_water_next = 0;
+}
+
+void *portal_rt_water_texture(r3s_texture tex)
+{
+   ushort *pal;
+   uchar *rgba;
+   int i, x, y, slot;
+   void *handle;
+   if (!tex || tex->type != BMT_FLAT8 || !tex->bits || tex->w <= 0 || tex->h <= 0 ||
+       !water_info_list || num_water_textures <= 0)
+      return NULL;
+   pal = water_info_list[tex->align < num_water_textures ? tex->align : 0].pal;
+   if (!pal)
+      return NULL;
+   for (i = 0; i < pt_rt_water_n; ++i)
+      if (pt_rt_water[i].bm == tex && pt_rt_water[i].pal == pal)
+         return pt_rt_water[i].handle;
+   rgba = (uchar *)Malloc(tex->w * tex->h * 4);
+   for (y = 0; y < tex->h; ++y)
+      for (x = 0; x < tex->w; ++x) {
+         ushort p = pal[tex->bits[y * tex->row + x]];
+         uchar *d = rgba + (y * tex->w + x) * 4;
+         d[0] = (uchar)(((p >> 8) & 15) * 17);
+         d[1] = (uchar)(((p >> 4) & 15) * 17);
+         d[2] = (uchar)((p & 15) * 17);
+         d[3] = (uchar)(((p >> 12) & 15) * 17);
+      }
+   handle = RenderBackendCreateTexture(tex->w, tex->h, rgba, tex->w * 4);
+   Free(rgba);
+   if (pt_rt_water_n < PT_RT_WATER_CACHE) {
+      slot = pt_rt_water_n++;
+   } else {
+      slot = pt_rt_water_next;
+      pt_rt_water_next = (pt_rt_water_next + 1) % PT_RT_WATER_CACHE;
+      if (pt_rt_water[slot].handle)
+         RenderBackendDestroyTexture(pt_rt_water[slot].handle);
+   }
+   pt_rt_water[slot].bm = tex;
+   pt_rt_water[slot].pal = pal;
+   pt_rt_water[slot].handle = handle;
+   return handle;
+}
+#endif
+
+/////////////////////////////////////////////////////////////////////////////
+// Setup water hack. Must be called before water can be rendered in hardware.
+// num_textures = number of water textures;
+// tex_list = pointer to array of pointers to water textures;
+// alpha_list = pointer to array of alpha values for each texture
+// rgb_list = pointer to array of rgb values for each texture
+//
+// Before any water texture can be released, portal_cleanup_water_hack() must be called.
+// Any call to portal_setup_water_hack() effectively calls portal_cleanup_water_hack() first.
+
+EXTERN BOOL g_lgd3d;
+
+void portal_setup_water_hack(int num_textures, r3s_texture *tex_list, float *alpha_list, int *rgb_list)
+{
+   int i;
+
+#ifdef DARK_RT
+   pt_rt_water_flush();
+#endif
+   if (water_info_list != NULL) {
+      for (i=0; i<num_water_textures; i++) {
+         water_info *info = &water_info_list[i];
+         r3s_texture tex = info->tex;
+         if (info->pal != NULL)
+         {
+            Free(info->pal);
+            info->pal = NULL;
+         }
+         if (tex != NULL)
+         {
+            AssertMsg(tex->w == info->w,
+               "Water info out of synch!\n Probable cause: freed water texture in water info list.");
+            while (tex->w > 0) {
+               tex->align = info->pal_index;
+               tex++;
+            }
+         }
+      }
+      Free(water_info_list);
+      water_info_list = NULL;
+   }
+
+   num_water_textures = num_textures;
+
+   if ((num_water_textures <= 0)||(!g_lgd3d))
+      return;
+
+   water_info_list = Calloc(num_water_textures * sizeof(*water_info_list));
+   memset(pt_lava_known, 0, sizeof(pt_lava_known));
+   lgd3d_water_texture_palette = pt_water_texture_palette;
+   lgd3d_water_alpha_palette = pt_water_alpha_palette;
+
+   for (i = 0; i<num_water_textures; i++) {
+      r3s_texture tex;
+      short alpha;
+      short argb;
+      ushort flags;
+      uchar *pal24;
+      water_info *info=&water_info_list[i];
+
+      if (tex_list != NULL) {
+         tex = tex_list[i];
+         info->tex = tex;
+         info->pal_index = tex->align;
+         info->w = tex->w;
+         pal24 = palmgr_get_pal(tex->align);
+         flags = tex->flags;
+         while (tex->w > 0) {
+            tex->align = i;
+            tex++;
+         }
+      } else {
+         info->tex = NULL;
+         pal24 = grd_pal;
+         flags = pt_default_water_texture_flags;
+      }
+
+      alpha = (short)(0xf * alpha_list[i]);
+      alpha <<= 12;
+      if (flags & BMF_TRANS) {
+         argb = alpha + ((rgb_list[3*i]>>4)<<8) + ((rgb_list[3*i+1]>>4)<<4) + (rgb_list[3*i+2]>>4);
+         init_water_pal(info, (ushort )0xf000, argb, pal24);
+      } else {
+         argb = alpha + ((pal24[0]>>4)<<8) +
+                        ((pal24[1]>>4)<<4) +
+                        (pal24[2]>>4);
+         init_water_pal(info, alpha, argb, pal24);
+      }
+   }
+}
+
+void portal_cleanup_water_hack(void)
+{
+   portal_setup_water_hack(0, NULL, NULL, NULL);
+}
+
+// this is quite hateful.
+
+// (lava is drawn as the water it is now, unlit, glowing: the Lost City's
+// river is many more faces than a pool -- past 256 the rest were left out,
+// pieces of it gone, black, a moment as the view moved)
+#define MAX_WATER_POINTS 32768
+#define MAX_WATER_POLYS 8192
+static r3s_point water_points[MAX_WATER_POINTS];
+static int water_polys[MAX_WATER_POLYS];
+static r3s_texture water_textures[MAX_WATER_POLYS];
+static int num_water_points=0;
+float hw_water_tex_scale=1.0;
+
+int num_water_polys=0;
+
+void (*portal_queue_water_poly)() = NULL;
+
+static void queue_water_poly(r3s_texture tex, int n, r3s_phandle *vlist)
+{
+   int i;
+   r3s_point *dest;
+   float u_offset, v_offset;
+
+   if (num_water_polys >= MAX_WATER_POLYS || num_water_points + n > MAX_WATER_POINTS) {
+      static int told;
+      if (!told++)
+         mprintf("portal: too many water faces in a view (%d, %d points): the rest left out\n",
+                 num_water_polys, num_water_points);
+      return;
+   }
+
+   water_textures[num_water_polys] = tex;
+   water_polys[num_water_polys] = n;
+
+   dest = &water_points[num_water_points];
+
+   *dest = *(vlist[0]);
+   dest->grp.u *= hw_water_tex_scale;
+   dest->grp.v *= hw_water_tex_scale;
+
+   u_offset = floorf(dest->grp.u);
+   v_offset = floorf(dest->grp.v);
+
+   dest->grp.u -= u_offset;
+   dest->grp.v -= v_offset;
+
+   ++dest;
+   for (i=1; i<n; i++) {
+      *dest = *(vlist[i]);
+      dest->grp.u *= hw_water_tex_scale;
+      dest->grp.v *= hw_water_tex_scale;
+      dest->grp.u -= u_offset;
+      dest->grp.v -= v_offset;
+      ++dest;
+   }
+
+   num_water_points += n;
+   num_water_polys++;
+   if (portal_queue_water_poly != NULL)
+      portal_queue_water_poly();
+}
+
+static void render_water_poly(r3s_texture tex, int n, r3s_phandle *vlist)
+{
+   int i;
+   float u_offset, v_offset;
+
+   vlist[0]->grp.u *= hw_water_tex_scale;
+   vlist[0]->grp.v *= hw_water_tex_scale;
+
+   u_offset = floorf(vlist[0]->grp.u);
+   v_offset = floorf(vlist[0]->grp.v);
+
+   vlist[0]->grp.u -= u_offset;
+   vlist[0]->grp.v -= v_offset;
+
+   for (i=1; i<n; i++) {
+      r3s_phandle p = vlist[i];
+      p->grp.u *= hw_water_tex_scale;
+      p->grp.v *= hw_water_tex_scale;
+      p->grp.u -= u_offset;
+      p->grp.v -= v_offset;
+   }
+
+   gr_set_fill_type(FILL_BLEND);
+   lgd3d_set_blend(TRUE);
+
+   AssertMsg(water_info_list != NULL, "Must call portal_setup_water_hack() before rendering water in hardware!");
+
+   if (tex->align >= num_water_textures)
+      lgd3d_set_alpha_pal(water_info_list[0].pal);
+   else
+      lgd3d_set_alpha_pal(water_info_list[tex->align].pal);
+   r3_set_texture(tex);
+   r3_draw_poly(n, vlist);
+   lgd3d_set_blend(FALSE);
+   gr_set_fill_type(FILL_NORM);
+}
+
+static int water_start = 0;
+static r3s_point *water_next_poly = water_points;
+
+// A new view: the water faces queued from the last one, all drawn or not,
+// forgotten. (The queue's place had been kept from view to view: a face
+// queued and never drawn -- its queue entry not made -- left it behind its
+// faces from then on, and a pool's water drawn from the faces of a view
+// before or not at all, now and then.)
+void portal_water_frame_begin(void)
+{
+   static int told;
+   if ((num_water_polys || water_start) && !told++)
+      mprintf("portal: water faces left from a view (%d queued, %d drawn): forgotten\n",
+              num_water_polys, water_start);
+   water_start = 0;
+   water_next_poly = water_points;
+   num_water_polys = 0;
+   num_water_points = 0;
+}
+
+void portal_render_water_polys(int n)
+{
+#define start water_start
+#define next_poly water_next_poly
+   int i, end;
+
+   end = start + n;
+
+   AssertMsg(water_info_list != NULL, "Must call portal_setup_water_hack() before rendering water in hardware!");
+   AssertMsg(end <= num_water_polys, "portal_render_water_polys(): too many polys requested!");
+#ifdef DARK_RT
+   // water surfaces come from the world representation
+   const int rt_suppressed = RenderRTSuppressCapture(1);
+#endif
+
+   // (blended, no depth written, at full alpha -- set here, not taken from
+   // whatever the translucent object drawn before it left: a candle's or a
+   // sprite's left blending off, or its alpha, and the pool's water was
+   // drawn solid, or near not at all, as the view took one in or not)
+   const BOOL wasBlend = lgd3d_is_alpha_blending_on(), wasZWrite = lgd3d_is_zwrite_on();
+   const float wasAlpha = lgd3d_get_alpha();
+   const BOOL wasIterated = lgd3d_is_iterated_alpha_on();
+   lgd3d_set_blend(TRUE);
+   lgd3d_set_zwrite(FALSE);
+   lgd3d_set_alpha(1.0f);
+   lgd3d_set_iterated_alpha(FALSE);
+
+   r3_start_block();
+   r3_set_clipmode(R3_CLIP);
+   r3_set_polygon_context(R3_PL_POLYGON | R3_PL_TEXTURE | R3_PL_UNLIT);
+   r3d_do_setup = TRUE;
+
+   gr_set_fill_type(FILL_BLEND);
+
+   for (i=start; i < end; i++) {
+      int j, n = water_polys[i];
+      r3s_texture tex = water_textures[i];
+      r3s_phandle *vlist = (r3s_phandle *)temp_malloc(n * sizeof(r3s_phandle));
+
+      for (j=0; j<n; j++)
+         vlist[j] = &next_poly[j];
+      next_poly += n;
+
+      if (tex->align >= num_water_textures)
+         lgd3d_set_alpha_pal(water_info_list[0].pal);
+      else
+         lgd3d_set_alpha_pal(water_info_list[tex->align].pal);
+
+      r3_set_texture(tex);
+      r3_draw_poly(n, vlist);
+      temp_free(vlist);
+   }
+
+   gr_set_fill_type(FILL_NORM);
+
+   r3_end_block();
+   lgd3d_set_blend(wasBlend);
+   lgd3d_set_zwrite(wasZWrite);
+   lgd3d_set_alpha(wasAlpha);
+   lgd3d_set_iterated_alpha(wasIterated);
+#ifdef DARK_RT
+   // the translucent pass goes on after the water: objects nearer than it
+   // (a fountain's stream over its basin) were drawn with capture still off
+   RenderRTSuppressCapture(rt_suppressed);
+#endif
+
+   if (end < num_water_polys)
+      start = end;
+   else {
+      start = 0;
+      next_poly = water_points;
+      num_water_polys = 0;
+      num_water_points = 0;
+   }
+#undef start
+#undef next_poly
+}
+
+
+extern BOOL bRenderNewSky;
+
+static bool is_new_sky_surface(ushort texture_id)
+{
+   // Portal traversal treats both texture zero and the reserved legacy-sky
+   // range as openings through which the enhanced sky is visible.  Texture
+   // zero normally resolves to the missing-texture checkerboard, so testing
+   // only for a NULL bitmap paints that fallback over NewDark missions whose
+   // sky portals use zero (including The Black Parade).
+   return texture_id == 0 ||
+      (texture_id >= BACKHACK_IDX && texture_id < TEXMEM_RESERVED_LIMIT);
+}
+
+bool portal_is_star_sky_texture(ushort texture_id)
+{
+   // WREXT stores its sky portal as texture zero.  In legacy star-sky mode
+   // that is an alias for BACKHACK_IDX, whose locked invisible bitmap and
+   // far-plane treatment reveal the star field.  Do not apply the alias in
+   // textured-sky mode, where texture zero may be a genuine missing texture.
+   return texture_id == portal_sky_id ||
+      (texture_id == 0 && portal_sky_id == BACKHACK_IDX);
+}
+
+
+void draw_surface_lgd3d(PortalPolygonCore *poly, PortalPolygonRenderInfo *render,
+                        PortalLightMap *lt, int voff, void *clip)
+{
+   int i,n;
+   int desired_mip;
+   hw_render_info hw;
+   r3s_phandle vlist[MAX_VERT], *final;
+   scale_info info;
+   bool motion, post_clip_uv, zsky = FALSE;
+   bool star_sky;
+
+   n = poly->num_vertices;
+   AssertMsg (n <= MAX_VERT, "draw_surface: too many vertices.");
+
+   hw.tex = portal_get_texture(render->texture_id);
+   hw.lm = NULL;
+
+   if (bRenderNewSky && (!hw.tex || is_new_sky_surface(render->texture_id)))
+   {
+      END_PROF;
+      return;
+   }
+
+   star_sky = !bRenderNewSky &&
+      portal_is_star_sky_texture(render->texture_id);
+   if (star_sky && render->texture_id == 0)
+      hw.tex = portal_get_texture(portal_sky_id);
+
+   motion = poly->motion_index && portal_cell_motion[poly->motion_index].in_motion;
+   post_clip_uv = (hw.tex == NULL)||portal_clip_num||motion;
+   if (!post_clip_uv)
+   {
+      mxs_real uv;
+      mxs_vector *p_uvec, *p_vvec, *anchor;
+      mxs_real u_scale, v_scale;
+      mxs_real u_base, v_base;
+      mxs_real u2, v2;
+
+      u_scale = two_to_n(6 - hw_wlog(hw.tex));
+      v_scale = two_to_n(6 - hw_hlog(hw.tex));
+      u_scale /= portal_worldrep_texture_scale;
+      v_scale /= portal_worldrep_texture_scale;
+
+      p_uvec = &render->tex_u;
+      p_vvec = &render->tex_v;
+      anchor = &(cur_pool[r_vertex_list[voff + render->texture_anchor]]);
+      uv = mx_dot_vec(p_uvec, p_vvec);
+
+      u_base = portal_texture_base_u(render) * u_scale; // u translation
+      v_base = portal_texture_base_v(render) * v_scale; // v translation
+
+      u2 = mx_mag2_vec(p_uvec);
+      v2 = mx_mag2_vec(p_vvec);
+
+      if (uv == 0.0) {
+         mxs_vector uvec, vvec;
+
+         mx_scale_vec(&uvec, p_uvec, u_scale/u2);
+         mx_scale_vec(&vvec, p_vvec, v_scale/v2);
+         for (i=0; i < n; ++i) {
+            mxs_vector *wvec = &cur_pool[r_vertex_list[voff + i]];
+            mxs_vector delta;
+            r3s_phandle p = &cur_ph[r_vertex_list[voff + i]];
+
+            mx_sub_vec(&delta, wvec, anchor);
+            vlist[i] = p;
+            p->grp.u = mx_dot_vec(&delta, &uvec) + u_base;
+            p->grp.v = mx_dot_vec(&delta, &vvec) + v_base;
+         }
+      } else {
+         mxs_real uvu, uvv, denom;
+
+         denom = 1.0f/(u2*v2 - (uv*uv));
+
+         u2 *= v_scale * denom;
+         v2 *= u_scale * denom;
+         uvu = u_scale * denom * uv;
+         uvv = v_scale * denom * uv;
+         for (i=0; i<n; ++i) {
+            mxs_vector *wvec = &cur_pool[r_vertex_list[voff + i]];
+            mxs_vector delta;
+            mxs_real du, dv;
+            r3s_phandle p = &cur_ph[r_vertex_list[voff + i]];
+
+            mx_sub_vec(&delta, wvec, anchor);
+            du = mx_dot_vec(&delta, p_uvec);
+            dv = mx_dot_vec(&delta, p_vvec);
+            vlist[i] = p;
+            p->grp.u = u_base + v2 * du - uvu * dv;
+            p->grp.v = v_base + u2 * dv - uvv * du;
+         }
+      }
+
+
+      // clip against the view cone
+      r3_set_clip_flags(R3_CLIP_UV);
+   } else {
+      for (i=0; i < n; ++i) {
+         vlist[i] = &cur_ph[r_vertex_list[voff + i]];
+      }
+      r3_set_clip_flags(0); // why isn't there an R3_CLIP_NONE?
+   }
+
+   n = r3_clip_polygon(n, vlist, &final);
+
+   if (n <= 2) { END_PROF; return; }
+   STAT(++stat_num_poly_considered;)
+
+   // check for trivial reject against the portal
+   if (portal_clip_poly &&
+       (portclip_clip_polygon(n, final, NULL, clip) == 0))
+      { END_PROF; return; }
+
+   if (!hw.tex) {
+      draw_background_hack(n, final);
+      END_PROF;
+      return;  // an invisible portal, or background hack
+   }
+
+   if (portal_clip_num) { // only true if it's the sky
+      hw.mip_level = 0;   // (its texture's level 0: hw_wlog_at)
+      n = portbg_clip_sky(n, final, &final);
+   } else {
+      desired_mip = compute_mip(render, &cur_cell->plane_list[poly->planeid]);
+      hw.mip_level = 0;
+      while (desired_mip > 0) {
+         if (hw.tex[1].w == 0)
+             break; // not enough mip levels
+         ++hw.mip_level;
+         --desired_mip;
+         ++hw.tex;
+      }
+   }
+
+#ifdef STATS_ON
+   ++stat_num_poly_drawn;
+   if (stat_num_poly_drawn > max_draw_polys) return;
+#endif
+
+#ifndef SHIP
+   if (poly_outline_by_flags(poly, vlist, hw.mip_level)) {
+      END_PROF;
+      return;
+   }
+#endif // ~SHIP
+
+#ifdef DBG_ON
+   if (hw.tex->w & (hw.tex->w - 1))
+      Error(1, "Texture non-power-of-two in w!\n");
+   if (hw.tex->h & (hw.tex->h - 1))
+      Error(1, "Texture non-power-of-two in h!\n");
+#endif
+
+   // Lava glows: drawn without its light map, as the water it is (whole,
+   // through its own palette -- not lit as a dark floor). Its face from
+   // inside it, in the same place as its top, is not drawn: the two fought
+   // for each pixel.
+   if ((poly->flags & PORTAL_SPLITS_OBJECT) && pt_lava_kind(render->texture_id)) {
+      if (pt_lava_kind(render->texture_id) == 2)
+         {END_PROF; return;}
+      lt = NULL;
+   }
+#ifdef DARK_RT
+   // Water (OpenGL's; the path tracer has its own): drawn from the side it
+   // faces only -- its face from the other cell, in the same place, fought
+   // it for each pixel -- and always as water, see-through, never lit as
+   // a solid surface by its light map: a light-mapped channel's water went
+   // from clear to dark and solid as the view tipped up or down.
+   if ((poly->flags & PORTAL_SPLITS_OBJECT) && !RenderRTActive()) {
+      extern mxs_vector portal_camera_loc;
+      PortalPlane *pl = &cur_cell->plane_list[poly->planeid];
+      if (mx_dot_vec(&pl->normal, &portal_camera_loc) + pl->plane_constant < 0.0f)
+         {END_PROF; return;}
+      lt = NULL;
+   }
+#endif
+   if ((lt == NULL)||(poly->flags & RENDER_DOESNT_LIGHT)) {
+      hw.lm = NULL;
+   } else {
+      porthw_get_cached_lightmap(&hw, render, lt);
+   }
+
+   if (star_sky)
+   {
+      // don't need to lightmap!
+      hw.lm = NULL;
+      switch (ptsky_type) {
+      case PTSKY_SPAN:
+         portal_sky_spans += ptsky_calc_spans(n, final);
+         break;
+      case PTSKY_ZBUFFER:
+         zsky = TRUE;
+         break;
+      case PTSKY_NONE:
+         goto poly_done;
+      }
+   }
+   else if (portal_sky_spans > 0)
+   {
+      ptsky_render_stars();
+      portal_sky_spans = 0;
+   }
+
+   if (post_clip_uv) {
+      mxs_vector u_vec, v_vec, pt;
+      if (motion) {
+         portal_position_portal_texture(&u_vec, &v_vec, &pt,
+               &(cur_pool[r_vertex_list[voff + render->texture_anchor]]),
+               render, &cur_cell->plane_list[poly->planeid],
+               &portal_cell_motion[poly->motion_index]);
+
+         g2pt_calc_uvw_deltas(&pt, &u_vec, &v_vec);
+      } else {
+         mxs_real usc, vsc;
+         usc = (mxs_real)portal_texture_base_u(render); // u translation
+         vsc = (mxs_real)portal_texture_base_v(render); // v translation
+
+         get_cached_vector(&u_vec, &render->tex_u);
+         get_cached_vector(&v_vec, &render->tex_v);
+         mx_scale_add_vec(&pt, &(vlist[render->texture_anchor]->p), &u_vec, -usc);
+         mx_scale_add_vec(&pt, &pt, &v_vec, -vsc);
+
+         // This gives us our 3x3 texture perspective correction matrix.
+         g2pt_calc_uvw_deltas(&pt, &u_vec, &v_vec);
+      }
+
+      if (portal_clip_num) {
+         // for sky, remap coordinates from 0..tex->w to 0.5..tex->w-0.5
+
+         info.scale_u = (hw.tex->w-1) * two_to_n(-hw.tex->wlog);
+         info.scale_v = (hw.tex->h-1) * two_to_n(-hw.tex->hlog);
+         info.u0 = two_to_n(-hw.tex->wlog - 1);
+         info.v0 = two_to_n(-hw.tex->hlog - 1);
+      } else {
+         int mip_log = 6 - hw.mip_level;
+         info.scale_u = two_to_n(mip_log - hw_wlog_at(hw.tex, hw.mip_level));
+         info.scale_v = two_to_n(mip_log - hw_hlog_at(hw.tex, hw.mip_level));
+         info.u0 = info.v0 = 0.0;
+      }
+      info.scale_u /= portal_worldrep_texture_scale;
+      info.scale_v /= portal_worldrep_texture_scale;
+      ptlgd3d_calc_uv(n, final, &info);
+   }
+
+   if (hw.lm != NULL) {
+      int pix_per_lm = 4 - hw.mip_level;
+      int log_scale_u = hw_wlog_at(hw.tex, hw.mip_level) - pix_per_lm;
+      int log_scale_v = hw_hlog_at(hw.tex, hw.mip_level) - pix_per_lm;
+// This is necessary because wlog is actually log2(row), _not_ log2(w)
+// Shoot me now; it's my own fault. -kevin
+#ifdef RGB_LIGHTING
+#ifdef RGB_888
+      info.scale_u = two_to_n(log_scale_u - (hw.lm->wlog - 2));
+#else // RGB_888
+      info.scale_u = two_to_n(log_scale_u - (hw.lm->wlog - 1));
+#endif // RGB_888
+#else
+      info.scale_u = two_to_n(log_scale_u - hw.lm->wlog);
+#endif
+      info.scale_v = two_to_n(log_scale_v - hw.lm->hlog);
+      // WREXT's serialized projection and lightmap dimensions already use
+      // its higher-resolution coordinate space.  Only the base-texture pass
+      // above removes that scale; the lightmap transform remains unchanged.
+      info.u0 = (hw.lm_u0 - lt->base_u) * two_to_n(-log_scale_u);
+      info.v0 = (hw.lm_v0 - lt->base_v) * two_to_n(-log_scale_v);
+#ifndef SHIP
+      if (pt_lightmap_first) {
+         float *uv_save = temp_malloc(2*n*sizeof(float));
+         int i;
+
+         for (i=0; i<n; i++) {
+            uv_save[2*i] = final[i]->grp.u;
+            uv_save[2*i+1] = final[i]->grp.v;
+         }
+         ptlgd3d_recalc_uv_vlist(n, final, &info);
+         r3_set_texture(hw.lm);
+         r3_draw_poly(n, final);
+         for (i=0; i<n; i++) {
+            final[i]->grp.u = uv_save[2*i];
+            final[i]->grp.v = uv_save[2*i+1];
+         }
+         lgd3d_set_blend(TRUE);
+         lgd3d_blend_multiply(portal_hack_blend);
+         temp_free(uv_save);
+      }
+#endif
+   }
+
+   // Are we a translucent medium border (e.g., water)?
+   if (poly->flags & PORTAL_SPLITS_OBJECT)
+   {
+      if (g_zbuffer)
+         queue_water_poly(hw.tex, n, final);
+      else
+         render_water_poly(hw.tex, n, final);
+      goto poly_done;
+   }
+
+   r3_set_texture(hw.tex);
+
+   if (zsky) {
+      int i;
+      // render it real far away, so stars will render in front
+
+      float *zw_save;
+      zw_save = (float *)temp_malloc(2*n*sizeof(float));
+      for (i=0; i<n; i++) {
+         zw_save[i] = final[i]->p.z;
+         zw_save[i+n] = final[i]->grp.w;
+         final[i]->p.z = portal_z_max;
+         final[i]->grp.w = portal_w_min;
+      }
+      r3_draw_poly(n, final);
+      for (i=0; i<n; i++) {
+         final[i]->p.z =   zw_save[i];
+         final[i]->grp.w = zw_save[i+n];
+      }
+      temp_free(zw_save);
+   }
+   else
+      r3_draw_poly(n, final);
+
+   // is there a lightmap?
+
+   if (hw.lm != NULL)
+   {
+#ifndef SHIP
+      // rendered already?
+      if (pt_lightmap_first) {
+         lgd3d_blend_normal();
+         lgd3d_set_blend(FALSE);
+      } else
+#endif
+      {
+
+         // render it...
+
+         ptlgd3d_recalc_uv_vlist(n, final, &info);
+
+
+#ifndef SHIP
+         if (show_lightmap) {
+            r3_set_texture(hw.lm);
+            r3_draw_poly(n, final);
+         } else
+#endif
+         {
+            lgd3d_blend_multiply(portal_hack_blend);
+            lgd3d_set_blend(TRUE);
+#ifdef RGB_LIGHTING
+            lgd3d_set_alpha(0.5);
+#endif
+            r3_set_texture(hw.lm);
+            r3_draw_poly(n, final);
+            lgd3d_blend_normal();
+            lgd3d_set_blend(FALSE);
+#ifdef RGB_LIGHTING
+            lgd3d_set_alpha(1.0);
+#endif
+         }
+      }
+   }
+
+poly_done:
+#ifndef SHIP
+   if (draw_wireframe_around_tmap) {
+      draw_polygon_wireframe(final, n, COLOR_WHITE+2);
+      draw_polygon_vertices(final, n, COLOR_WHITE);
+   }
+#endif // ~SHIP
+
+   END_PROF;
+   return;
+}
+
+
+
+void draw_surface_multitexture(PortalPolygonCore *poly, PortalPolygonRenderInfo *render,
+                        PortalLightMap *lt, int voff, void *clip)
+{
+   int i,n;
+   int desired_mip;
+   hw_render_info hw;
+   r3s_phandle vlist[MAX_VERT], *final;
+   scale_info info;
+   bool motion, post_clip_uv, zsky = FALSE;
+   bool star_sky;
+
+   n = poly->num_vertices;
+   AssertMsg (n <= MAX_VERT, "draw_surface: too many vertices.");
+
+   hw.tex = portal_get_texture(render->texture_id);
+   hw.lm = NULL;
+
+   if (bRenderNewSky && (!hw.tex || is_new_sky_surface(render->texture_id)))
+   {
+      END_PROF;
+      return;
+   }
+
+   star_sky = !bRenderNewSky &&
+      portal_is_star_sky_texture(render->texture_id);
+   if (star_sky && render->texture_id == 0)
+      hw.tex = portal_get_texture(portal_sky_id);
+
+   motion = poly->motion_index && portal_cell_motion[poly->motion_index].in_motion;
+   post_clip_uv = (hw.tex == NULL)||portal_clip_num||motion;
+   if (!post_clip_uv)
+   {
+      mxs_real uv;
+      mxs_vector *p_uvec, *p_vvec, *anchor;
+      mxs_real u_scale, v_scale;
+      mxs_real u_base, v_base;
+      mxs_real u2, v2;
+
+      u_scale = two_to_n(6 - hw_wlog(hw.tex));
+      v_scale = two_to_n(6 - hw_hlog(hw.tex));
+      u_scale /= portal_worldrep_texture_scale;
+      v_scale /= portal_worldrep_texture_scale;
+
+      p_uvec = &render->tex_u;
+      p_vvec = &render->tex_v;
+      anchor = &(cur_pool[r_vertex_list[voff + render->texture_anchor]]);
+      uv = mx_dot_vec(p_uvec, p_vvec);
+
+      u_base = portal_texture_base_u(render) * u_scale; // u translation
+      v_base = portal_texture_base_v(render) * v_scale; // v translation
+
+      u2 = mx_mag2_vec(p_uvec);
+      v2 = mx_mag2_vec(p_vvec);
+
+      if (uv == 0.0) {
+         mxs_vector uvec, vvec;
+
+         mx_scale_vec(&uvec, p_uvec, u_scale/u2);
+         mx_scale_vec(&vvec, p_vvec, v_scale/v2);
+         for (i=0; i < n; ++i) {
+            mxs_vector *wvec = &cur_pool[r_vertex_list[voff + i]];
+            mxs_vector delta;
+            r3s_phandle p = &cur_ph[r_vertex_list[voff + i]];
+
+            mx_sub_vec(&delta, wvec, anchor);
+            vlist[i] = p;
+            p->grp.u = mx_dot_vec(&delta, &uvec) + u_base;
+            p->grp.v = mx_dot_vec(&delta, &vvec) + v_base;
+         }
+      } else {
+         mxs_real uvu, uvv, denom;
+
+         denom = 1.0f/(u2*v2 - (uv*uv));
+
+         u2 *= v_scale * denom;
+         v2 *= u_scale * denom;
+         uvu = u_scale * denom * uv;
+         uvv = v_scale * denom * uv;
+         for (i=0; i<n; ++i) {
+            mxs_vector *wvec = &cur_pool[r_vertex_list[voff + i]];
+            mxs_vector delta;
+            mxs_real du, dv;
+            r3s_phandle p = &cur_ph[r_vertex_list[voff + i]];
+
+            mx_sub_vec(&delta, wvec, anchor);
+            du = mx_dot_vec(&delta, p_uvec);
+            dv = mx_dot_vec(&delta, p_vvec);
+            vlist[i] = p;
+            p->grp.u = u_base + v2 * du - uvu * dv;
+            p->grp.v = v_base + u2 * dv - uvv * du;
+         }
+      }
+
+
+      // clip against the view cone
+      r3_set_clip_flags(R3_CLIP_UV);
+   } else {
+      for (i=0; i < n; ++i) {
+         vlist[i] = &cur_ph[r_vertex_list[voff + i]];
+      }
+      r3_set_clip_flags(0); // why isn't there an R3_CLIP_NONE?
+   }
+
+   n = r3_clip_polygon(n, vlist, &final);
+
+   if (n <= 2) { END_PROF; return; }
+   STAT(++stat_num_poly_considered;)
+
+   // check for trivial reject against the portal
+   if (portal_clip_poly &&
+       (portclip_clip_polygon(n, final, NULL, clip) == 0))
+      { END_PROF; return; }
+
+   if (!hw.tex) {
+      draw_background_hack(n, final);
+      END_PROF;
+      return;  // an invisible portal, or background hack
+   }
+
+   if (portal_clip_num) { // only true if it's the sky
+      hw.mip_level = 0;   // (its texture's level 0: hw_wlog_at)
+      n = portbg_clip_sky(n, final, &final);
+   } else {
+      desired_mip = compute_mip(render, &cur_cell->plane_list[poly->planeid]);
+      hw.mip_level = 0;
+      while (desired_mip > 0) {
+         if (hw.tex[1].w == 0)
+             break; // not enough mip levels
+         ++hw.mip_level;
+         --desired_mip;
+         ++hw.tex;
+      }
+   }
+
+#ifdef STATS_ON
+   ++stat_num_poly_drawn;
+   if (stat_num_poly_drawn > max_draw_polys) return;
+#endif
+
+#ifndef SHIP
+   if (poly_outline_by_flags(poly, vlist, hw.mip_level)) {
+      END_PROF;
+      return;
+   }
+#endif // ~SHIP
+
+#ifdef DBG_ON
+   if (hw.tex->w & (hw.tex->w - 1))
+      Error(1, "Texture non-power-of-two in w!\n");
+   if (hw.tex->h & (hw.tex->h - 1))
+      Error(1, "Texture non-power-of-two in h!\n");
+#endif
+
+   // Lava glows: drawn without its light map, as the water it is (whole,
+   // through its own palette -- not lit as a dark floor). Its face from
+   // inside it, in the same place as its top, is not drawn: the two fought
+   // for each pixel.
+   if ((poly->flags & PORTAL_SPLITS_OBJECT) && pt_lava_kind(render->texture_id)) {
+      if (pt_lava_kind(render->texture_id) == 2)
+         {END_PROF; return;}
+      lt = NULL;
+   }
+#ifdef DARK_RT
+   // Water (OpenGL's; the path tracer has its own): drawn from the side it
+   // faces only -- its face from the other cell, in the same place, fought
+   // it for each pixel -- and always as water, see-through, never lit as
+   // a solid surface by its light map: a light-mapped channel's water went
+   // from clear to dark and solid as the view tipped up or down.
+   if ((poly->flags & PORTAL_SPLITS_OBJECT) && !RenderRTActive()) {
+      extern mxs_vector portal_camera_loc;
+      PortalPlane *pl = &cur_cell->plane_list[poly->planeid];
+      if (mx_dot_vec(&pl->normal, &portal_camera_loc) + pl->plane_constant < 0.0f)
+         {END_PROF; return;}
+      lt = NULL;
+   }
+#endif
+   if ((lt == NULL)||(poly->flags & RENDER_DOESNT_LIGHT)) {
+      hw.lm = NULL;
+   } else {
+      porthw_get_cached_lightmap(&hw, render, lt);
+   }
+
+   if (star_sky)
+   {
+      hw.lm = NULL;
+      switch (ptsky_type) {
+      case PTSKY_SPAN:
+         portal_sky_spans += ptsky_calc_spans(n, final);
+         break;
+      case PTSKY_ZBUFFER:
+         zsky = TRUE;
+         break;
+      case PTSKY_NONE:
+         goto poly_done_multi;
+      }
+   }
+   else if (portal_sky_spans > 0)
+   {
+      ptsky_render_stars();
+      portal_sky_spans = 0;
+   }
+
+   if (post_clip_uv) {
+      mxs_vector u_vec, v_vec, pt;
+      if (motion) {
+         portal_position_portal_texture(&u_vec, &v_vec, &pt,
+               &(cur_pool[r_vertex_list[voff + render->texture_anchor]]),
+               render, &cur_cell->plane_list[poly->planeid],
+               &portal_cell_motion[poly->motion_index]);
+
+         g2pt_calc_uvw_deltas(&pt, &u_vec, &v_vec);
+      } else {
+         mxs_real usc, vsc;
+         usc = (mxs_real)portal_texture_base_u(render); // u translation
+         vsc = (mxs_real)portal_texture_base_v(render); // v translation
+
+         get_cached_vector(&u_vec, &render->tex_u);
+         get_cached_vector(&v_vec, &render->tex_v);
+         mx_scale_add_vec(&pt, &(vlist[render->texture_anchor]->p), &u_vec, -usc);
+         mx_scale_add_vec(&pt, &pt, &v_vec, -vsc);
+
+         // This gives us our 3x3 texture perspective correction matrix.
+         g2pt_calc_uvw_deltas(&pt, &u_vec, &v_vec);
+      }
+
+      if (portal_clip_num) {
+         // for sky, remap coordinates from 0..tex->w to 0.5..tex->w-0.5
+
+         info.scale_u = (hw.tex->w-1) * two_to_n(-hw.tex->wlog);
+         info.scale_v = (hw.tex->h-1) * two_to_n(-hw.tex->hlog);
+         info.u0 = two_to_n(-hw.tex->wlog - 1);
+         info.v0 = two_to_n(-hw.tex->hlog - 1);
+      } else {
+         int mip_log = 6 - hw.mip_level;
+         info.scale_u = two_to_n(mip_log - hw_wlog_at(hw.tex, hw.mip_level));
+         info.scale_v = two_to_n(mip_log - hw_hlog_at(hw.tex, hw.mip_level));
+         info.u0 = info.v0 = 0.0;
+      }
+      info.scale_u /= portal_worldrep_texture_scale;
+      info.scale_v /= portal_worldrep_texture_scale;
+      ptlgd3d_calc_uv(n, final, &info);
+   }
+
+   if (hw.lm != NULL) {
+      int pix_per_lm = 4 - hw.mip_level;
+      int log_scale_u = hw_wlog_at(hw.tex, hw.mip_level) - pix_per_lm;
+      int log_scale_v = hw_hlog_at(hw.tex, hw.mip_level) - pix_per_lm;
+// This is necessary because wlog is actually log2(row), _not_ log2(w)
+// Shoot me now; it's my own fault. -kevin
+#ifdef RGB_LIGHTING
+#ifdef RGB_888
+      info.scale_u = two_to_n(log_scale_u - (hw.lm->wlog - 2));
+#else // RGB_888
+      info.scale_u = two_to_n(log_scale_u - (hw.lm->wlog - 1));
+#endif // RGB_888
+#else
+      info.scale_u = two_to_n(log_scale_u - hw.lm->wlog);
+#endif
+      info.scale_v = two_to_n(log_scale_v - hw.lm->hlog);
+      // The multitexture path derives the second-stage UVs from the corrected
+      // base-texture UVs.  Restore WREXT's serialized coordinate scale while
+      // keeping the atlas offset in lightmap space.
+      info.scale_u *= portal_worldrep_texture_scale;
+      info.scale_v *= portal_worldrep_texture_scale;
+      info.u0 = (hw.lm_u0 - lt->base_u) * two_to_n(-log_scale_u)
+              / portal_worldrep_texture_scale;
+      info.v0 = (hw.lm_v0 - lt->base_v) * two_to_n(-log_scale_v)
+              / portal_worldrep_texture_scale;
+      {
+         LGD3D_tex_coord *uv2 = temp_malloc(n*sizeof(*uv2));
+         LGD3D_tex_coord **puv2 = temp_malloc(n*sizeof(*puv2));
+         int i;
+
+         for (i=0; i<n; i++) {
+            uv2[i].u = final[i]->grp.u;
+            uv2[i].v = final[i]->grp.v;
+            puv2[i] = &uv2[i];
+         }
+         // lgd3d_set_light_map_method(LGD3DTB_MODULATE);
+         lgd3d_set_light_map_method( LGD3D_MULTITEXTURE_COLOR );
+         ptlgd3d_recalc_uv(n, uv2, &info);
+
+         lgd3d_set_texture_level(1);
+         lgd3d_set_texture(hw.lm);
+         lgd3d_set_texture_level(0);
+         lgd3d_set_texture(hw.tex);
+         lgd3d_TrifanMTD(n, final, puv2);
+         temp_free(puv2);
+         temp_free(uv2);
+         r3d_do_setup = TRUE;
+      }
+   } else {
+      if (poly->flags & PORTAL_SPLITS_OBJECT)
+      {
+         if (g_zbuffer)
+            queue_water_poly(hw.tex, n, final);
+         else
+            render_water_poly(hw.tex, n, final);
+      } else {
+         r3_set_texture(hw.tex);
+         if (zsky) {
+            int i;
+            // render it real far away, so stars will render in front
+
+            float *zw_save;
+            zw_save = (float *)temp_malloc(2*n*sizeof(float));
+            for (i=0; i<n; i++) {
+               zw_save[i] = final[i]->p.z;
+               zw_save[i+n] = final[i]->grp.w;
+               final[i]->p.z = portal_z_max;
+               final[i]->grp.w = portal_w_min;
+            }
+            r3_draw_poly(n, final);
+            for (i=0; i<n; i++) {
+               final[i]->p.z =   zw_save[i];
+               final[i]->grp.w = zw_save[i+n];
+            }
+            temp_free(zw_save);
+         }
+         else
+            r3_draw_poly(n, final);
+      }
+   }
+poly_done_multi:
+#ifndef SHIP
+   if (draw_wireframe_around_tmap) {
+      draw_polygon_wireframe(final, n, COLOR_WHITE+2);
+      draw_polygon_vertices(final, n, COLOR_WHITE);
+   }
+#endif // ~SHIP
+
+   END_PROF;
+   return;
+}
+
+
+void draw_surface_texture_only(PortalPolygonCore *poly, PortalPolygonRenderInfo *render, int voff, void *clip)
+{
+   int i,n;
+   int desired_mip;
+   hw_render_info hw;
+   r3s_phandle vlist[MAX_VERT], *final;
+   scale_info info;
+   bool motion, post_clip_uv, zsky = FALSE;
+   bool star_sky;
+
+   n = poly->num_vertices;
+   AssertMsg (n <= MAX_VERT, "draw_surface: too many vertices.");
+
+   hw.tex = portal_get_texture(render->texture_id);
+   hw.lm = NULL;
+
+   if (bRenderNewSky && (!hw.tex || is_new_sky_surface(render->texture_id)))
+   {
+      END_PROF;
+      return;
+   }
+
+   star_sky = !bRenderNewSky &&
+      portal_is_star_sky_texture(render->texture_id);
+   if (star_sky && render->texture_id == 0)
+      hw.tex = portal_get_texture(portal_sky_id);
+
+   motion = poly->motion_index && portal_cell_motion[poly->motion_index].in_motion;
+   post_clip_uv = (hw.tex == NULL)||portal_clip_num||motion;
+   if (!post_clip_uv)
+   {
+      mxs_real uv;
+      mxs_vector *p_uvec, *p_vvec, *anchor;
+      mxs_real u_scale, v_scale;
+      mxs_real u_base, v_base;
+      mxs_real u2, v2;
+
+      u_scale = two_to_n(6 - hw_wlog(hw.tex));
+      v_scale = two_to_n(6 - hw_hlog(hw.tex));
+      u_scale /= portal_worldrep_texture_scale;
+      v_scale /= portal_worldrep_texture_scale;
+
+      p_uvec = &render->tex_u;
+      p_vvec = &render->tex_v;
+      anchor = &(cur_pool[r_vertex_list[voff + render->texture_anchor]]);
+      uv = mx_dot_vec(p_uvec, p_vvec);
+
+      u_base = portal_texture_base_u(render) * u_scale; // u translation
+      v_base = portal_texture_base_v(render) * v_scale; // v translation
+
+      u2 = mx_mag2_vec(p_uvec);
+      v2 = mx_mag2_vec(p_vvec);
+
+      if (uv == 0.0) {
+         mxs_vector uvec, vvec;
+
+         mx_scale_vec(&uvec, p_uvec, u_scale/u2);
+         mx_scale_vec(&vvec, p_vvec, v_scale/v2);
+         for (i=0; i < n; ++i) {
+            mxs_vector *wvec = &cur_pool[r_vertex_list[voff + i]];
+            mxs_vector delta;
+            r3s_phandle p = &cur_ph[r_vertex_list[voff + i]];
+
+            mx_sub_vec(&delta, wvec, anchor);
+            vlist[i] = p;
+            p->grp.u = mx_dot_vec(&delta, &uvec) + u_base;
+            p->grp.v = mx_dot_vec(&delta, &vvec) + v_base;
+         }
+      } else {
+         mxs_real uvu, uvv, denom;
+
+         denom = 1.0f/(u2*v2 - (uv*uv));
+
+         u2 *= v_scale * denom;
+         v2 *= u_scale * denom;
+         uvu = u_scale * denom * uv;
+         uvv = v_scale * denom * uv;
+         for (i=0; i<n; ++i) {
+            mxs_vector *wvec = &cur_pool[r_vertex_list[voff + i]];
+            mxs_vector delta;
+            mxs_real du, dv;
+            r3s_phandle p = &cur_ph[r_vertex_list[voff + i]];
+
+            mx_sub_vec(&delta, wvec, anchor);
+            du = mx_dot_vec(&delta, p_uvec);
+            dv = mx_dot_vec(&delta, p_vvec);
+            vlist[i] = p;
+            p->grp.u = u_base + v2 * du - uvu * dv;
+            p->grp.v = v_base + u2 * dv - uvv * du;
+         }
+      }
+      r3_set_clip_flags(R3_CLIP_UV);
+   } else {
+      for (i=0; i < n; ++i) {
+         vlist[i] = &cur_ph[r_vertex_list[voff + i]];
+      }
+      r3_set_clip_flags(0); // why isn't there an R3_CLIP_NONE?
+   }
+
+   // clip against the view cone
+   n = r3_clip_polygon(n, vlist, &final);
+
+   if (n <= 2) { END_PROF; return; }
+   STAT(++stat_num_poly_considered;)
+
+   // check for trivial reject against the portal
+   if (portal_clip_poly &&
+       (portclip_clip_polygon(n, final, NULL, clip) == 0))
+      { END_PROF; return; }
+
+   if (!hw.tex) {
+      draw_background_hack(n, final);
+      END_PROF;
+      return;  // an invisible portal, or background hack
+   }
+
+   if (portal_clip_num) { // only true if it's the sky
+      hw.mip_level = 0;   // (its texture's level 0: hw_wlog_at)
+      n = portbg_clip_sky(n, final, &final);
+   } else {
+      desired_mip = compute_mip(render, &cur_cell->plane_list[poly->planeid]);
+      hw.mip_level = 0;
+      while (desired_mip > 0) {
+         if (hw.tex[1].w == 0)
+             break; // not enough mip levels
+         ++hw.mip_level;
+         --desired_mip;
+         ++hw.tex;
+      }
+   }
+
+#ifdef STATS_ON
+   ++stat_num_poly_drawn;
+   if (stat_num_poly_drawn > max_draw_polys) return;
+#endif
+
+#ifndef SHIP
+   if (poly_outline_by_flags(poly, vlist, hw.mip_level)) {
+      END_PROF;
+      return;
+   }
+#endif // ~SHIP
+
+#ifdef DBG_ON
+   if (hw.tex->w & (hw.tex->w - 1))
+      Error(1, "Texture non-power-of-two in w!\n");
+   if (hw.tex->h & (hw.tex->h - 1))
+      Error(1, "Texture non-power-of-two in h!\n");
+#endif
+
+   if (star_sky)
+   {
+      switch (ptsky_type) {
+      case PTSKY_SPAN:
+         portal_sky_spans += ptsky_calc_spans(n, final);
+         break;
+      case PTSKY_ZBUFFER:
+         zsky = TRUE;
+         break;
+      case PTSKY_NONE:
+         goto poly_done_texture;
+      }
+   }
+   else if (portal_sky_spans > 0)
+   {
+      ptsky_render_stars();
+      portal_sky_spans = 0;
+   }
+
+   if (post_clip_uv) {
+      mxs_vector u_vec, v_vec, pt;
+      if (motion) {
+         portal_position_portal_texture(&u_vec, &v_vec, &pt,
+               &(cur_pool[r_vertex_list[voff + render->texture_anchor]]),
+               render, &cur_cell->plane_list[poly->planeid],
+               &portal_cell_motion[poly->motion_index]);
+
+         g2pt_calc_uvw_deltas(&pt, &u_vec, &v_vec);
+      } else {
+         mxs_real usc, vsc;
+         usc = (mxs_real)portal_texture_base_u(render); // u translation
+         vsc = (mxs_real)portal_texture_base_v(render); // v translation
+
+         get_cached_vector(&u_vec, &render->tex_u);
+         get_cached_vector(&v_vec, &render->tex_v);
+         mx_scale_add_vec(&pt, &(vlist[render->texture_anchor]->p), &u_vec, -usc);
+         mx_scale_add_vec(&pt, &pt, &v_vec, -vsc);
+
+         // This gives us our 3x3 texture perspective correction matrix.
+         g2pt_calc_uvw_deltas(&pt, &u_vec, &v_vec);
+      }
+
+      if (portal_clip_num) {
+         // for sky, remap coordinates from 0..tex->w to 0.5..tex->w-0.5
+
+         info.scale_u = (hw.tex->w-1) * two_to_n(-hw.tex->wlog);
+         info.scale_v = (hw.tex->h-1) * two_to_n(-hw.tex->hlog);
+         info.u0 = two_to_n(-hw.tex->wlog - 1);
+         info.v0 = two_to_n(-hw.tex->hlog - 1);
+      } else {
+         int mip_log = 6 - hw.mip_level;
+         info.scale_u = two_to_n(mip_log - hw_wlog_at(hw.tex, hw.mip_level));
+         info.scale_v = two_to_n(mip_log - hw_hlog_at(hw.tex, hw.mip_level));
+         info.u0 = info.v0 = 0.0;
+      }
+      info.scale_u /= portal_worldrep_texture_scale;
+      info.scale_v /= portal_worldrep_texture_scale;
+      ptlgd3d_calc_uv(n, final, &info);
+   }
+
+   // Are we a translucent medium border (e.g., water)?
+   if (poly->flags & PORTAL_SPLITS_OBJECT)
+   {
+      if (g_zbuffer)
+         queue_water_poly(hw.tex, n, final);
+      else
+         render_water_poly(hw.tex, n, final);
+      goto poly_done_texture;
+   }
+
+   r3_set_texture(hw.tex);
+
+   if (zsky) {
+      int i;
+      // render it real far away, so stars will render in front
+
+      float *zw_save;
+      zw_save = (float *)temp_malloc(2*n*sizeof(float));
+      for (i=0; i<n; i++) {
+         zw_save[i] = final[i]->p.z;
+         zw_save[i+n] = final[i]->grp.w;
+         final[i]->p.z = portal_z_max;
+         final[i]->grp.w = portal_w_min;
+      }
+      r3_draw_poly(n, final);
+      for (i=0; i<n; i++) {
+         final[i]->p.z =   zw_save[i];
+         final[i]->grp.w = zw_save[i+n];
+      }
+      temp_free(zw_save);
+   }
+   else
+      r3_draw_poly(n, final);
+
+poly_done_texture:
+#ifndef SHIP
+   if (draw_wireframe_around_tmap) {
+      draw_polygon_wireframe(final, n, COLOR_WHITE+2);
+      draw_polygon_vertices(final, n, COLOR_WHITE);
+   }
+#endif // ~SHIP
+
+   END_PROF;
+   return;
+}
+
+
+
+void draw_surface_lightmap_only(PortalPolygonCore *poly, PortalPolygonRenderInfo *render,
+                        PortalLightMap *lt, int voff, void *clip)
+{
+   int i,n;
+   hw_render_info hw;
+   r3s_phandle vlist[MAX_VERT], *final;
+
+   // water or sky poly?
+   if ((poly->flags & PORTAL_SPLITS_OBJECT)||
+       portal_is_star_sky_texture(render->texture_id) ||
+       (bRenderNewSky && is_new_sky_surface(render->texture_id)))
+      {END_PROF; return;}
+
+   // sky hack?
+   if (portal_get_texture(render->texture_id) == NULL)
+      {END_PROF; return;}
+
+   porthw_get_cached_lightmap(&hw, render, lt);
+   n = poly->num_vertices;
+   AssertMsg (n <= MAX_VERT, "draw_surface: too many vertices.");
+
+   {
+      mxs_real uv;
+      mxs_vector *p_uvec, *p_vvec, *anchor;
+      mxs_real u_scale, v_scale;
+      mxs_real u_base, v_base;
+      mxs_real u2, v2;
+
+      p_uvec = &render->tex_u;
+      p_vvec = &render->tex_v;
+      anchor = &(cur_pool[r_vertex_list[voff + render->texture_anchor]]);
+      uv = mx_dot_vec(p_uvec, p_vvec);
+
+// This is necessary because wlog is actually log2(row), _not_ log2(w)
+// Shoot me now; it's my own fault. -kevin
+#ifdef RGB_LIGHTING
+#ifdef RGB_888
+      u_scale = two_to_n(2-(hw.lm->wlog-2));
+#else // RGB_888
+      u_scale = two_to_n(2-(hw.lm->wlog-1));
+#endif // RGB_888
+#else
+      u_scale = two_to_n(2-hw.lm->wlog);
+#endif
+
+      v_scale = two_to_n(2-hw.lm->hlog);
+
+      u_base = u_scale * (portal_texture_base_u(render) + (hw.lm_u0 - lt->base_u)/4.0f); // u translation
+      v_base = v_scale * (portal_texture_base_v(render) + (hw.lm_v0 - lt->base_v)/4.0f); // v translation
+
+      u2 = mx_mag2_vec(p_uvec);
+      v2 = mx_mag2_vec(p_vvec);
+
+      if (uv == 0.0) {
+         mxs_vector uvec, vvec;
+
+         mx_scale_vec(&uvec, p_uvec, u_scale/u2);
+         mx_scale_vec(&vvec, p_vvec, v_scale/v2);
+         for (i=0; i < n; ++i) {
+            mxs_vector *wvec = &cur_pool[r_vertex_list[voff + i]];
+            mxs_vector delta;
+            r3s_phandle p = &cur_ph[r_vertex_list[voff + i]];
+
+            mx_sub_vec(&delta, wvec, anchor);
+            vlist[i] = p;
+            p->grp.u = mx_dot_vec(&delta, &uvec) + u_base;
+            p->grp.v = mx_dot_vec(&delta, &vvec) + v_base;
+         }
+      } else {
+         mxs_real uvu, uvv, denom;
+
+         denom = 1.0f/(u2*v2 - (uv*uv));
+
+         u2 *= v_scale * denom;
+         v2 *= u_scale * denom;
+         uvu = u_scale * denom * uv;
+         uvv = v_scale * denom * uv;
+         for (i=0; i<n; ++i) {
+            mxs_vector *wvec = &cur_pool[r_vertex_list[voff + i]];
+            mxs_vector delta;
+            mxs_real du, dv;
+            r3s_phandle p = &cur_ph[r_vertex_list[voff + i]];
+
+            mx_sub_vec(&delta, wvec, anchor);
+            du = mx_dot_vec(&delta, p_uvec);
+            dv = mx_dot_vec(&delta, p_vvec);
+            vlist[i] = p;
+            p->grp.u = u_base + v2 * du - uvu * dv;
+            p->grp.v = v_base + u2 * dv - uvv * du;
+         }
+      }
+      r3_set_clip_flags(R3_CLIP_UV);
+   }
+
+   // clip against the view cone
+   n = r3_clip_polygon(n, vlist, &final);
+
+   if (n <= 2)
+      { END_PROF; return; }
+
+   // check for trivial reject against the portal
+   if (portal_clip_poly &&
+       (portclip_clip_polygon(n, final, NULL, clip) == 0))
+      { END_PROF; return; }
+
+#ifndef SHIP
+   if (show_lightmap) {
+      r3_set_texture(hw.lm);
+      r3_draw_poly(n, final);
+   } else
+#endif
+   {
+      r3_set_texture(hw.lm);
+      r3_draw_poly(n, final);
+   }
+
+   END_PROF;
+   return;
+}
+
+
+void do_poly_linear(r3s_texture tex, int n, r3s_phandle *vpl, fix u_offset, fix v_offset)
+{
+   scale_info info;
+
+   info.scale_u = 1.0 / tex->w;
+   info.scale_v = 1.0 / tex->h;
+
+   info.u0 = u_offset * info.scale_u / 65536.0;
+   info.v0 = v_offset * info.scale_v / 65536.0;
+
+   ptlgd3d_calc_uv(n, vpl, &info);
+   g2_lin_umap_setup(tex);
+   {
+      static g2s_point *ppl[20];
+      int i;
+
+      for (i=0; i<n; i++)
+         ppl[i] = (g2s_point *)&(vpl[i]->grp);
+
+      g2_draw_poly_func(n, ppl);
+   }
+}
+

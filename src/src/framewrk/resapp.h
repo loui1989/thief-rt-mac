@@ -1,0 +1,23 @@
+/*
+@Copyright Looking Glass Studios, Inc.
+1996,1997,1998,1999,2000 Unpublished Work.
+*/
+
+// $Header: r:/t2repos/thief2/src/framewrk/resapp.h,v 1.2 2000/01/31 09:47:07 adurant Exp $
+#pragma once
+
+#ifndef __RESAPP_H
+#define __RESAPP_H
+
+
+EXTERN void LGAPI ResSysCreate(void);
+// Rebuilds the named-resource roots after the in-engine content picker has
+// republished resname_base. Existing search paths observe the new context.
+EXTERN void LGAPI ResSysRefreshContentPath(void);
+// how many times the content search path was set: anything bound to a
+// resource under the old one (the game's string tables) binds again
+EXTERN int g_ResContentGeneration;
+DEFINE_LG_GUID(IID_Res, 0x1d);
+
+
+#endif // __RESAPP_H
