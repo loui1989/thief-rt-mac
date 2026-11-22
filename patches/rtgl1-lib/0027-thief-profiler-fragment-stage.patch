@@ -1,0 +1,30 @@
+From: Claude <noreply@anthropic.com>
+Date: Tue, 10 Nov 2026 16:30:00 +0100
+Subject: [PATCH] Thief: the GPU timeline times a render pass by its fragment stage
+
+A render pass was timed from its vertex stage's start, which runs as soon as
+it can while its fragments wait for what the pass reads: the swapchain blit
+showed 2 ms, all of it waiting for the frame's post-processing.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_0137FfF2kXgpYFjmGxKqakLV
+---
+--- a/Source/Metal/MetalProfiler.mm	2026-11-10 16:23:15.089991600 +0100
++++ b/Source/Metal/MetalProfiler.mm	2026-11-10 16:23:15.140268649 +0100
+@@ -281,11 +281,14 @@
+         pass.sampleBufferAttachments[ 0 ].sampleBuffer = nil;
+         return [cmd renderCommandEncoderWithDescriptor:pass];
+     }
++    // Thief RT: the fragment stage's start to its end -- a pass's vertex stage starts as soon
++    // as it can, and its fragments then wait for what the pass reads (the swapchain blit waited
++    // for the frame's post-processing: 2 ms of waiting, shown as its time)
+     auto* s                       = pass.sampleBufferAttachments[ 0 ];
+     s.sampleBuffer                = g_state.frame->samples;
+-    s.startOfVertexSampleIndex    = a;
++    s.startOfVertexSampleIndex    = MTLCounterDontSample;
+     s.endOfVertexSampleIndex      = MTLCounterDontSample;
+-    s.startOfFragmentSampleIndex  = MTLCounterDontSample;
++    s.startOfFragmentSampleIndex  = a;
+     s.endOfFragmentSampleIndex    = b;
+ 
+     id< MTLRenderCommandEncoder > enc = [cmd renderCommandEncoderWithDescriptor:pass];

@@ -1,0 +1,111 @@
+diff --git a/Source/Metal/MetalPathTracer.h b/Source/Metal/MetalPathTracer.h
+index 5b820e3..f8d07b5 100644
+--- a/Source/Metal/MetalPathTracer.h
++++ b/Source/Metal/MetalPathTracer.h
+@@ -232,6 +232,9 @@ private:
+     id< MTLTexture > hudlessImage{ nil };
+ 
+     id< MTLBuffer > tonemapping;
++    // Thief RT: the luminance histogram of each frame, copied for the CPU (rgThiefSeenLight)
++    id< MTLBuffer > thiefHistogram[ 3 ]{};
++    uint64_t        thiefHistogramFrame{ 0 };
+     id< MTLBuffer > lpmParams[ MAX_FRAMES_IN_FLIGHT ];
+     id< MTLBuffer > indirectReservoirs[ MAX_FRAMES_IN_FLIGHT ];
+     uint32_t        reservoirsWidth{ 0 };
+diff --git a/Source/Metal/MetalPathTracer.mm b/Source/Metal/MetalPathTracer.mm
+index 55fe3cb..03a4cd0 100644
+--- a/Source/Metal/MetalPathTracer.mm
++++ b/Source/Metal/MetalPathTracer.mm
+@@ -35,9 +35,28 @@
+ #include "RgException.h"
+ #include "Utils.h"
+ 
++#include <atomic>
+ #include <cstdlib>
+ #include <cstring>
+ 
++// Thief RT: what the view shows, for the game (its eyes getting used to the
++// dark): the share of the frame's pixels darker than the exposure's darkest
++// (the histogram's first bin), and the adapted average luminance. Two frames late.
++namespace ThiefSeenLight
++{
++std::atomic< float >    below{ 0.0f };
++std::atomic< float >    average{ 0.0f };
++std::atomic< uint32_t > frames{ 0 };
++}
++extern "C" __attribute__( ( visibility( "default" ) ) ) uint32_t rgThiefSeenLight( float* belowShare, float* avgLuminance )
++{
++    if( belowShare )
++        *belowShare = ThiefSeenLight::below.load();
++    if( avgLuminance )
++        *avgLuminance = ThiefSeenLight::average.load();
++    return ThiefSeenLight::frames.load();
++}
++
+ namespace
+ {
+ 
+@@ -193,6 +212,11 @@ RTGL1::MetalPathTracer::MetalPathTracer( id< MTLDevice >        _device,
+ 
+     tonemapping = [device newBufferWithLength:sizeof( ShTonemapping ) options:MTLResourceStorageModePrivate];
+     tonemapping.label = @"Tonemapping";
++    for( auto& h : thiefHistogram )
++    {
++        h = [device newBufferWithLength:sizeof( ShTonemapping ) options:MTLResourceStorageModeShared];
++        memset( h.contents, 0, sizeof( ShTonemapping ) );
++    }
+ 
+     // Debug: RTGL1_METAL_PROFILE=1, an encoder per pass, for the GPU timeline
+     profiling = MetalProfiler::Enabled();
+@@ -743,6 +767,20 @@ id< MTLTexture > RTGL1::MetalPathTracer::Render( id< MTLCommandBuffer >
+ 
+     // Tonemapping::CalculateExposure
+     {
++        // Thief RT: the frame two before this one (done: two frames in flight), read now
++        {
++            const ShTonemapping* h =
++                static_cast< const ShTonemapping* >( thiefHistogram[ ( thiefHistogramFrame + 1 ) % 3 ].contents );
++            double total = 0;
++            for( uint32_t i = 0; i < 256; i++ )
++                total += h->histogram[ i ];
++            if( total > 0 )
++            {
++                ThiefSeenLight::below.store( float( h->histogram[ 0 ] / total ) );
++                ThiefSeenLight::average.store( h->avgLuminance );
++                ThiefSeenLight::frames.fetch_add( 1 );
++            }
++        }
+         BeginPass( cmd, enc, @"Exposure" );
+         shaders.DispatchThreadgroups( enc,
+                                       "CmLuminanceHistogram",
+@@ -750,6 +788,30 @@ id< MTLTexture > RTGL1::MetalPathTracer::Render( id< MTLCommandBuffer >
+                                       b,
+                                       GroupCount( p.width, COMPUTE_LUM_HISTOGRAM_GROUP_SIZE_X ),
+                                       GroupCount( p.height, COMPUTE_LUM_HISTOGRAM_GROUP_SIZE_Y ) );
++        EndPass( enc );
++        // the histogram, before the average clears it (and last frame's average)
++        if( !profiling )
++        {
++            [enc endEncoding];
++            enc = nil;
++        }
++        {
++            id< MTLBlitCommandEncoder > blit = MetalProfiler::Blit( cmd );
++            blit.label                       = @"Histogram for the CPU";
++            [blit copyFromBuffer:tonemapping
++                    sourceOffset:0
++                        toBuffer:thiefHistogram[ thiefHistogramFrame % 3 ]
++               destinationOffset:0
++                            size:sizeof( ShTonemapping )];
++            [blit endEncoding];
++            thiefHistogramFrame++;
++        }
++        if( !profiling )
++        {
++            enc       = MetalProfiler::Compute( cmd );
++            enc.label = @"RTGL1 exposure";
++        }
++        BeginPass( cmd, enc, @"Exposure average" );
+         shaders.DispatchThreadgroups( enc, "CmLuminanceAvg", {}, b, 1, 1 );
+         EndPass( enc );
+     }

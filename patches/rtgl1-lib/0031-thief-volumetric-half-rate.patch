@@ -1,0 +1,75 @@
+From: Claude <noreply@anthropic.com>
+Date: Tue, 10 Nov 2026 19:44:18 +0100
+Subject: [PATCH] Thief: the haze lit by every lamp, half its cells a frame
+
+With the fog's all-lights estimate on (and nothing on the raster side
+reading the volume), every one of the grid's 900k cells picked a light and
+traced a shadow ray every frame: 5 ms of a frame at Reflections in Red's
+pond. A cell wholly behind what is seen (depth gate 0: its light is
+multiplied by 0) now carries its reprojected history forward instead, as
+does every other slice of the grid's depth each frame (alternating; whole
+slices, so a threadgroup skips together -- a checkerboard saved nothing);
+a fresh sample is blended in at 0.08 instead of 0.05, for about the same
+responsiveness. Smoke puffs and a volume the raster reads are as before.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_0137FfF2kXgpYFjmGxKqakLV
+---
+ Source/Shaders/RtVolumetric.comp | 30 +++++++++++++++++++++++++++---
+ 1 file changed, 27 insertions(+), 3 deletions(-)
+
+diff --git a/Source/Shaders/RtVolumetric.comp b/Source/Shaders/RtVolumetric.comp
+index 6dc8b91..9bf0ab7 100644
+--- a/Source/Shaders/RtVolumetric.comp
++++ b/Source/Shaders/RtVolumetric.comp
+@@ -544,6 +544,31 @@ void main()
+             radiance_Prev = vec3( 0 );
+         }
+ 
++        // Thief RT: the haze lit by every lamp (the fog's all-lights estimate, nothing on
++        // the raster side reading the volume) costs a light pick and a shadow ray in each
++        // of the grid's 900k cells, every frame -- 5 ms of a frame at Reflections in Red's
++        // pond. Two cuts, both carrying the cell's (reprojected) history forward instead:
++        //  - a cell wholly behind what is seen (depth gate 0): its light is multiplied
++        //    by 0 anyway (the single-light path already skips these);
++        //  - the rest, half of them a frame (every other slice of the grid's depth,
++        //    alternating): its history is 95% of it already, so a fresh sample every
++        //    other frame, blended in at a little more, keeps nearly the same look.
++        //    (Whole slices, not a checkerboard: the cells of a threadgroup run together,
++        //    and with half of each skipping the group took as long as before.)
++        // Smoke puffs and a volume the raster reads (illumVolumeEnable) are as before.
++        const bool fogOnly    = globalUniform.illumVolumeEnable == 0 && !inSmoke &&
++                                globalUniform.volumeShaftDebug == 0;
++        const bool behind     = fogOnly && depthGate <= 0.0;
++        const bool otherFrame = fogOnly && histValid &&
++                                ( ( uint( cell.z ) + globalUniform.frameId ) & 1u ) != 0;
++        vec3 tolight = vec3( 0, 1, 0 );
++        if( behind || otherFrame )
++        {
++            radiance = radiance_Prev;
++        }
++        else
++        {
++
+         uint seed =
+             getRandomSeed( ivec2( cell.x + cell.z, cell.y + 19 * cell.z ), globalUniform.frameId );
+ 
+@@ -562,8 +587,6 @@ void main()
+             s.toViewerDir     = toviewer;
+         }
+ 
+-        vec3 tolight = vec3( 0, 1, 0 );
+-
+         // MULTIPLE SAMPLES, but only where there is smoke.
+         //
+         // Everything else added for the noise -- the spatial filter, the
+@@ -635,7 +658,8 @@ void main()
+                             : inSmoke  ? globalUniform.smokeIllumBlend
+                                        : 0.05;
+ 
+-        radiance = mix( radiance_Prev, radiance, blend );
++        radiance = mix( radiance_Prev, radiance, fogOnly && histValid ? 0.08 : blend );
++        }
+ 
+         lighting += globalUniform.volumeLightMult * radiance *
+                     phaseFunction_Schlick( tolight, toviewer, globalUniform.volumeAsymmetry );

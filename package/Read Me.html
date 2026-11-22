@@ -1,0 +1,104 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Thief RT: Read Me</title>
+<style>
+  :root { --bg: #f6f4ef; --fg: #1f1d19; --muted: #67625a; --accent: #8a6a1f; --card: #ffffff; --line: #e3ded3; --code: #ece7dc; }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg: #121210; --fg: #ebe7de; --muted: #a29c90; --accent: #d9b45a; --card: #1c1b18; --line: #302e29; --code: #27251f; }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--fg); font: 16px/1.55 -apple-system, BlinkMacSystemFont, "Helvetica Neue", sans-serif; }
+  main { max-width: 760px; margin: 0 auto; padding: 40px 20px 64px; }
+  h1 { font-size: 34px; margin: 0 0 4px; letter-spacing: -0.5px; }
+  .sub { color: var(--muted); margin: 0 0 28px; }
+  h2 { font-size: 21px; margin: 36px 0 10px; display: flex; gap: 10px; align-items: baseline; }
+  h2 .n { color: var(--accent); font-variant-numeric: tabular-nums; }
+  p, li { margin: 6px 0; }
+  ul, ol { padding-left: 22px; }
+  a { color: var(--accent); }
+  code { background: var(--code); padding: 1px 6px; border-radius: 5px; font: 14px ui-monospace, Menlo, monospace; }
+  .card { background: var(--card); border: 1px solid var(--line); border-radius: 12px; padding: 14px 18px; margin: 12px 0; }
+  .note { border-left: 3px solid var(--accent); }
+  table { width: 100%; border-collapse: collapse; font-size: 15px; }
+  td, th { text-align: left; padding: 8px 6px; border-bottom: 1px solid var(--line); vertical-align: top; }
+  th { color: var(--muted); font-weight: 600; font-size: 13px; text-transform: uppercase; letter-spacing: .4px; }
+  .muted { color: var(--muted); }
+  kbd { font: 13px ui-monospace, Menlo, monospace; border: 1px solid var(--line); border-bottom-width: 2px; border-radius: 4px; padding: 0 5px; background: var(--card); }
+</style>
+</head>
+<body>
+<main>
+<h1>Thief RT</h1>
+<p class="sub">Thief Gold and Thief II: The Metal Age, and their fan missions, with path-traced lighting, shadows, reflections and god rays, running natively on Apple silicon Macs. Built on a restoration of the Dark Engine and the <a href="https://github.com/sultim-t/RayTracedGL1">RTGL1</a> path tracer. An OpenGL renderer is included too.</p>
+
+<div class="card note">
+  <strong>You need:</strong> a Mac with Apple silicon (M1 or later; M3 or later recommended for ray tracing, because of their hardware ray tracing), macOS 14 or newer, and your own copy of the games. The games are not included.
+</div>
+
+<h2><span class="n">1</span> Get the games' files</h2>
+<p>Thief RT plays the original games' data. Put each game's folder anywhere on your Mac: a <code>Games</code> folder in your home folder, Downloads or Documents. The installer looks there, in Applications and in Steam's folder, and you can also point it at a folder yourself.</p>
+<table>
+  <tr><th>Game</th><th>Version</th><th>The folder with</th></tr>
+  <tr><td>Thief Gold</td><td>Steam or GOG (Thief: The Dark Project works too)</td><td><code>cam.cfg</code>, <code>THIEF.EXE</code>, the missions (<code>miss1.mis</code> …)</td></tr>
+  <tr><td>Thief II: The Metal Age</td><td>Steam or GOG</td><td><code>cam.cfg</code>, <code>thief2.exe</code>, the missions</td></tr>
+</table>
+<p class="muted">These releases are made for Windows. To get their files onto a Mac, copy the game's folder from a Windows PC where it is installed, or unpack the GOG installer with <a href="https://constexpr.org/innoextract/">innoextract</a> (<code>brew install innoextract</code>, then <code>innoextract setup_….exe</code>). Mods the game's folder already has (such as the Thief Gold HD Mod, through its <code>cam_mod.ini</code>) are used as they are.</p>
+
+<h2><span class="n">2</span> Fan missions, and The Black Parade</h2>
+<p>Fan missions go in the game's own <code>FMs</code> folder, each unpacked into a folder of its own (Thief Gold's missions in Thief Gold's <code>FMs</code>, Thief II's in Thief II's). The launcher lists them.</p>
+<p><strong>The Black Parade</strong>, the Thief Gold campaign, is found by the installer: leave its download (the .zip or .7z, or its unpacked folder) in your <strong>Downloads</strong> folder, and the installer offers to put it in Thief Gold's <code>FMs</code> folder.</p>
+
+<h2><span class="n">3</span> Optional: the Thief Gold HD Mod</h2>
+<p>The <a href="https://www.moddb.com/mods/thief-gold-hd-texture-mod">Thief Gold HD Mod</a> replaces the game's textures, models and skies with hand-made HD ones, and Thief RT makes its materials from them. The installer sets it up for you, in the original missions and in fan missions (with the mod's fan-mission versions of its torches and water):</p>
+<ul>
+  <li>If your Thief Gold folder already has it (an <code>HDMOD</code> folder), it is used as it is.</li>
+  <li>Otherwise, download its installer (<code>Thief1HDMod1.2.exe</code>) into your <strong>Downloads</strong>. It is a Windows installer: to unpack it on a Mac, install <a href="https://constexpr.org/innoextract/">innoextract</a> first (in Terminal: <code>brew install innoextract</code>). The installer then finds it and offers to install it (about 3 GB). An <code>HDMOD</code> folder copied from a Windows install, or an archive holding one, works too.</li>
+</ul>
+<p class="muted">The installer writes Thief Gold's <code>cam_mod.ini</code> to use it, keeping the old one as <code>cam_mod.ini.before-thief-rt</code>. To keep the HD Mod out of fan missions, replace its <code>fm_mod_path</code> line with <code>mod_path_skip_fm</code>.</p>
+
+<h2><span class="n">4</span> Install</h2>
+<ol>
+  <li>Open the disk image and double-click <strong>Install Thief RT</strong>.</li>
+  <li>The first time, macOS says it can't check the app, because it isn't from the App Store or a registered developer. Click <strong>Done</strong>, then open <strong>System Settings → Privacy &amp; Security</strong>, scroll down and click <strong>Open Anyway</strong> next to "Install Thief RT". Confirm with your password.
+    <br><span class="muted">Or, in Terminal: <code>xattr -dr com.apple.quarantine "/Volumes/Thief RT/Install Thief RT.app"</code>, then open it.</span></li>
+  <li>The installer puts <strong>Thief RT</strong> in Applications and shows the games it found; choose which to use.</li>
+  <li>macOS keeps an app that is not installed yet out of your Downloads, Documents and Desktop folders. If your games are there, the installer can't see them: then <strong>Thief RT</strong> looks for them itself the first time you open it. When macOS asks whether Thief RT may read those folders, allow it. (Later: File → Find Games Again.)</li>
+</ol>
+
+<h2><span class="n">5</span> Play</h2>
+<p>Open <strong>Thief RT</strong>. Its window has these choices:</p>
+<table>
+  <tr><td><strong>Game</strong></td><td>Thief Gold or Thief II. <span class="muted">A game in another folder: File → Choose a Game Folder.</span></td></tr>
+  <tr><td><strong>Play</strong></td><td>The original campaign, or a fan mission from that game's <code>FMs</code> folder (The Black Parade first).</td></tr>
+  <tr><td><strong>Graphics</strong></td><td><strong>Ray traced</strong> (the path tracer) or <strong>OpenGL</strong> (the game's own look with sharper textures, and real-time lights and shadows from torches and lamps; fast on any Apple silicon Mac).</td></tr>
+  <tr><td><strong>Quality</strong></td><td>For ray tracing: <strong>Ultra</strong>, <strong>High</strong> (recommended), <strong>Medium</strong> or <strong>Low</strong>. They set the resolution, the upscaling (MetalFX), the bounce light, god rays and how many lights are traced at once. Dynamic resolution keeps 60 fps in all of them: on a slower Mac, a lower preset gives a sharper picture at the same frame rate.</td></tr>
+  <tr><td><strong>OpenGL options</strong></td><td>With OpenGL chosen: <strong>Resolution</strong> (100% is the screen's own; 75% or 67% is much faster on a 4K or 5K display, the menus and the HUD staying sharp), <strong>Real-time lights</strong> (how many of the nearest lamps and torches light and shadow the scene in real time; Off is the game's original lightmaps), <strong>Shadows from objects</strong>, <strong>Bump maps</strong>, and <strong>V-sync</strong> (Adaptive, On, or Off: the frame rate unlocked, with tearing possible).</td></tr>
+</table>
+<ul>
+  <li>In the game, <kbd>Cmd</kbd>+<kbd>,</kbd> (or <kbd>F10</kbd>) opens the ray tracing settings: the preset, resolution, frame rate, brightness and the effects. Everything finer and more technical is under <strong>Developer settings</strong> at the end of the list. <strong>Reset to defaults</strong> brings back High. With OpenGL, the same keys open its settings (the options above, and whether guards notice your shadow, and how far unlit corners are lifted from black).</li>
+  <li>Controls added to the game's own: hold <kbd>Tab</kbd> for the inventory wheel (weapons and items; move the mouse to pick, let go to take it), and <kbd>Shift</kbd>+<kbd>Q</kbd> / <kbd>E</kbd> lean as <kbd>Q</kbd> / <kbd>E</kbd> do. The middle mouse button blocks, as in the original. Items still cycle with <kbd>[</kbd> and <kbd>]</kbd>. Options → Controls changes any of them.</li>
+  <li>The first time you play each level, its surface materials are made and kept, so the level can look plain for a few seconds.</li>
+  <li>Dark areas look too bright, or crushed, on an external display? In the settings, raise <strong>Deep shadows (display)</strong> for an LCD whose blacks are grey.</li>
+  <li>For the smoothest play, close or minimise busy windows such as a browser playing video: they share the graphics chip with the game.</li>
+  <li><strong>Show the frame rate (FPS)</strong> in the launcher turns the frame counter on or off, for either renderer; in the game, the settings (<kbd>Cmd</kbd>+<kbd>,</kbd> or <kbd>F10</kbd>) have it too. The launcher's <strong>Developer Settings…</strong> shows the logs and settings folders.</li>
+</ul>
+
+<h2><span class="n">6</span> Where things are</h2>
+<table>
+  <tr><td>Launcher</td><td><code>/Applications/Thief RT.app</code> (or <code>~/Applications</code>)</td></tr>
+  <tr><td>Saves</td><td>In the game's own folder, as always (<code>saves</code>; a fan mission's in its folder in <code>FMs</code>)</td></tr>
+  <tr><td>Settings</td><td><code>~/Library/Application Support/Dark Engine Restored</code> (<code>rt_settings.txt</code>, <code>gl_settings.txt</code>)</td></tr>
+  <tr><td>Engine, materials, logs</td><td><code>~/Library/Application Support/Thief RT</code> (<code>logs/thief.log</code> if something goes wrong)</td></tr>
+</table>
+<p><strong>Updating:</strong> run the new version's installer. Saves, settings and the materials made so far are kept.<br>
+<strong>Uninstalling:</strong> delete <code>Thief RT</code> from Applications and the folder <code>~/Library/Application Support/Thief RT</code>. Your game files are never changed (except the saves the game makes in them).</p>
+
+<h2><span class="n">7</span> Credits</h2>
+<p>The Dark Engine, restored (its contributors) · RTGL1 path tracer (Sultim Tsyrendashiev) · Steam Audio (Valve) · SDL, OpenAL Soft, FFmpeg, Ogg Vorbis, libpng, Squirrel · Thief: The Dark Project, Thief Gold and Thief II (Looking Glass Studios; now Square Enix) · The Thief Gold HD Mod (its authors) · The Black Parade and the other fan missions (their authors).</p>
+<p class="muted">The licences and the source are in the "Licences and Source" folder on the disk image.</p>
+</main>
+</body>
+</html>

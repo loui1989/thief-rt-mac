@@ -1,0 +1,183 @@
+diff --git a/Source/Metal/MetalDevice.mm b/Source/Metal/MetalDevice.mm
+index 43ad6a2..c25be97 100644
+--- a/Source/Metal/MetalDevice.mm
++++ b/Source/Metal/MetalDevice.mm
+@@ -3238,11 +3238,13 @@ void RTGL1::MetalDevice::DrawFrame( const RgDrawFrameInfo* pInfo )
+             debug::Warning( "Metal profile: scene: {} dynamic geometries ({} triangles, {} vertices), "
+                             "{} static geometries, {} TLAS instances, {} geometry infos ({} polished); "
+                             "kept: {} geometries ({} triangles) in {} pieces, {} piece rebuilds so far; "
+-                            "models instanced: {} ({} kept BLAS-es, {} built so far); rebuilt each frame: {} geometries ({} triangles)",
++                            "models instanced: {} ({} kept BLAS-es, {} built so far); rebuilt each frame: {} geometries ({} triangles); "
++                            "moving geometry's BLAS-es so far: {} refitted, {} built",
+                             st.dynamicGeometries, st.dynamicTriangles, st.dynamicVertices,
+                             st.staticGeometries, st.tlasInstances, st.geometryInfos, st.polishedGeometries,
+                             st.stableGeometries, st.stableTriangles, st.stableCells, st.stableRebuilds,
+-                            st.instancedModels, st.modelBlases, st.modelBuilds, st.volatileGeometries, st.volatileTriangles );
++                            st.instancedModels, st.modelBlases, st.modelBuilds, st.volatileGeometries, st.volatileTriangles,
++                            st.dynamicRefits, st.dynamicBuilds );
+         }
+         c.waitFrame = c.startFrame = c.betweenFrames = c.uploads = c.sceneBuild = c.render = c.drawFrame = 0;
+         c.clouds = c.skyCubemap = c.skyAlbedo = 0;
+diff --git a/Source/Metal/MetalScene.h b/Source/Metal/MetalScene.h
+index 5b1f799..d42a646 100644
+--- a/Source/Metal/MetalScene.h
++++ b/Source/Metal/MetalScene.h
+@@ -109,6 +109,8 @@ public:
+         size_t stableGeometries, stableTriangles, stableRebuilds, stableCells;
+         // models instanced with their kept BLAS (modelBlas), the rest rebuilt each frame
+         size_t instancedModels, modelBlases, modelBuilds, volatileGeometries, volatileTriangles;
++        // Thief RT: the frames' dynamic BLAS-es refitted and built since the last stats
++        size_t dynamicRefits, dynamicBuilds;
+     };
+     Stats lastStats{};
+ 
+@@ -198,6 +200,10 @@ private:
+         id< MTLAccelerationStructure > blas{ nil };
+         id< MTLBuffer >                scratch{ nil };
+         id< MTLBuffer >                transforms{ nil };
++        // Thief RT: what it holds (its geometries' ids, triangle counts, kind), when
++        // built refittable (0: not), and how many refits since it was last built
++        uint64_t refitSig{ 0 };
++        uint32_t refits{ 0 };
+     };
+ 
+     // geometries of a group, in the BLAS order
+@@ -278,7 +284,8 @@ private:
+                     id< MTLBuffer >                              indices,
+                     bool                                         bakeTransforms,
+                     bool                                         fastBuild,
+-                    NSString*                                    label );
++                    NSString*                                    label,
++                    const BuiltBlas*                             refitFrom = nullptr );
+ 
+     // Raze RT: stable geometry. A game that sends all of its world as dynamic geometry every
+     // frame (Raze: a Build map's walls and floors) had all of it rebuilt into a BLAS each frame,
+@@ -375,6 +382,9 @@ private:
+     std::unordered_map< uint64_t, uint32_t > keyAge; // a content key -> frames in a row it came
+     uint32_t                                 frameCounter{ 0 };
+     size_t                                   stableRebuilds{ 0 };
++    // Thief RT: dynamic BLAS refits and builds (see BuildBlas's refitFrom)
++    size_t                                   dynamicRefits{ 0 };
++    size_t                                   dynamicBuilds{ 0 };
+     // Raze RT: a model that moves but keeps its shape (a spinning voxel pickup, a swinging
+     // door's voxel) changed its content key every frame: rebuilt with the dynamic BLAS each
+     // frame. By its shape alone (Geometry::localKey): a BLAS in its own space, kept while it
+diff --git a/Source/Metal/MetalScene.mm b/Source/Metal/MetalScene.mm
+index b89f269..dc34938 100644
+--- a/Source/Metal/MetalScene.mm
++++ b/Source/Metal/MetalScene.mm
+@@ -731,11 +731,13 @@ void RTGL1::MetalScene::BuildBlas( id< MTLAccelerationStructureCommandEncoder >
+                                    id< MTLBuffer >                              indices,
+                                    bool                                         bakeTransforms,
+                                    bool                                         fastBuild,
+-                                   NSString*                                    label )
++                                   NSString*                                    label,
++                                   const BuiltBlas*                             refitFrom )
+ {
+     if( geoms.empty() )
+     {
+         dst.blas = nil;
++        dst.refitSig = 0;
+         return;
+     }
+ 
+@@ -782,6 +784,70 @@ void RTGL1::MetalScene::BuildBlas( id< MTLAccelerationStructureCommandEncoder >
+     desc.geometryDescriptors = descs;
+     desc.usage = fastBuild ? MTLAccelerationStructureUsagePreferFastBuild : MTLAccelerationStructureUsageNone;
+ 
++    // Thief RT: the frame's dynamic BLAS (the moving models: guards walking, a door
++    // swinging) was built anew every frame. When it holds the same geometries as the
++    // previous frame's -- the same ids, the same triangle counts, the same kind --
++    // that one is refitted into this one (its tree kept, its boxes moved to the
++    // vertices as they are now): a fraction of a build. Built anew every few frames
++    // still (RTGL1_METAL_REFITS, default 15 refits in a row; 0 never refits), as a
++    // tree refitted ever further from the shape it was built for traces slower.
++    if( refitFrom )
++    {
++        static const uint32_t maxRefits = [] {
++            const char* e = std::getenv( "RTGL1_METAL_REFITS" );
++            return e ? uint32_t( std::max( 0, std::atoi( e ) ) ) : 15u;
++        }();
++        uint64_t sig = 0xcbf29ce484222325ull ^ uint64_t( geoms.size() );
++        auto     mix = [ &sig ]( uint64_t v ) {
++            sig ^= v + 0x9E3779B97F4A7C15ull + ( sig << 6 ) + ( sig >> 2 );
++            sig *= 0x100000001B3ull;
++        };
++        for( const Geometry* g : geoms )
++        {
++            mix( g->uniqueID.objectId );
++            mix( uint64_t( g->uniqueID.primitiveIndex ) | ( uint64_t( g->info.indexCount ) << 32 ) );
++            mix( g->alphaTested ? 1 : 2 );
++        }
++        sig |= 1; // (0: not refittable)
++        if( maxRefits > 0 )
++        {
++            desc.usage |= MTLAccelerationStructureUsageRefit;
++        }
++        if( maxRefits > 0 && refitFrom->blas && refitFrom->blas != dst.blas && refitFrom->refitSig == sig &&
++            refitFrom->refits < maxRefits )
++        {
++            MTLAccelerationStructureSizes sizes = [device accelerationStructureSizesWithDescriptor:desc];
++            if( !dst.blas || dst.blas.size < refitFrom->blas.size )
++            {
++                dst.blas       = [device newAccelerationStructureWithSize:refitFrom->blas.size];
++                dst.blas.label = label;
++            }
++            const NSUInteger need = std::max< NSUInteger >( 256, sizes.refitScratchBufferSize );
++            if( !dst.scratch || dst.scratch.length < need )
++            {
++                dst.scratch       = [device newBufferWithLength:need + need / 2 options:MTLResourceStorageModePrivate];
++                dst.scratch.label = [label stringByAppendingString:@" scratch"];
++            }
++            [enc refitAccelerationStructure:refitFrom->blas
++                                 descriptor:desc
++                                destination:dst.blas
++                              scratchBuffer:dst.scratch
++                        scratchBufferOffset:0];
++            dst.refitSig = sig;
++            dst.refits   = refitFrom->refits + 1;
++            dynamicRefits++;
++            return;
++        }
++        dst.refitSig = maxRefits > 0 ? sig : 0;
++        dst.refits   = 0;
++        dynamicBuilds++;
++    }
++    else
++    {
++        dst.refitSig = 0;
++        dst.refits   = 0;
++    }
++
+     id< MTLAccelerationStructure > blas    = dst.blas;
+     id< MTLBuffer >                scratch = dst.scratch;
+     EnsureAccelerationStructure( device, blas, scratch, desc, label );
+@@ -1191,7 +1257,8 @@ bool RTGL1::MetalScene::Build( id< MTLCommandBuffer > cmd, uint32_t rayCullMaskW
+         enc.label                                        = @"Build dynamic BLAS";
+         for( uint32_t gi = 0; gi < GroupCount; gi++ )
+         {
+-            BuildBlas( enc, f.dynamicBlas[ gi ], volatileLists[ gi ], f.vertices, f.indices, true, true, @"Dynamic BLAS" );
++            BuildBlas( enc, f.dynamicBlas[ gi ], volatileLists[ gi ], f.vertices, f.indices, true, true, @"Dynamic BLAS",
++                       &Prev().dynamicBlas[ gi ] );
+             for( const Geometry* g : instancedLists[ gi ] )
+             {
+                 ModelBlas& mb = modelBlas[ gi ][ g->localKey ];
+@@ -1218,7 +1285,8 @@ bool RTGL1::MetalScene::Build( id< MTLCommandBuffer > cmd, uint32_t rayCullMaskW
+     {
+         for( auto& b : f.dynamicBlas )
+         {
+-            b.blas = nil;
++            b.blas     = nil;
++            b.refitSig = 0;
+         }
+     }
+ 
+@@ -1509,6 +1577,8 @@ bool RTGL1::MetalScene::Build( id< MTLCommandBuffer > cmd, uint32_t rayCullMaskW
+             }
+         }
+         lastStats.stableRebuilds = stableRebuilds;
++        lastStats.dynamicRefits  = dynamicRefits;
++        lastStats.dynamicBuilds  = dynamicBuilds;
+         for( uint32_t gi = 0; gi < GroupCount; gi++ )
+         {
+             lastStats.instancedModels += instancedLists[ gi ].size();

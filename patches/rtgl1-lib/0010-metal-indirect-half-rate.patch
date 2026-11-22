@@ -1,0 +1,67 @@
+From 5fc46faad0176ce2502e3a05301d19258a71dbd2 Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Tue, 27 Oct 2026 12:56:58 +0000
+Subject: [PATCH] Metal: the bounce light's half-rate mode (indirectSamples 0):
+ its init pass half as wide
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_015h6T8xtWYtnCAyG7nuxUVJ
+---
+ Source/Metal/MetalDevice.mm     | 5 ++++-
+ Source/Metal/MetalPathTracer.h  | 2 ++
+ Source/Metal/MetalPathTracer.mm | 3 ++-
+ 3 files changed, 8 insertions(+), 2 deletions(-)
+
+diff --git a/Source/Metal/MetalDevice.mm b/Source/Metal/MetalDevice.mm
+index 5857d18..706d748 100644
+--- a/Source/Metal/MetalDevice.mm
++++ b/Source/Metal/MetalDevice.mm
+@@ -1366,7 +1366,9 @@ void FillUniform( RTGL1::ShGlobalUniform* gu, const RgDrawFrameInfo& drawInfo, c
+         gu->svgfIndirAntilag = !!illum.svgfIndirAntilag;
+ 
+         gu->directSamples         = std::clamp( illum.directSamples, 1u, 8u );
+-        gu->indirectSamples       = std::clamp( illum.indirectSamples, 1u, 8u );
++        // (Raze RT: 0 -- the bounce light traced for half of the pixels each frame, in a
++        // checkerboard that alternates; see RtRaygenIndirect.inl)
++        gu->indirectSamples       = illum.indirectSamples == 0 ? 0u : std::clamp( illum.indirectSamples, 1u, 8u );
+         // 32 -> 64 (2026-08-17): pure loop bound in calcInitialReservoir, no
+         // rays traced, no fixed-size arrays -- and scenes dense with small
+         // emitters (the stripe-bulb rooms) genuinely need more candidates to
+@@ -2852,6 +2854,7 @@ void RTGL1::MetalDevice::DrawFrame( const RgDrawFrameInfo* pInfo )
+                     .indirectIlluminationMaxAlbedoLayers = impl->indirectIlluminationMaxAlbedoLayers,
+                     .lightmapLayerIndex                  = impl->lightmapLayerIndex,
+                     .reflectRefractMaxDepth              = impl->uniform.reflectRefractMaxDepth,
++                    .indirectHalfRate                    = impl->uniform.indirectSamples == 0,
+                     .volumetricMaxHistoryLength =
+                         pInfo->resetHistory ? 0 : pnext::get< RgDrawFrameVolumetricParams >( *pInfo ).maxHistoryLength,
+                     .globalUniform = impl->globalUniform[ impl->frameIndex ],
+diff --git a/Source/Metal/MetalPathTracer.h b/Source/Metal/MetalPathTracer.h
+index 091f808..5b820e3 100644
+--- a/Source/Metal/MetalPathTracer.h
++++ b/Source/Metal/MetalPathTracer.h
+@@ -83,6 +83,8 @@ public:
+ 
+         // the same as ShGlobalUniform, to choose the passes on CPU
+         uint32_t reflectRefractMaxDepth;
++        // Raze RT: the bounce light's rays for half of the pixels (ShGlobalUniform::indirectSamples 0)
++        bool     indirectHalfRate = false;
+         float    volumetricMaxHistoryLength;
+ 
+         id< MTLBuffer >  globalUniform;
+diff --git a/Source/Metal/MetalPathTracer.mm b/Source/Metal/MetalPathTracer.mm
+index 3469074..10354d9 100644
+--- a/Source/Metal/MetalPathTracer.mm
++++ b/Source/Metal/MetalPathTracer.mm
+@@ -606,7 +606,8 @@ id< MTLTexture > RTGL1::MetalPathTracer::Render( id< MTLCommandBuffer >
+     EndPass( enc );
+ 
+     BeginPass( cmd, enc, @"Indirect illumination - Init" );
+-    shaders.Dispatch( enc, "RtRaygenIndirectInit", indirectConstants, b, p.width, p.height );
++    // (half rate: a thread a pixel of the checkerboard, every thread busy)
++    shaders.Dispatch( enc, "RtRaygenIndirectInit", indirectConstants, b, p.indirectHalfRate ? ( p.width + 1 ) / 2 : p.width, p.height );
+     EndPass( enc );
+ 
+     // PathTracer::TraceVolumetric
+-- 
+2.43.0
+

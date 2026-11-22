@@ -1,0 +1,29 @@
+diff --git a/Source/Metal/MetalDevice.mm b/Source/Metal/MetalDevice.mm
+index b66ae60..34ddc17 100644
+--- a/Source/Metal/MetalDevice.mm
++++ b/Source/Metal/MetalDevice.mm
+@@ -1728,6 +1728,14 @@ void RTGL1::MetalDevice::Impl::PresentAsync( id< MTLCommandBuffer >       cmd,
+     dispatch_semaphore_t         sem          = frameSemaphore;
+     auto                         frameTime    = gpuFrameTime;
+     id< MTLDevice >              dev          = device;
++    // Thief RT: with the display's sync, the generated frame is shown for one refresh, then the
++    // real one: paced by half the measured GPU frame time instead, which counted the wait this
++    // very pacing makes (each frame held for half of it, for want of a drawable), it locked at
++    // ~25 real frames a second on a 120 Hz display
++    const bool                   synced       = layer.displaySyncEnabled;
++    // most of one refresh (never above a 120 Hz one, should the mode report no rate): on the
++    // display's sync, the next refresh after the generated one
++    const double                 refresh      = 0.9 * std::min( RefreshInterval(), 1.0 / 120.0 );
+ 
+     [cmd addCompletedHandler:^( id< MTLCommandBuffer > c ) {
+       OnFrameCompleted( c, *frameTime );
+@@ -1800,7 +1808,8 @@ void RTGL1::MetalDevice::Impl::PresentAsync( id< MTLCommandBuffer >       cmd,
+             if( generatedPresented )
+             {
+                 // pace: the generated frame is shown for a half of the frame time
+-                [pc presentDrawable:d afterMinimumDuration:std::clamp( frameTime->load() * 0.5, 0.0, 0.05 )];
++                [pc presentDrawable:d
++                    afterMinimumDuration:synced ? refresh : std::clamp( frameTime->load() * 0.5, 0.0, 0.05 )];
+             }
+             else
+             {

@@ -1,0 +1,54 @@
+diff --git a/Source/LightEncoding.cpp b/Source/LightEncoding.cpp
+index 307d5f2..fd1ea65 100644
+--- a/Source/LightEncoding.cpp
++++ b/Source/LightEncoding.cpp
+@@ -108,8 +108,12 @@ RTGL1::ShLightEncoded EncodeAsSphereLight( const RgLightSphericalEXT& info,
+     {
+         uint32_t* rn = reinterpret_cast< uint32_t* >( &lt.ldata3 );
+ 
++        // Thief: a lamp hung high (alpha 0xFE in its colour) falls off as the
++        // game's lights do, as 1/distance past a metre (to 4 m): its radius
++        // given negative, for the shaders' decodeAsSphereLight
++        const bool darkFalloff = ( ( info.color >> 24 ) & 255u ) == 0xFEu;
+         *rn = packHalf2x16(
+-            radius, //
++            darkFalloff ? -radius : radius, //
+             norm    // additional multiplier as e5 encoding might not preserve large values
+         );
+     }
+diff --git a/Source/Shaders/Light.h b/Source/Shaders/Light.h
+index 7e52500..d9746ba 100644
+--- a/Source/Shaders/Light.h
++++ b/Source/Shaders/Light.h
+@@ -41,6 +41,7 @@ struct SphereLight
+     vec3  color;
+     float radius;
+     vec3  center;
++    float darkFalloff; // Thief: 1 if it falls off as 1/distance past a metre (to 4 m)
+ };
+ 
+ struct TriangleLight
+@@ -79,7 +80,8 @@ SphereLight decodeAsSphereLight(const ShLightEncoded encoded)
+     {
+         const vec2 rn = unpackHalf2x16( floatBitsToUint( encoded.ldata3 ) );
+ 
+-        l.radius = rn[ 0 ];
++        l.radius      = abs( rn[ 0 ] );
++        l.darkFalloff = rn[ 0 ] < 0.0 ? 1.0 : 0.0;
+         l.color *= rn[ 1 ]; // additional multiplier as e5 encoding might not preserve large values
+     }
+ 
+@@ -299,6 +301,13 @@ LightSample sampleSphereLight(const SphereLight l, const vec3 surfPosition, cons
+     r.position = l.center + lightNormal * l.radius;
+     r.color = l.color;
+     r.dw = calcSolidAngleForSphere(l.radius, toLightCenter.len);
++    // Thief: the game's falloff, 1/distance, from a metre to four; back to
++    // the light's own by eight (held at 4x further, it lit the dark far off)
++    if (l.darkFalloff > 0.0)
++    {
++        const float dl = toLightCenter.len;
++        r.dw *= dl <= 4.0 ? max(dl, 1.0) : max(1.0, 7.0 - 0.75 * dl);
++    }
+ 
+     return r;
+ }

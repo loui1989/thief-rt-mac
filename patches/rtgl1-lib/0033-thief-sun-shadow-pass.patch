@@ -1,0 +1,115 @@
+From: Claude <noreply@anthropic.com>
+Date: Thu, 12 Nov 2026 03:44:23 +0100
+Subject: [PATCH] Thief: a half-size moon shadow pass
+
+ThiefSunShadow (the game's own shader, rt/bin/shaders) traces the sun's (the
+moon's) shadow for one pixel of each 2x2 block a frame, the four in turn,
+smoothed over frames, into the fluid's depth images (unused by the game);
+RtRaygenDirect reads it there instead of tracing a shadow ray and a sky
+check at every pixel. rgThiefSunShadowPass(on) runs it before the direct
+light; a shader that does not build turns it off, and with it the +4 in
+cellWorldSize that tells RtRaygenDirect to read it.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_0137FfF2kXgpYFjmGxKqakLV
+---
+ Source/Metal/MetalDevice.mm     | 11 +++++++++++
+ Source/Metal/MetalPathTracer.mm | 24 ++++++++++++++++++++++++
+ Source/RTGL1.cpp                |  6 ++++++
+ 3 files changed, 41 insertions(+)
+
+diff --git a/Source/Metal/MetalDevice.mm b/Source/Metal/MetalDevice.mm
+index 0afa062..4618a49 100644
+--- a/Source/Metal/MetalDevice.mm
++++ b/Source/Metal/MetalDevice.mm
+@@ -65,6 +65,11 @@
+ #include <optional>
+ 
+ // the same as in VulkanDevice_Init.cpp
++namespace RTGL1
++{
++extern std::atomic< bool > g_thiefSunShadowPass;   // MetalPathTracer.mm (0033)
++}
++
+ namespace RTGL1
+ {
+ 
+@@ -717,6 +722,12 @@ void FillUniform( RTGL1::ShGlobalUniform* gu, const RgDrawFrameInfo& drawInfo, c
+         gu->lightIndexIgnoreFPVShadows = lightManager->GetLightIndexForShaders(
+             currentFrameState.GetFrameIndex(), params.lightUniqueIdIgnoreFirstPersonViewerShadows );
+         gu->cellWorldSize       = std::max( params.cellWorldSize, 0.001f );
++        // Thief RT (0033): +4 in it tells RtRaygenDirect to read the moon's shadow from
++        // ThiefSunShadow -- not when that pass is off (its shader did not build)
++        if( !g_thiefSunShadowPass.load() && ( uint32_t( gu->cellWorldSize + 0.5f ) & 4u ) != 0 )
++        {
++            gu->cellWorldSize -= 4.0f;
++        }
+         gu->gradientMultDiffuse = std::clamp( params.directDiffuseSensitivityToChange, 0.0f, 1.0f );
+         gu->gradientMultIndirect =
+             std::clamp( params.indirectDiffuseSensitivityToChange, 0.0f, 1.0f );
+diff --git a/Source/Metal/MetalPathTracer.mm b/Source/Metal/MetalPathTracer.mm
+index 6471ea8..7812031 100644
+--- a/Source/Metal/MetalPathTracer.mm
++++ b/Source/Metal/MetalPathTracer.mm
+@@ -236,6 +236,12 @@ RTGL1::MetalPathTracer::MetalPathTracer( id< MTLDevice >        _device,
+ }
+ 
+ // Debug: RTGL1_METAL_PROFILE=1 makes a compute encoder per pass, for MetalProfiler's GPU timeline
++namespace RTGL1
++{
++// Thief RT (0033): run ThiefSunShadow before the direct light (see TracePrimary)
++std::atomic< bool > g_thiefSunShadowPass{ false };
++}
++
+ void RTGL1::MetalPathTracer::BeginPass( id< MTLCommandBuffer > cmd, __strong id< MTLComputeCommandEncoder >& enc, NSString* name )
+ {
+     if( !profiling )
+@@ -667,6 +673,24 @@ id< MTLTexture > RTGL1::MetalPathTracer::Render( id< MTLCommandBuffer >
+     shaders.Dispatch( enc, "RtInitialReservoirs", {}, b, p.width, p.height );
+     EndPass( enc );
+ 
++    // Thief RT (0033): the moon's (the sun's) shadow, a pixel of each 2x2 block a frame, for
++    // RtRaygenDirect to read (ThiefSunShadow.metal, in the game's shaders); asked for by the
++    // game (rgThiefSunShadowPass). A shader that does not build turns it off.
++    if( g_thiefSunShadowPass.load() )
++    {
++        BeginPass( cmd, enc, @"Moon shadows (half size)" );
++        try
++        {
++            shaders.Dispatch( enc, "ThiefSunShadow", {}, b, ( p.width + 1 ) / 2, ( p.height + 1 ) / 2 );
++        }
++        catch( const std::exception& e )
++        {
++            debug::Warning( "Metal backend: the moon shadow pass is off: {}", e.what() );
++            g_thiefSunShadowPass.store( false );
++        }
++        EndPass( enc );
++    }
++
+     BeginPass( cmd, enc, @"Direct illumination" );
+     shaders.Dispatch( enc, "RtRaygenDirect", {}, b, p.width, p.height );
+     EndPass( enc );
+diff --git a/Source/RTGL1.cpp b/Source/RTGL1.cpp
+index 707cd4a..d55d0f8 100644
+--- a/Source/RTGL1.cpp
++++ b/Source/RTGL1.cpp
+@@ -308,6 +308,7 @@ void RGAPI_CALL rgUtilExportAsTGA( const void* pPixels,
+ namespace RTGL1
+ {
+ extern std::atomic< int > g_thiefTracingTest;
++extern std::atomic< bool > g_thiefSunShadowPass;
+ }
+ extern "C"
+ {
+@@ -316,6 +317,11 @@ __attribute__( ( visibility( "default" ) ) ) void rgThiefTracingTest( int test )
+ {
+     RTGL1::g_thiefTracingTest.store( test );
+ }
++// Thief RT (patch 0033): the half-size moon shadow pass on or off (see MetalPathTracer.mm)
++__attribute__( ( visibility( "default" ) ) ) void rgThiefSunShadowPass( int on )
++{
++    RTGL1::g_thiefSunShadowPass.store( on != 0 );
++}
+ }
+ #endif
+ 

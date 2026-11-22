@@ -1,0 +1,19 @@
+diff --git a/Source/Shaders/RaygenPrimary.inl b/Source/Shaders/RaygenPrimary.inl
+index 245cf80..1162ebb 100644
+--- a/Source/Shaders/RaygenPrimary.inl
++++ b/Source/Shaders/RaygenPrimary.inl
+@@ -107,6 +107,14 @@ void storeSky( const ivec2 pix,
+         {
+             // to hdr
+             skyColor = adjustSky( skyColor ) / M_PI;
++            // Thief RT: the sky as SEEN (and seen in reflections), apart from the
++            // light it gives the level (getSky, skyColorMultiplier): a night sky
++            // shows plainly while lighting little. Carried in sunLeakDebugMul,
++            // which only the leak debug view (sunLeakDebug > 0.5) reads.
++            if( globalUniform.sunLeakDebug < 0.5 )
++            {
++                skyColor *= max( globalUniform.sunLeakDebugMul, 0.0 );
++            }
+         }
+ 
+         imageStore(

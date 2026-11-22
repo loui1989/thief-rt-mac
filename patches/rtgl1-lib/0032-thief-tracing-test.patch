@@ -1,0 +1,238 @@
+From: Claude <noreply@anthropic.com>
+Date: Tue, 10 Nov 2026 23:57:21 +0100
+Subject: [PATCH] Thief: a tracing layout test, and the TLAS instances by kind
+
+rgThiefTracingTest(int), from the game's panel: 1 see-through (alpha
+tested) triangles traced as solid; 2 the kept map in one piece; 3 in 48 m
+pieces; 4 still objects taken into the map's pieces; 5 both 3 and 4. To
+find what makes long rays outdoors slow. The stats print the TLAS
+instances by kind (map pieces, objects' own, with see-through triangles).
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_0137FfF2kXgpYFjmGxKqakLV
+---
+ Source/Metal/MetalDevice.mm |  9 +++++
+ Source/Metal/MetalScene.h   |  5 +++
+ Source/Metal/MetalScene.mm  | 67 ++++++++++++++++++++++++++++++++++---
+ Source/RTGL1.cpp            | 18 +++++++++-
+ 4 files changed, 93 insertions(+), 6 deletions(-)
+
+diff --git a/Source/Metal/MetalDevice.mm b/Source/Metal/MetalDevice.mm
+index 37f0322..0afa062 100644
+--- a/Source/Metal/MetalDevice.mm
++++ b/Source/Metal/MetalDevice.mm
+@@ -3332,6 +3332,15 @@ void RTGL1::MetalDevice::DrawFrame( const RgDrawFrameInfo* pInfo )
+                             st.instancedModels, st.modelBlases, st.modelBuilds, st.volatileGeometries, st.volatileTriangles,
+                             st.dynamicRefits, st.dynamicBuilds, st.movingObjects, st.objectsKept, st.objectKeeps,
+                             st.objectPolishes );
++            debug::Warning( "Metal profile: TLAS instances: {} pieces of the map, {} objects' own, {} with see-through "
++                            "triangles ({} triangles); tracing test {}",
++                            st.pieceInstances, st.objectInstances, st.alphaInstances, st.alphaTriangles,
++                            st.tracingTest == 0   ? "off"
++                            : st.tracingTest == 1 ? "1 (see-through traced as solid)"
++                            : st.tracingTest == 2 ? "2 (the map in one piece)"
++                            : st.tracingTest == 3 ? "3 (the map in 48 m pieces)"
++                            : st.tracingTest == 4 ? "4 (still objects in the map's pieces)"
++                                                  : "5 (still objects in the map's 48 m pieces)" );
+             debug::Warning( "Metal profile: kept geometry: {} geometries ({}k vertices) not copied this frame, {} of them "
+                             "repeated without their data; {} written into the frame's buffers; the arena {}k of {}k vertices",
+                             st.retainedGeometries, st.retainedVertices / 1000, st.repeatedGeometries, st.retainedCopies,
+diff --git a/Source/Metal/MetalScene.h b/Source/Metal/MetalScene.h
+index 25a11c3..45f3f21 100644
+--- a/Source/Metal/MetalScene.h
++++ b/Source/Metal/MetalScene.h
+@@ -127,6 +127,11 @@ public:
+         // repeated without its data, and copied into the frame's buffers this frame
+         size_t retainedGeometries, retainedVertices, repeatedGeometries, retainedCopies;
+         size_t arenaVertices, arenaCapacity;   // in use, and room for (vertices)
++        // Thief RT (0032): the tracing test in force (rgThiefTracingTest), and the TLAS instances
++        // by kind: kept pieces of the map, moving objects' own, and those with see-through
++        // (alpha tested) triangles, with how many triangles
++        int    tracingTest;
++        size_t pieceInstances, objectInstances, alphaInstances, alphaTriangles;
+     };
+     Stats lastStats{};
+ 
+diff --git a/Source/Metal/MetalScene.mm b/Source/Metal/MetalScene.mm
+index 3c3908c..dc7d2cd 100644
+--- a/Source/Metal/MetalScene.mm
++++ b/Source/Metal/MetalScene.mm
+@@ -29,6 +29,7 @@
+ #include "Utils.h"
+ 
+ #include <algorithm>
++#include <atomic>
+ #include <cstdio>
+ #include <cstdlib>
+ #include <cstring>
+@@ -38,6 +39,16 @@
+ static_assert( sizeof( RgPrimitiveVertex ) == sizeof( RTGL1::ShVertex ),
+                "Primitive vertices are copied to the GPU as is" );
+ 
++namespace RTGL1
++{
++// Thief RT (0032): a test of how the scene is laid out for tracing, from the game's panel
++// (rgThiefTracingTest), to find what makes long rays slow: 0 as it is; 1 see-through (alpha
++// tested) triangles traced as solid; 2 the kept map in one piece (a BLAS for each group, not
++// for each 24 m cell); 3 in 48 m pieces; 4 still objects taken into the map's pieces (not each
++// in a BLAS of its own); 5 both 4 and 3.
++std::atomic< int > g_thiefTracingTest{ 0 };
++}
++
+ namespace
+ {
+ 
+@@ -213,6 +224,31 @@ uint64_t ContentKey( const RTGL1::ShVertex* v, uint32_t vertexCount, const uint3
+     return h ? h : 1;
+ }
+ 
++// the cell a kept geometry is put in for the test (StableCell's three 21-bit fields)
++int64_t TestCell( int64_t cell, int test )
++{
++    if( test == 2 )
++    {
++        return 0;
++    }
++    if( test != 3 && test != 5 )
++    {
++        return cell;
++    }
++    int64_t key = 0;
++    for( int r = 2; r >= 0; r-- )
++    {
++        int64_t q = ( cell >> ( 21 * r ) ) & 0x1FFFFF;
++        if( q & 0x100000 )
++        {
++            q -= 0x200000;
++        }
++        q   = q >= 0 ? q / 2 : -( ( -q + 1 ) / 2 );
++        key = ( key << 21 ) | ( q & 0x1FFFFF );
++    }
++    return key;
++}
++
+ // Raze RT: the piece of the map a geometry is in, for the kept BLAS-es (MetalScene::StableGroup):
+ // a cell of this many metres, by the middle of its bounds
+ constexpr float StableCellSize = 24.0f;
+@@ -1559,6 +1595,8 @@ bool RTGL1::MetalScene::Build( id< MTLCommandBuffer > cmd, uint32_t rayCullMaskW
+ 
+     // a cell's few triangles stay with the rest (a BLAS of its own is not worth it)
+     constexpr size_t StableCellMinTriangles = 200;
++    const int        tracingTest            = std::clamp( g_thiefTracingTest.load(), 0, 5 );
++    size_t           pieceInstances = 0, objectInstances = 0, alphaInstances = 0, alphaTriangles = 0;
+     (void)StableMinTriangles;
+ 
+     struct CellWork
+@@ -1581,11 +1619,13 @@ bool RTGL1::MetalScene::Build( id< MTLCommandBuffer > cmd, uint32_t rayCullMaskW
+ 
+         std::vector< uint8_t > used( geoms.size(), 0 );
+         std::unordered_map< int64_t, std::vector< uint32_t > > byCell;
++        // (test 4, 5: a still object joins its piece of the map, however small next to it)
++        const bool absorbAll = tracingTest == 4 || tracingTest == 5;
+         if( stableOn )
+         {
+             for( uint32_t i = 0; i < geoms.size(); i++ )
+             {
+-                byCell[ geoms[ i ].cell ].push_back( i );
++                byCell[ TestCell( geoms[ i ].cell, tracingTest ) ].push_back( i );
+             }
+         }
+         // a kept cell with nothing in it this frame: gone
+@@ -1659,9 +1699,10 @@ bool RTGL1::MetalScene::Build( id< MTLCommandBuffer > cmd, uint32_t rayCullMaskW
+                     candidates += geoms[ i ].triangles;
+                 }
+             }
+-            const bool rebuild = candidates >= StableCellMinTriangles &&
++            const bool rebuild = candidates >= ( absorbAll && sg && !sg->keys.empty() ? size_t( 1 ) : StableCellMinTriangles ) &&
+                                  ( !sg || sg->keys.empty() ||
+-                                   ( frameCounter - sg->builtFrame >= StableAbsorbFrames && candidates * 20 >= sg->triangles ) );
++                                   ( frameCounter - sg->builtFrame >= StableAbsorbFrames &&
++                                     ( absorbAll || candidates * 20 >= sg->triangles ) ) );
+             bool fast = false;
+             if( rebuild )
+             {
+@@ -1939,9 +1980,18 @@ bool RTGL1::MetalScene::Build( id< MTLCommandBuffer > cmd, uint32_t rayCullMaskW
+         auto inst                 = MTLAccelerationStructureUserIDInstanceDescriptor{};
+         inst.transformationMatrix = ToPackedFloat4x3( transform );
+         // VK_GEOMETRY_INSTANCE_TRIANGLE_FRONT_COUNTERCLOCKWISE_BIT_KHR, VK_GEOMETRY_INSTANCE_FORCE_(NO_)OPAQUE_BIT_KHR
++        const bool seeThrough = pt == PassThrough::AlphaTested && tracingTest != 1;
++        if( pt == PassThrough::AlphaTested )
++        {
++            alphaInstances++;
++            for( const Geometry* g : geoms )
++            {
++                alphaTriangles += g->triangles;
++            }
++        }
+         inst.options = MTLAccelerationStructureInstanceOptionTriangleFrontFacingWindingCounterClockwise |
+-                       ( pt == PassThrough::AlphaTested ? MTLAccelerationStructureInstanceOptionNonOpaque
+-                                                        : MTLAccelerationStructureInstanceOptionOpaque ) |
++                       ( seeThrough ? MTLAccelerationStructureInstanceOptionNonOpaque
++                                    : MTLAccelerationStructureInstanceOptionOpaque ) |
+                        // (Raze RT: the rays cull the triangles seen from behind, but only the
+                        // one-sided group's -- see ShGlobalUniform::rayCullBackFaces)
+                        ( pt == PassThrough::OpaqueOneSided ? MTLAccelerationStructureInstanceOptionNone
+@@ -2001,6 +2051,7 @@ bool RTGL1::MetalScene::Build( id< MTLCommandBuffer > cmd, uint32_t rayCullMaskW
+         for( const CellWork& cw : cellWork[ gi ] )
+         {
+             addInstance( cw.sg->blas.blas, group, 0, IdentityTransform, cw.list );
++            pieceInstances++;
+         }
+         addInstance( f.dynamicBlas[ gi ].blas, group, 0, IdentityTransform, volatileLists[ gi ] );
+         for( const auto& [ key, list ] : objectLists[ gi ] )
+@@ -2009,6 +2060,7 @@ bool RTGL1::MetalScene::Build( id< MTLCommandBuffer > cmd, uint32_t rayCullMaskW
+             if( it != objectBlas[ gi ].end() )
+             {
+                 addInstance( it->second.slots[ it->second.useSlot % RingSize ].blas, group, 0, IdentityTransform, list );
++                objectInstances++;
+             }
+         }
+         for( const Geometry* g : instancedLists[ gi ] )
+@@ -2174,6 +2226,11 @@ bool RTGL1::MetalScene::Build( id< MTLCommandBuffer > cmd, uint32_t rayCullMaskW
+         lastStats.dynamicRefits  = dynamicRefits;
+         lastStats.dynamicBuilds  = dynamicBuilds;
+         lastStats.objectsKept    = lastObjectsKept;
++        lastStats.tracingTest     = tracingTest;
++        lastStats.pieceInstances  = pieceInstances;
++        lastStats.objectInstances = objectInstances;
++        lastStats.alphaInstances  = alphaInstances;
++        lastStats.alphaTriangles  = alphaTriangles;
+         lastStats.objectKeeps    = objectKeeps;
+         lastStats.objectPolishes = objectPolishes;
+         for( uint32_t gi = 0; gi < GroupCount; gi++ )
+diff --git a/Source/RTGL1.cpp b/Source/RTGL1.cpp
+index 90a533c..707cd4a 100644
+--- a/Source/RTGL1.cpp
++++ b/Source/RTGL1.cpp
+@@ -19,7 +19,8 @@
+ // SOFTWARE.
+ 
+ #ifdef RG_USE_METAL
+-    #include "Metal/MetalDevice.h"
++    #include <atomic>
++#include "Metal/MetalDevice.h"
+ #else
+     #include "VulkanDevice.h"
+ #endif
+@@ -303,6 +304,21 @@ void RGAPI_CALL rgUtilExportAsTGA( const void* pPixels,
+ 
+ 
+ 
++#ifdef RG_USE_METAL
++namespace RTGL1
++{
++extern std::atomic< int > g_thiefTracingTest;
++}
++extern "C"
++{
++// Thief RT (patch 0032): a test of how the scene is laid out for tracing (see MetalScene.mm)
++__attribute__( ( visibility( "default" ) ) ) void rgThiefTracingTest( int test )
++{
++    RTGL1::g_thiefTracingTest.store( test );
++}
++}
++#endif
++
+ extern "C"
+ {
+ #ifdef RG_USE_METAL

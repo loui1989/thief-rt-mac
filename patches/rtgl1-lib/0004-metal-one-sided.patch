@@ -1,0 +1,91 @@
+--- a/Source/Metal/MetalScene.h	2026-10-26 23:20:45.192775802 +0000
++++ b/Source/Metal/MetalScene.h	2026-10-26 23:19:52.325337871 +0000
+@@ -130,16 +130,20 @@
+         Opaque,
+         AlphaTested,
+         Refract,
++        // Raze RT: opaque, and seen only from the front (RT_PRIMITIVE_ONE_SIDED: a Build wall
++        // or floor): the only instances with triangle culling, the others disable it
++        OpaqueOneSided,
+     };
++    static constexpr uint32_t PassThroughCount = 4;
+     struct Group
+     {
+         Visibility  visibility;
+         PassThrough passThrough;
+ 
+         bool     operator==( const Group& ) const = default;
+-        uint32_t ToIndex() const { return uint32_t( visibility ) * 3 + uint32_t( passThrough ); }
++        uint32_t ToIndex() const { return uint32_t( visibility ) * PassThroughCount + uint32_t( passThrough ); }
+     };
+-    static constexpr uint32_t GroupCount = 6 * 3;
++    static constexpr uint32_t GroupCount = 6 * PassThroughCount;
+ 
+     static Group MakeGroup( const RgMeshInfo& mesh, const RgMeshPrimitiveInfo& prim );
+ 
+--- a/Source/Metal/MetalScene.mm	2026-10-26 23:20:45.193852120 +0000
++++ b/Source/Metal/MetalScene.mm	2026-10-26 23:19:52.325920535 +0000
+@@ -220,6 +220,10 @@
+     {
+         pt = PassThrough::Refract;
+     }
++    else if( prim.flags & ( 1u << 28 ) ) // (Raze RT: RT_PRIMITIVE_ONE_SIDED)
++    {
++        pt = PassThrough::OpaqueOneSided;
++    }
+     else
+     {
+         pt = PassThrough::Opaque;
+@@ -1059,7 +1063,8 @@
+         }
+         // SHIPPING_HACK
+         PassThrough pt = group.passThrough;
+-        if( pt == PassThrough::Opaque && ( meshFlags & ( RG_MESH_FORCE_GLASS | RG_MESH_FORCE_WATER ) ) )
++        if( ( pt == PassThrough::Opaque || pt == PassThrough::OpaqueOneSided ) &&
++            ( meshFlags & ( RG_MESH_FORCE_GLASS | RG_MESH_FORCE_WATER ) ) )
+         {
+             pt = PassThrough::Refract;
+         }
+@@ -1116,7 +1121,11 @@
+         // VK_GEOMETRY_INSTANCE_TRIANGLE_FRONT_COUNTERCLOCKWISE_BIT_KHR, VK_GEOMETRY_INSTANCE_FORCE_(NO_)OPAQUE_BIT_KHR
+         inst.options = MTLAccelerationStructureInstanceOptionTriangleFrontFacingWindingCounterClockwise |
+                        ( pt == PassThrough::AlphaTested ? MTLAccelerationStructureInstanceOptionNonOpaque
+-                                                        : MTLAccelerationStructureInstanceOptionOpaque );
++                                                        : MTLAccelerationStructureInstanceOptionOpaque ) |
++                       // (Raze RT: the rays cull the triangles seen from behind, but only the
++                       // one-sided group's -- see ShGlobalUniform::rayCullBackFaces)
++                       ( pt == PassThrough::OpaqueOneSided ? MTLAccelerationStructureInstanceOptionNone
++                                                           : MTLAccelerationStructureInstanceOptionDisableTriangleCulling );
+         inst.mask                            = mask;
+         inst.intersectionFunctionTableOffset = 0;
+         inst.accelerationStructureIndex      = uint32_t( f.usedBlas.size() );
+@@ -1145,7 +1154,7 @@
+ 
+     for( uint32_t gi = 0; gi < GroupCount; gi++ )
+     {
+-        const auto group = Group{ Visibility( gi / 3 ), PassThrough( gi % 3 ) };
++        const auto group = Group{ Visibility( gi / PassThroughCount ), PassThrough( gi % PassThroughCount ) };
+         addInstance( staticBlas[ gi ].blas, group, 0, IdentityTransform, toPointers( staticGeoms[ gi ] ) );
+     }
+     for( const ReplacementInstance& ri : replacementInstances )
+@@ -1168,7 +1177,7 @@
+     }
+     for( uint32_t gi = 0; gi < GroupCount; gi++ )
+     {
+-        const auto group = Group{ Visibility( gi / 3 ), PassThrough( gi % 3 ) };
++        const auto group = Group{ Visibility( gi / PassThroughCount ), PassThrough( gi % PassThroughCount ) };
+         if( !stableLists[ gi ].empty() )
+         {
+             addInstance( stable[ gi ].blas.blas, group, 0, IdentityTransform, stableLists[ gi ] );
+--- a/Source/Metal/MetalDevice.mm	2026-10-26 23:20:46.826609618 +0000
++++ b/Source/Metal/MetalDevice.mm	2026-10-26 23:19:52.327697217 +0000
+@@ -2540,6 +2540,9 @@
+             gu.fluidEnabled = impl->fluid && impl->fluid->Active();
+             RG_SET_VEC3_A( gu.fluidColor, impl->fluidColor.data );
+             gu.texFilterParams[ 1 ] = mipLodBias;
++            // Raze RT: the rays cull triangles seen from behind -- in the one-sided group only
++            // (MetalScene: every other instance disables culling), so on whatever was asked
++            gu.rayCullBackFaces = 1;
+ 
+             // Raze RT, dynamic resolution: the previous frame's size, by which its framebuffers
+             // (the _Prev ones, the histories) are laid out -- in two spare fields, read by the

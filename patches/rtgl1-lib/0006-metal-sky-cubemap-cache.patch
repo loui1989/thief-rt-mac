@@ -1,0 +1,190 @@
+From 9ce2bab9ad365e71dbc7a80bfeee1aedb529c320 Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Tue, 27 Oct 2026 12:19:46 +0000
+Subject: [PATCH] Metal: the sky cubemap is kept while the sky is as it was
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_015h6T8xtWYtnCAyG7nuxUVJ
+---
+ Source/Metal/MetalDevice.mm     | 23 ++++++++++---
+ Source/Metal/MetalRasterizer.h  | 15 +++++++-
+ Source/Metal/MetalRasterizer.mm | 61 ++++++++++++++++++++++++++++++++-
+ 3 files changed, 93 insertions(+), 6 deletions(-)
+
+diff --git a/Source/Metal/MetalDevice.mm b/Source/Metal/MetalDevice.mm
+index 2b43ebc..b15b126 100644
+--- a/Source/Metal/MetalDevice.mm
++++ b/Source/Metal/MetalDevice.mm
+@@ -1685,7 +1685,7 @@ struct RTGL1::MetalDevice::Impl
+         double            sincePrint{ 0 }; // ms, between the last two prints
+         double   waitFrame{ 0 }, startFrame{ 0 }, betweenFrames{ 0 }, uploads{ 0 }, sceneBuild{ 0 },
+                  render{ 0 }, drawFrame{ 0 }, clouds{ 0 }, skyCubemap{ 0 }, skyAlbedo{ 0 };
+-        uint64_t skyDraws{ 0 };
++        uint64_t skyDraws{ 0 }, skyReused{ 0 };
+         uint64_t primitives{ 0 }, frames{ 0 };
+ 
+         static double Ms( Clock::time_point a, Clock::time_point b )
+@@ -2718,7 +2718,20 @@ void RTGL1::MetalDevice::DrawFrame( const RgDrawFrameInfo* pInfo )
+                 // Doom 64 RT: the volumetric cloud map, marched once, read by both sky passes
+                 impl->pathTracer->ProcessClouds( cmd, b, impl->frameIndex, impl->uniform.cloudParams0[ 0 ] > 0.5f );
+                 const auto tClouds = Impl::CpuProfile::Clock::now();
+-                impl->rasterizer->RenderSkyCubemap( cmd, *impl->rtShaders, b );
++                // (kept while the sky is as it was: not with the clouds, they move)
++                {
++                    const auto& sp = pnext::get< RgDrawFrameSkyParams >( *pInfo );
++                    uint64_t    salt = 0;
++                    for( float f : { sp.skyViewerPosition.data[ 0 ], sp.skyViewerPosition.data[ 1 ], sp.skyViewerPosition.data[ 2 ] } )
++                    {
++                        uint32_t u;
++                        memcpy( &u, &f, sizeof( u ) );
++                        salt = ( salt ^ u ) * 0x100000001B3ull;
++                    }
++                    const bool clouds = impl->uniform.cloudParams0[ 0 ] > 0.5f;
++                    impl->rasterizer->RenderSkyCubemap( cmd, *impl->rtShaders, b, salt, clouds );
++                    impl->cpu.skyReused += impl->rasterizer->SkyCubemapReused() ? 1 : 0;
++                }
+ 
+                 impl->cpu.skyCubemap += Impl::CpuProfile::Ms( tClouds, Impl::CpuProfile::Clock::now() );
+                 impl->cpu.clouds += Impl::CpuProfile::Ms( tSky, tClouds );
+@@ -3182,10 +3195,11 @@ void RTGL1::MetalDevice::DrawFrame( const RgDrawFrameInfo* pInfo )
+         debug::Warning( "Metal profile (CPU, ms per frame): waiting for a frame slot {:.2f}, StartFrame {:.2f}, "
+                         "game + uploads {:.2f} (uploads {:.2f}, {:.0f} primitives), DrawFrame {:.2f} "
+                         "(acceleration structures {:.2f}, path tracer encoding {:.2f}, clouds {:.2f}, "
+-                        "sky cubemap {:.2f}, sky to albedo {:.2f}; {:.0f} sky draws)",
++                        "sky cubemap {:.2f}, sky to albedo {:.2f}; {:.0f} sky draws, sky cubemap kept {:.0f}% of frames)",
+                         c.waitFrame / n, c.startFrame / n, c.betweenFrames / n, c.uploads / n,
+                         double( c.primitives ) / n, c.drawFrame / n, c.sceneBuild / n, c.render / n,
+-                        c.clouds / n, c.skyCubemap / n, c.skyAlbedo / n, double( c.skyDraws ) / n );
++                        c.clouds / n, c.skyCubemap / n, c.skyAlbedo / n, double( c.skyDraws ) / n,
++                        100.0 * double( c.skyReused ) / n );
+         if( impl->scene )
+         {
+             const auto& st = impl->scene->lastStats;
+@@ -3199,6 +3213,7 @@ void RTGL1::MetalDevice::DrawFrame( const RgDrawFrameInfo* pInfo )
+         c.waitFrame = c.startFrame = c.betweenFrames = c.uploads = c.sceneBuild = c.render = c.drawFrame = 0;
+         c.clouds = c.skyCubemap = c.skyAlbedo = 0;
+         c.skyDraws = 0;
++        c.skyReused = 0;
+         c.primitives = 0;
+         c.frames     = 0;
+     }
+diff --git a/Source/Metal/MetalRasterizer.h b/Source/Metal/MetalRasterizer.h
+index 916e6e5..46c901c 100644
+--- a/Source/Metal/MetalRasterizer.h
++++ b/Source/Metal/MetalRasterizer.h
+@@ -84,7 +84,17 @@ public:
+     // (RsRasterizerMultiview.vert, Doom 64 RT's RsSkyCubemap.frag with the volumetric clouds),
+     // a pass per face; the faces' view-projections are ShGlobalUniform::viewProjCubemap.
+     // Returns false, if there are no sky primitives.
+-    bool             RenderSkyCubemap( id< MTLCommandBuffer > cmd, MetalComputePipelines& shaders, const MetalBindingTable& bindings );
++    // Raze RT: the cubemap is kept while the sky's draws are as they were ('salt': the rest of
++    // what it depends on, the sky viewer's place; 'force': drawn regardless -- the clouds move);
++    // its dome follows the camera, it is drawn again as the camera moves some way, and
++    // every second anyway. RTGL1_METAL_SKY_CACHE=0: every frame, as before.
++    bool             RenderSkyCubemap( id< MTLCommandBuffer > cmd,
++                                       MetalComputePipelines& shaders,
++                                       const MetalBindingTable& bindings,
++                                       uint64_t salt  = 0,
++                                       bool     force = true );
++    // whether the last RenderSkyCubemap kept the cubemap of before
++    bool             SkyCubemapReused() const { return skyCubemapReused; }
+     id< MTLTexture > SkyCubemap() const { return skyCubemap; }
+ 
+     struct PassParams
+@@ -238,6 +248,9 @@ private:
+ 
+     id< MTLTexture > skyCubemap;
+     id< MTLTexture > skyDepth;
++    uint64_t         skyCubemapKey{ 0 };
++    uint32_t         skyCubemapAge{ 0 };
++    bool             skyCubemapReused{ false };
+     // RasterPass: a render size depth buffer, and for the classic pass of the target's size
+     id< MTLTexture > renderDepth;
+     id< MTLTexture > classicDepth;
+diff --git a/Source/Metal/MetalRasterizer.mm b/Source/Metal/MetalRasterizer.mm
+index 05c6168..ed98be0 100644
+--- a/Source/Metal/MetalRasterizer.mm
++++ b/Source/Metal/MetalRasterizer.mm
+@@ -35,6 +35,7 @@
+ #include <algorithm>
+ #include <cstring>
+ #include <cmath>
++#include <cstdlib>
+ #include <limits>
+ #include <optional>
+ 
+@@ -895,12 +896,70 @@ void RTGL1::MetalRasterizer::EncodeLegacyDraw( id< MTLRenderCommandEncoder > enc
+ 
+ bool RTGL1::MetalRasterizer::RenderSkyCubemap( id< MTLCommandBuffer >   cmd,
+                                                MetalComputePipelines&   shaders,
+-                                               const MetalBindingTable& bindings )
++                                               const MetalBindingTable& bindings,
++                                               uint64_t                 salt,
++                                               bool                     force )
+ {
++    skyCubemapReused = false;
+     if( !HasDraws( Type::Sky ) )
+     {
+         return false;
+     }
++
++    // Raze RT: what the cubemap is drawn from -- the sky's draws: their vertices, textures,
++    // colours, states, and where they are (their place to about half a metre: the dome is
++    // ~300 m around the camera, and a step is no change to see)
++    {
++        static const bool cacheOn = [] {
++            const char* e = std::getenv( "RTGL1_METAL_SKY_CACHE" );
++            return !( e && e[ 0 ] == '0' );
++        }();
++        uint64_t k   = 0x9E3779B97F4A7C15ull ^ salt;
++        auto     mix = [ &k ]( uint64_t v ) {
++            k ^= v + 0x9E3779B97F4A7C15ull + ( k << 6 ) + ( k >> 2 );
++            k *= 0xFF51AFD7ED558CCDull;
++        };
++        auto bits = []( float f ) {
++            uint32_t u;
++            memcpy( &u, &f, sizeof( u ) );
++            return uint64_t( u );
++        };
++        for( const DrawInfo& d : draws[ size_t( Type::Sky ) ] )
++        {
++            mix( d.texture_base );
++            mix( d.colorFactor_base );
++            mix( d.pipelineState | ( uint64_t( d.skyCloudMode ) << 32 ) );
++            mix( d.vertexCount | ( uint64_t( d.indexCount ) << 32 ) );
++            for( int r = 0; r < 3; r++ )
++            {
++                for( int c = 0; c < 3; c++ )
++                {
++                    mix( bits( d.transform.matrix[ r ][ c ] ) );
++                }
++                mix( uint64_t( int64_t( std::floor( d.transform.matrix[ r ][ 3 ] * 2.0f ) ) ) );
++            }
++            for( uint32_t i = 0; i < d.vertexCount && d.firstVertex + i < vertices.size(); i++ )
++            {
++                const RgPrimitiveVertex& v = vertices[ d.firstVertex + i ];
++                mix( bits( v.position[ 0 ] ) | ( bits( v.position[ 1 ] ) << 32 ) );
++                mix( bits( v.position[ 2 ] ) | ( uint64_t( v.color ) << 32 ) );
++                mix( bits( v.texCoord[ 0 ] ) | ( bits( v.texCoord[ 1 ] ) << 32 ) );
++            }
++            for( uint32_t i = 0; i < d.indexCount && d.firstIndex + i < indices.size(); i++ )
++            {
++                mix( indices[ d.firstIndex + i ] );
++            }
++        }
++        k |= 1; // (0: none yet)
++        if( cacheOn && !force && k == skyCubemapKey && skyCubemapAge < 60 )
++        {
++            skyCubemapAge++;
++            skyCubemapReused = true;
++            return true;
++        }
++        skyCubemapKey = k;
++        skyCubemapAge = 0;
++    }
+     UploadGeometry();
+ 
+     const auto size = uint32_t( skyCubemap.width );
+-- 
+2.43.0
+

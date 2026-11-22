@@ -1,0 +1,189 @@
+From: Claude <noreply@anthropic.com>
+Date: Tue, 10 Nov 2026 19:44:17 +0100
+Subject: [PATCH 1/2] Thief: an unchanged object keeps its BLAS
+
+Each moving object of some size has a BLAS of its own (objectBlas), refitted
+every frame from the frame before's. Most of them are not moving: a statue,
+a crate, a tree kept out of view for its shadow come the same frame after
+frame, and over a hundred refits a frame were most of the 2 ms the graphics
+card spent on 'Build dynamic BLAS' in Reflections in Red. An object whose
+geometry is the same as last frame (its content keys) now keeps the BLAS it
+had: nothing is encoded for it. The BLAS a frame uses is the slot last
+written; a changed object is written into a slot no frame in flight reads,
+refitted from the one before. Unchanged for 30 frames after a refit or a
+fast build, it is built once more for tracing. RTGL1_METAL_NO_OBJECT_KEEP=1:
+refitted each frame, as before. The stats line counts them.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_0137FfF2kXgpYFjmGxKqakLV
+---
+ Source/Metal/MetalDevice.mm |  6 ++--
+ Source/Metal/MetalScene.h   | 17 ++++++++-
+ Source/Metal/MetalScene.mm  | 69 +++++++++++++++++++++++++++++++++----
+ 3 files changed, 82 insertions(+), 10 deletions(-)
+
+diff --git a/Source/Metal/MetalDevice.mm b/Source/Metal/MetalDevice.mm
+index 24adf55..37f0322 100644
+--- a/Source/Metal/MetalDevice.mm
++++ b/Source/Metal/MetalDevice.mm
+@@ -3324,12 +3324,14 @@ void RTGL1::MetalDevice::DrawFrame( const RgDrawFrameInfo* pInfo )
+                             "{} static geometries, {} TLAS instances, {} geometry infos ({} polished); "
+                             "kept: {} geometries ({} triangles) in {} pieces, {} piece rebuilds so far; "
+                             "models instanced: {} ({} kept BLAS-es, {} built so far); rebuilt each frame: {} geometries ({} triangles); "
+-                            "moving geometry's BLAS-es so far: {} refitted, {} built ({} moving objects with their own)",
++                            "moving geometry's BLAS-es so far: {} refitted, {} built ({} moving objects with their own, {} of them "
++                            "kept as they were this frame; {} kept so far, {} built again for tracing)",
+                             st.dynamicGeometries, st.dynamicTriangles, st.dynamicVertices,
+                             st.staticGeometries, st.tlasInstances, st.geometryInfos, st.polishedGeometries,
+                             st.stableGeometries, st.stableTriangles, st.stableCells, st.stableRebuilds,
+                             st.instancedModels, st.modelBlases, st.modelBuilds, st.volatileGeometries, st.volatileTriangles,
+-                            st.dynamicRefits, st.dynamicBuilds, st.movingObjects );
++                            st.dynamicRefits, st.dynamicBuilds, st.movingObjects, st.objectsKept, st.objectKeeps,
++                            st.objectPolishes );
+             debug::Warning( "Metal profile: kept geometry: {} geometries ({}k vertices) not copied this frame, {} of them "
+                             "repeated without their data; {} written into the frame's buffers; the arena {}k of {}k vertices",
+                             st.retainedGeometries, st.retainedVertices / 1000, st.repeatedGeometries, st.retainedCopies,
+diff --git a/Source/Metal/MetalScene.h b/Source/Metal/MetalScene.h
+index b4cbd96..25a11c3 100644
+--- a/Source/Metal/MetalScene.h
++++ b/Source/Metal/MetalScene.h
+@@ -121,6 +121,8 @@ public:
+         // Thief RT: the frames' dynamic BLAS-es refitted and built since the last stats
+         size_t dynamicRefits, dynamicBuilds;
+         size_t movingObjects;   // with a BLAS of their own (objectBlas)
++        size_t objectsKept;     // of them, as they were (their BLAS used again as it was), this frame
++        size_t objectKeeps, objectPolishes;   // since the start
+         // Thief RT (0028): of the dynamic geometry, kept in the arena (not copied this frame),
+         // repeated without its data, and copied into the frame's buffers this frame
+         size_t retainedGeometries, retainedVertices, repeatedGeometries, retainedCopies;
+@@ -469,12 +471,25 @@ private:
+     // anything in it changed -- a guard coming into view, a particle -- and with it every
+     // other moving thing. Its key: the game's object (Thief RT gives an object's parts the
+     // ids 0x500000000 + object << 12 + part, so objectId >> 12).
++    //
++    // An object that comes the same as the frame before (a statue, a crate, a tree kept out of
++    // view for its shadow -- most of them, most frames) keeps the BLAS it had: nothing is
++    // refitted or built for it. So the BLAS a frame uses is the slot last written (useSlot),
++    // not the frame's ring's; a changed one is written into a slot no frame in flight uses
++    // (usedFrame), refitted from the one before. Unchanged a while after a refit or a fast
++    // build, it is built once more for tracing. (RTGL1_METAL_NO_OBJECT_KEEP=1: refitted each
++    // frame, as before.)
+     struct ObjectBlas
+     {
+         std::array< BuiltBlas, RingSize > slots;
+-        uint32_t                          lastRing{ ~0u };
++        std::array< uint32_t, RingSize >  usedFrame{};   // 0: never
++        uint32_t                          useSlot{ ~0u };
+         uint32_t                          lastFrame{ 0 };
++        uint64_t                          contentSig{ 0 };
++        uint32_t                          sameFrames{ 0 };
++        bool                              polished{ false };
+     };
++    size_t objectKeeps{ 0 }, objectPolishes{ 0 };
+     std::array< std::unordered_map< uint64_t, ObjectBlas >, GroupCount > objectBlas;
+     std::unordered_map< uint64_t, uint32_t >                             localAge;
+     size_t                                                               modelBuilds{ 0 };
+diff --git a/Source/Metal/MetalScene.mm b/Source/Metal/MetalScene.mm
+index efb7ab5..3c3908c 100644
+--- a/Source/Metal/MetalScene.mm
++++ b/Source/Metal/MetalScene.mm
+@@ -1715,6 +1715,8 @@ bool RTGL1::MetalScene::Build( id< MTLCommandBuffer > cmd, uint32_t rayCullMaskW
+         }
+     }
+ 
++    size_t lastObjectsKept = 0;   // (this frame's, for the stats)
++
+     // Thief RT: the moving objects of some size out of the shared dynamic BLAS, each into its
+     // own (objectBlas); the small rest stays (RTGL1_METAL_NO_OBJECT_BLAS=1: all stays)
+     std::array< std::vector< std::pair< uint64_t, std::vector< const Geometry* > > >, GroupCount > objectLists;
+@@ -1761,15 +1763,65 @@ bool RTGL1::MetalScene::Build( id< MTLCommandBuffer > cmd, uint32_t rayCullMaskW
+             BuildBlas( enc, f.dynamicBlas[ gi ], volatileLists[ gi ], f.vertices, f.indices, true, true, @"Dynamic BLAS",
+                        &Prev().dynamicBlas[ gi ] );
+             static const BuiltBlas noneBefore{};
++            static const bool      keepOn = !std::getenv( "RTGL1_METAL_NO_OBJECT_KEEP" );
++            // (unchanged this many frames after a refit or a fast build: built for tracing)
++            constexpr uint32_t PolishAfter = 30;
+             for( const auto& [ key, list ] : objectLists[ gi ] )
+             {
+                 ObjectBlas& ob = objectBlas[ gi ][ key ];
+-                // refitted from the frame before's, if it had one (else built, refittable)
+-                const bool       had  = ob.lastRing < RingSize && ob.lastRing != ring && ob.lastFrame + 1 == frameCounter;
+-                const BuiltBlas* from = had ? &ob.slots[ ob.lastRing ] : &noneBefore;
+-                BuildBlas( enc, ob.slots[ ring ], list, f.vertices, f.indices, true, true, @"Object BLAS", from );
+-                ob.lastRing  = ring;
+-                ob.lastFrame = frameCounter;
++                uint64_t    sig = 0x84222325cbf29ce4ull ^ uint64_t( list.size() );
++                for( const Geometry* g : list )
++                {
++                    sig ^= g->contentKey + 0x9E3779B97F4A7C15ull + ( sig << 6 ) + ( sig >> 2 );
++                    sig *= 0x100000001B3ull;
++                    sig ^= uint64_t( g->alphaTested ? 1 : 2 ) | ( uint64_t( g->info.indexCount ) << 8 );
++                }
++                const bool live = ob.useSlot < RingSize && ob.lastFrame + 1 == frameCounter &&
++                                  ob.slots[ ob.useSlot ].blas != nil;
++                // a slot no frame in flight reads (one of RingSize is always free: the frames in
++                // flight are the RingSize - 1 before this one, each using one)
++                auto freeSlot = [ & ]() {
++                    for( uint32_t k = 0; k < RingSize; k++ )
++                    {
++                        const uint32_t s = ( ring + k ) % RingSize;
++                        if( s != ob.useSlot && ( ob.usedFrame[ s ] == 0 || ob.usedFrame[ s ] + RingSize <= frameCounter ) )
++                        {
++                            return s;
++                        }
++                    }
++                    return ring;   // (not reached)
++                };
++                if( keepOn && live && sig == ob.contentSig )
++                {
++                    ob.sameFrames++;
++                    if( !ob.polished && ob.sameFrames >= PolishAfter )
++                    {
++                        const uint32_t s = freeSlot();
++                        BuildBlas( enc, ob.slots[ s ], list, f.vertices, f.indices, true, false, @"Object BLAS (kept)", nullptr );
++                        ob.useSlot  = s;
++                        ob.polished = true;
++                        objectPolishes++;
++                    }
++                    else
++                    {
++                        objectKeeps++;
++                        lastObjectsKept++;
++                    }
++                }
++                else
++                {
++                    // refitted from the one before, if it had one (else built, refittable)
++                    const uint32_t   s    = keepOn ? freeSlot() : ring;
++                    const bool       had  = live && ob.useSlot != s;
++                    const BuiltBlas* from = had ? &ob.slots[ ob.useSlot ] : &noneBefore;
++                    BuildBlas( enc, ob.slots[ s ], list, f.vertices, f.indices, true, true, @"Object BLAS", from );
++                    ob.useSlot    = s;
++                    ob.contentSig = sig;
++                    ob.sameFrames = 0;
++                    ob.polished   = false;
++                }
++                ob.usedFrame[ ob.useSlot ] = frameCounter;
++                ob.lastFrame               = frameCounter;
+             }
+             for( const Geometry* g : instancedLists[ gi ] )
+             {
+@@ -1956,7 +2008,7 @@ bool RTGL1::MetalScene::Build( id< MTLCommandBuffer > cmd, uint32_t rayCullMaskW
+             auto it = objectBlas[ gi ].find( key );
+             if( it != objectBlas[ gi ].end() )
+             {
+-                addInstance( it->second.slots[ ring ].blas, group, 0, IdentityTransform, list );
++                addInstance( it->second.slots[ it->second.useSlot % RingSize ].blas, group, 0, IdentityTransform, list );
+             }
+         }
+         for( const Geometry* g : instancedLists[ gi ] )
+@@ -2121,6 +2173,9 @@ bool RTGL1::MetalScene::Build( id< MTLCommandBuffer > cmd, uint32_t rayCullMaskW
+         lastStats.stableRebuilds = stableRebuilds;
+         lastStats.dynamicRefits  = dynamicRefits;
+         lastStats.dynamicBuilds  = dynamicBuilds;
++        lastStats.objectsKept    = lastObjectsKept;
++        lastStats.objectKeeps    = objectKeeps;
++        lastStats.objectPolishes = objectPolishes;
+         for( uint32_t gi = 0; gi < GroupCount; gi++ )
+         {
+             lastStats.instancedModels += instancedLists[ gi ].size();

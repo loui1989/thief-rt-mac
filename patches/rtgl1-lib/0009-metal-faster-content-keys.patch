@@ -1,0 +1,164 @@
+From bf4ce91964ec2ea65a10c8585aa8a1a1c2c2efe5 Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Tue, 27 Oct 2026 12:42:28 +0000
+Subject: [PATCH] Metal: content keys in four lanes of 64-bit words (5x
+ faster); the uploads' scene part in the profile
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_015h6T8xtWYtnCAyG7nuxUVJ
+---
+ Source/Metal/MetalDevice.mm | 21 ++++++++---
+ Source/Metal/MetalScene.mm  | 70 +++++++++++++++++++++++++++----------
+ 2 files changed, 69 insertions(+), 22 deletions(-)
+
+diff --git a/Source/Metal/MetalDevice.mm b/Source/Metal/MetalDevice.mm
+index e3b1dca..5857d18 100644
+--- a/Source/Metal/MetalDevice.mm
++++ b/Source/Metal/MetalDevice.mm
+@@ -1685,6 +1685,9 @@ struct RTGL1::MetalDevice::Impl
+         double            sincePrint{ 0 }; // ms, between the last two prints
+         double   waitFrame{ 0 }, startFrame{ 0 }, betweenFrames{ 0 }, uploads{ 0 }, sceneBuild{ 0 },
+                  render{ 0 }, drawFrame{ 0 }, clouds{ 0 }, skyCubemap{ 0 }, skyAlbedo{ 0 };
++        // Raze RT: of the uploads, adding to the scene (copies, content keys, geometry infos)
++        double   sceneAdd{ 0 };
++        uint64_t uploadVerts{ 0 };
+         uint64_t skyDraws{ 0 }, skyReused{ 0 };
+         uint64_t primitives{ 0 }, frames{ 0 };
+ 
+@@ -3193,11 +3196,11 @@ void RTGL1::MetalDevice::DrawFrame( const RgDrawFrameInfo* pInfo )
+         debug::Warning( "Metal profile: {:.1f} fps over the last {:.1f} s",
+                         n * 1000.0 / std::max( 1.0, c.sincePrint ), c.sincePrint / 1000.0 );
+         debug::Warning( "Metal profile (CPU, ms per frame): waiting for a frame slot {:.2f}, StartFrame {:.2f}, "
+-                        "game + uploads {:.2f} (uploads {:.2f}, {:.0f} primitives), DrawFrame {:.2f} "
++                        "game + uploads {:.2f} (uploads {:.2f}: scene {:.2f}, {:.0f} primitives, {:.0f}k vertices), DrawFrame {:.2f} "
+                         "(acceleration structures {:.2f}, path tracer encoding {:.2f}, clouds {:.2f}, "
+                         "sky cubemap {:.2f}, sky to albedo {:.2f}; {:.0f} sky draws, sky cubemap kept {:.0f}% of frames)",
+-                        c.waitFrame / n, c.startFrame / n, c.betweenFrames / n, c.uploads / n,
+-                        double( c.primitives ) / n, c.drawFrame / n, c.sceneBuild / n, c.render / n,
++                        c.waitFrame / n, c.startFrame / n, c.betweenFrames / n, c.uploads / n, c.sceneAdd / n,
++                        double( c.primitives ) / n, double( c.uploadVerts ) / n / 1000.0, c.drawFrame / n, c.sceneBuild / n, c.render / n,
+                         c.clouds / n, c.skyCubemap / n, c.skyAlbedo / n, double( c.skyDraws ) / n,
+                         100.0 * double( c.skyReused ) / n );
+         if( impl->scene )
+@@ -3214,6 +3217,8 @@ void RTGL1::MetalDevice::DrawFrame( const RgDrawFrameInfo* pInfo )
+         }
+         c.waitFrame = c.startFrame = c.betweenFrames = c.uploads = c.sceneBuild = c.render = c.drawFrame = 0;
+         c.clouds = c.skyCubemap = c.skyAlbedo = 0;
++        c.sceneAdd    = 0;
++        c.uploadVerts = 0;
+         c.skyDraws = 0;
+         c.skyReused = 0;
+         c.primitives = 0;
+@@ -3387,7 +3392,15 @@ void RTGL1::MetalDevice::UploadMeshPrimitive( const RgMeshInfo*          pMesh,
+     }
+ 
+     // upload a primitive, potentially loading replacements
+-    impl->sceneManager->UploadPrimitive( impl->frameIndex, mesh, prim );
++    {
++        const auto tScene = impl->cpu.enabled ? Impl::CpuProfile::Clock::now() : Impl::CpuProfile::Clock::time_point{};
++        impl->sceneManager->UploadPrimitive( impl->frameIndex, mesh, prim );
++        if( impl->cpu.enabled )
++        {
++            impl->cpu.sceneAdd += Impl::CpuProfile::Ms( tScene, Impl::CpuProfile::Clock::now() );
++            impl->cpu.uploadVerts += prim.vertexCount;
++        }
++    }
+ 
+     if( impl->lightmapScreenCoverage > 0 )
+     {
+diff --git a/Source/Metal/MetalScene.mm b/Source/Metal/MetalScene.mm
+index 520257e..ebf306a 100644
+--- a/Source/Metal/MetalScene.mm
++++ b/Source/Metal/MetalScene.mm
+@@ -126,36 +126,70 @@ constexpr RgTransform IdentityTransform = { {
+ } };
+ 
+ // Raze RT: what a BLAS sees of a geometry -- its positions, indices and transform
+-// (and 'local': without the transform -- the shape alone, 0 for an untransformed geometry)
++// (and 'local': without the transform -- the shape alone, 0 for an untransformed geometry).
++// Four independent lanes of 64-bit words: one chain of a multiply per 32-bit word took
++// ~2 ms a frame over a few voxel models' 300k vertices; this, ~0.4 ms
++namespace
++{
++inline uint64_t KeyMix( uint64_t h, uint64_t w )
++{
++    h ^= w;
++    h *= 0xBF58476D1CE4E5B9ull;
++    return h ^ ( h >> 29 );
++}
++}
+ uint64_t ContentKey( const RTGL1::ShVertex* v, uint32_t vertexCount, const uint32_t* idx, uint32_t indexCount, const RgTransform& t, uint64_t* local = nullptr )
+ {
+-    uint64_t h   = 0x9E3779B97F4A7C15ull ^ ( uint64_t( vertexCount ) << 32 ) ^ indexCount;
+-    auto     mix = [ &h ]( uint32_t w ) {
+-        h ^= w;
+-        h *= 0xBF58476D1CE4E5B9ull;
+-        h ^= h >> 31;
+-    };
+-    for( uint32_t i = 0; i < vertexCount; i++ )
++    uint64_t a = 0x9E3779B97F4A7C15ull ^ ( uint64_t( vertexCount ) << 32 ) ^ indexCount;
++    uint64_t b = 0xC2B2AE3D27D4EB4Full, c = 0x165667B19E3779F9ull, d = 0x27D4EB2F165667C5ull;
++
++    uint32_t i = 0;
++    for( ; i + 2 <= vertexCount; i += 2 )
++    {
++        uint64_t xy0, xy1;
++        uint32_t z0, z1;
++        memcpy( &xy0, &v[ i ].position[ 0 ], 8 );
++        memcpy( &z0, &v[ i ].position[ 2 ], 4 );
++        memcpy( &xy1, &v[ i + 1 ].position[ 0 ], 8 );
++        memcpy( &z1, &v[ i + 1 ].position[ 2 ], 4 );
++        a = KeyMix( a, xy0 );
++        b = KeyMix( b, uint64_t( z0 ) | ( uint64_t( z1 ) << 32 ) );
++        c = KeyMix( c, xy1 );
++    }
++    for( ; i < vertexCount; i++ )
+     {
+-        uint32_t p[ 3 ];
+-        memcpy( p, v[ i ].position, sizeof( p ) );
+-        mix( p[ 0 ] );
+-        mix( p[ 1 ] );
+-        mix( p[ 2 ] );
++        uint64_t xy;
++        uint32_t z;
++        memcpy( &xy, &v[ i ].position[ 0 ], 8 );
++        memcpy( &z, &v[ i ].position[ 2 ], 4 );
++        a = KeyMix( a, xy );
++        d = KeyMix( d, z );
+     }
+-    for( uint32_t i = 0; i < indexCount; i++ )
++    uint32_t j = 0;
++    for( ; j + 8 <= indexCount; j += 8 )
+     {
+-        mix( idx[ i ] );
++        uint64_t w[ 4 ];
++        memcpy( w, idx + j, sizeof( w ) );
++        a = KeyMix( a, w[ 0 ] );
++        b = KeyMix( b, w[ 1 ] );
++        c = KeyMix( c, w[ 2 ] );
++        d = KeyMix( d, w[ 3 ] );
+     }
++    for( ; j < indexCount; j++ )
++    {
++        d = KeyMix( d, idx[ j ] );
++    }
++    uint64_t h = KeyMix( KeyMix( KeyMix( a, b ), c ), d );
++
+     if( local )
+     {
+         *local = memcmp( &t, &IdentityTransform, sizeof( t ) ) != 0 ? ( h | 1 ) : 0;
+     }
+-    uint32_t m[ 12 ];
++    uint64_t m[ 6 ];
+     memcpy( m, t.matrix, sizeof( m ) );
+-    for( uint32_t w : m )
++    for( uint64_t w : m )
+     {
+-        mix( w );
++        h = KeyMix( h, w );
+     }
+     return h ? h : 1;
+ }
+-- 
+2.43.0
+

@@ -1,0 +1,112 @@
+--- a/Source/Metal/MetalScene.h
++++ b/Source/Metal/MetalScene.h
+@@ -320,6 +320,22 @@
+     std::vector< ReplacementInstance > replacementInstances;
+     size_t                             frameGeomCount{ 0 };
+ 
++    // Thief RT: a primitive the application marks unchanged since it last gave it
++    // (RT_PRIMITIVE_UNCHANGED, 1u << 29): its content key and cell are as they were then,
++    // not found again from its every vertex each frame
++    struct KeptKeys
++    {
++        uint64_t    contentKey{ 0 };
++        uint64_t    localKey{ 0 };
++        int64_t     cell{ 0 };
++        uint32_t    vertexCount{ 0 };
++        uint32_t    indexCount{ 0 };
++        uint32_t    frame{ 0 };
++        RgTransform transform{};
++    };
++    std::unordered_map< PrimitiveUniqueID, KeptKeys > keptKeys;
++    uint32_t                                          keptFrame{ 0 };
++
+     // static: replacements, then the static scene, in the same buffers;
+     // static scene's vertex ranges are relative to the end of replacements' data (staticBase)
+     VertexStorage                       replacementStorage;
+--- a/Source/Metal/MetalScene.mm
++++ b/Source/Metal/MetalScene.mm
+@@ -31,6 +31,7 @@
+ #include <algorithm>
+ #include <cstdlib>
+ #include <cstring>
++#include <numeric>
+ #include <span>
+ 
+ static_assert( sizeof( RgPrimitiveVertex ) == sizeof( RTGL1::ShVertex ),
+@@ -354,10 +355,10 @@
+     }
+     else
+     {
+-        for( uint32_t i = 0; i < prim.vertexCount; i++ )
+-        {
+-            dst.indices.push_back( i );
+-        }
++        // (Thief RT: filled at once, not pushed one by one -- half a million a frame)
++        const size_t at = dst.indices.size();
++        dst.indices.resize( at + prim.vertexCount );
++        std::iota( dst.indices.begin() + at, dst.indices.end(), 0u );
+     }
+ 
+     for( uint32_t layer = 1; layer <= 3; layer++ )
+@@ -451,6 +452,12 @@
+     }
+     replacementInstances.clear();
+ 
++    // (Thief RT: the kept keys of primitives not given for a while, let go)
++    if( ( ++keptFrame & 255 ) == 0 )
++    {
++        std::erase_if( keptKeys, [ this ]( const auto& e ) { return e.second.frame + 256 < keptFrame; } );
++    }
++
+     // static geometry is in every frame
+     frameGeomCount = 0;
+     for( const auto& g : staticGeoms )
+@@ -478,23 +485,39 @@
+ 
+     const Group group = MakeGroup( mesh, prim );
+ 
+-    uint64_t localKey = 0;
++    // Thief RT: the content key and cell of a primitive marked unchanged since it was last
++    // given (the same count of vertices and indices, the same transform) are as they were
++    // then; others are found from the vertices, and kept for next time
++    KeptKeys& kept = keptKeys[ uniqueID ];
++    const bool reuse = ( prim.flags & ( 1u << 29 ) ) && kept.contentKey != 0 &&
++                       kept.vertexCount == range->vertexCount && kept.indexCount == range->indexCount &&
++                       memcmp( &kept.transform, &mesh.transform, sizeof( RgTransform ) ) == 0;
++    if( !reuse )
++    {
++        kept.contentKey  = ContentKey( &dynamicStorage.vertices[ range->firstVertex ],
++                                      range->vertexCount,
++                                      &dynamicStorage.indices[ range->firstIndex ],
++                                      range->indexCount,
++                                      mesh.transform,
++                                      &kept.localKey );
++        kept.cell        = StableCell( &dynamicStorage.vertices[ range->firstVertex ], range->vertexCount, mesh.transform );
++        kept.vertexCount = range->vertexCount;
++        kept.indexCount  = range->indexCount;
++        kept.transform   = mesh.transform;
++    }
++    kept.frame = keptFrame;
++
+     dynamicGeoms[ group.ToIndex() ].push_back( Geometry{
+         .info            = MakeGeomInfo( mesh, prim, *range, true, textures ),
+         .uniqueID        = uniqueID,
+         .noMotionVectors = !!( prim.flags & RG_MESH_PRIMITIVE_NO_MOTION_VECTORS ),
+         .alphaTested     = group.passThrough == PassThrough::AlphaTested,
+         .bakedTransform  = mesh.transform,
+-        .contentKey      = ContentKey( &dynamicStorage.vertices[ range->firstVertex ],
+-                                  range->vertexCount,
+-                                  &dynamicStorage.indices[ range->firstIndex ],
+-                                  range->indexCount,
+-                                  mesh.transform,
+-                                  &localKey ),
++        .contentKey      = kept.contentKey,
+         .triangles       = range->indexCount / 3,
+-        .cell            = StableCell( &dynamicStorage.vertices[ range->firstVertex ], range->vertexCount, mesh.transform ),
++        .cell            = kept.cell,
+     } );
+-    dynamicGeoms[ group.ToIndex() ].back().localKey = localKey;
++    dynamicGeoms[ group.ToIndex() ].back().localKey = kept.localKey;
+     frameGeomCount++;
+     return true;
+ }

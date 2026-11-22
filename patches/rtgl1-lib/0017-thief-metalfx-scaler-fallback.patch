@@ -1,0 +1,94 @@
+--- a/Source/Metal/MetalPathTracer.mm
++++ b/Source/Metal/MetalPathTracer.mm
+@@ -266,11 +266,46 @@
+         d.inputContentMaxScale          = dynScaleMax;
+     }
+ 
++    // Thief RT: one that can't be made (a frame just as the output size changes) is not an
++    // exception -- thrown in the middle of a frame, it left the frame never ended and the game
++    // hung. The frame is scaled up plainly instead (see Render); the same sizes are tried again
++    // only now and then, not every frame.
++    static uint32_t failedSizes[ 4 ]{};
++    static float    failedDyn[ 2 ]{};
++    static uint32_t failedSkips = 0;
++    const bool      sameFailure = failedSizes[ 0 ] == inputWidth && failedSizes[ 1 ] == inputHeight &&
++                             failedSizes[ 2 ] == outputWidth && failedSizes[ 3 ] == outputHeight &&
++                             failedDyn[ 0 ] == dynScaleMin && failedDyn[ 1 ] == dynScaleMax;
++    if( sameFailure && ( ++failedSkips % 120 ) != 0 )
++    {
++        return nil;
++    }
++
+     temporalScaler = [d newTemporalScalerWithDevice:device];
+     if( !temporalScaler )
+     {
+-        throw RgException( RG_RESULT_GRAPHICS_API_ERROR, "Can't create MetalFX temporal scaler" );
++        if( !sameFailure )
++        {
++            debug::Warning( "Can't create MetalFX temporal scaler for {}x{} -> {}x{} (dynamic {:.3f} .. {:.3f}): "
++                            "scaled up plainly",
++                            inputWidth,
++                            inputHeight,
++                            outputWidth,
++                            outputHeight,
++                            dynScaleMin,
++                            dynScaleMax );
++        }
++        failedSizes[ 0 ] = inputWidth;
++        failedSizes[ 1 ] = inputHeight;
++        failedSizes[ 2 ] = outputWidth;
++        failedSizes[ 3 ] = outputHeight;
++        failedDyn[ 0 ]   = dynScaleMin;
++        failedDyn[ 1 ]   = dynScaleMax;
++        failedSkips      = 0;
++        scalerInputWidth = scalerInputHeight = scalerOutputWidth = scalerOutputHeight = 0;
++        return nil;
+     }
++    failedSizes[ 0 ] = failedSizes[ 1 ] = failedSizes[ 2 ] = failedSizes[ 3 ] = 0;
+     scalerInputWidth   = inputWidth;
+     scalerInputHeight  = inputHeight;
+     scalerOutputWidth  = outputWidth;
+@@ -799,7 +834,19 @@
+         EndPass( enc );
+     };
+ 
+-    if( p.upscaler == Upscaler::MetalFX )
++    // Thief RT: the temporal scaler first -- if it can't be made, the frame takes the plain way
++    id< MTLFXTemporalScaler > preparedScaler = nil;
++    bool                      useMetalFX     = p.upscaler == Upscaler::MetalFX;
++    if( useMetalFX && !metalFXDenoiser )
++    {
++        // (dynamic resolution: the input textures are the framebuffers, the frame their top left part)
++        preparedScaler = p.dynScaleMax > 0 ? PrepareTemporalScaler( p.allocWidth, p.allocHeight, p.upscaledWidth,
++                                                                    p.upscaledHeight, p.dynScaleMin, p.dynScaleMax )
++                                           : PrepareTemporalScaler( p.width, p.height, p.upscaledWidth, p.upscaledHeight );
++        useMetalFX = preparedScaler != nil;
++    }
++
++    if( useMetalFX )
+     {
+         if( !profiling )
+         {
+@@ -853,11 +900,7 @@
+         }
+         else
+         {
+-            // (dynamic resolution: the input textures are the framebuffers, the frame their top left part)
+-            id< MTLFXTemporalScaler > scaler =
+-                p.dynScaleMax > 0 ? PrepareTemporalScaler( p.allocWidth, p.allocHeight, p.upscaledWidth, p.upscaledHeight,
+-                                                           p.dynScaleMin, p.dynScaleMax )
+-                                  : PrepareTemporalScaler( p.width, p.height, p.upscaledWidth, p.upscaledHeight );
++            id< MTLFXTemporalScaler > scaler = preparedScaler;
+             scaler.colorTexture       = final;
+             scaler.depthTexture       = framebuffers.Get( FB_IMAGE_INDEX_DEPTH_NDC, frameIndex );
+             scaler.motionTexture      = framebuffers.Get( FB_IMAGE_INDEX_MOTION_DLSS, frameIndex );
+@@ -905,7 +948,8 @@
+         [enc setComputePipelineState:blitScaled];
+         [enc setTexture:final atIndex:0];
+         [enc setTexture:ping atIndex:1];
+-        [enc setSamplerState:p.upscaler == Upscaler::Linear ? linearSampler : nearestSampler atIndex:0];
++        // (linear also for a MetalFX frame scaled up plainly)
++        [enc setSamplerState:p.upscaler == Upscaler::Nearest ? nearestSampler : linearSampler atIndex:0];
+         const float srcSize[] = { float( p.width ) / float( final.width ), float( p.height ) / float( final.height ) };
+         [enc setBytes:srcSize length:sizeof( srcSize ) atIndex:0];
+         [enc dispatchThreads:MTLSizeMake( ping.width, ping.height, 1 ) threadsPerThreadgroup:MTLSizeMake( 8, 8, 1 )];

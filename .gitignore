@@ -1,0 +1,9 @@
+# made by setup.sh and the build
+/build/
+/deps/
+/logs/
+/dist/
+/rt/
+/rtgl1-kit/
+/Thief RT.app/
+.DS_Store

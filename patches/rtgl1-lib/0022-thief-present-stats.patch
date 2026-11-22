@@ -1,0 +1,117 @@
+diff --git a/Source/Metal/MetalDevice.mm b/Source/Metal/MetalDevice.mm
+index 34ddc17..28e7779 100644
+--- a/Source/Metal/MetalDevice.mm
++++ b/Source/Metal/MetalDevice.mm
+@@ -189,6 +189,58 @@ std::optional< CaptureRequest > GetCaptureRequest()
+     };
+ }
+ 
++// Thief RT: what the display made of the presented drawables (RTGL1_METAL_PROFILE): how many were
++// shown, how far apart, and how long acquiring them waited
++struct PresentStats
++{
++    std::mutex m;
++    uint64_t   presents{ 0 }, shown{ 0 }, dropped{ 0 }, under10{ 0 }, under20{ 0 }, over20{ 0 };
++    double     lastShown{ 0 }, intervalSum{ 0 }, drawableWait{ 0 }, drawableWaitMax{ 0 };
++
++    static PresentStats& Get()
++    {
++        static PresentStats s;
++        return s;
++    }
++    // nextDrawable, timed
++    id< CAMetalDrawable > Next( CAMetalLayer* layer )
++    {
++        const auto            t = std::chrono::steady_clock::now();
++        id< CAMetalDrawable > d = [layer nextDrawable];
++        const double ms = std::chrono::duration< double, std::milli >( std::chrono::steady_clock::now() - t ).count();
++        std::lock_guard l( m );
++        drawableWait += ms;
++        drawableWaitMax = std::max( drawableWaitMax, ms );
++        return d;
++    }
++    void Track( id< CAMetalDrawable > d )
++    {
++        {
++            std::lock_guard l( m );
++            presents++;
++        }
++        [d addPresentedHandler:^( id< MTLDrawable > dr ) {
++          const double t = dr.presentedTime;
++          auto&        st = PresentStats::Get();
++          std::lock_guard l( st.m );
++          if( t <= 0 )
++          {
++              st.dropped++;
++              return;
++          }
++          const double prev = st.lastShown;
++          st.lastShown      = t;
++          if( prev > 0 && t > prev && t - prev < 0.2 )
++          {
++              const double ms = ( t - prev ) * 1000.0;
++              st.shown++;
++              st.intervalSum += ms;
++              ( ms < 10.0 ? st.under10 : ms < 20.0 ? st.under20 : st.over20 )++;
++          }
++        }];
++    }
++};
++
+ void OnFrameCompleted( id< MTLCommandBuffer > c, std::atomic< double >& gpuFrameTime )
+ {
+     if( c.GPUEndTime > c.GPUStartTime )
+@@ -1785,8 +1837,9 @@ void RTGL1::MetalDevice::Impl::PresentAsync( id< MTLCommandBuffer >       cmd,
+         bool generatedPresented = false;
+         if( generated )
+         {
+-            if( id< CAMetalDrawable > d = [metalLayer nextDrawable] )
++            if( id< CAMetalDrawable > d = PresentStats::Get().Next( metalLayer ) )
+             {
++                PresentStats::Get().Track( d );
+                 l_blit( d, generated, @"Blit generated frame to swapchain" );
+                 if( capturePath && captureGenerated )
+                 {
+@@ -1797,8 +1850,9 @@ void RTGL1::MetalDevice::Impl::PresentAsync( id< MTLCommandBuffer >       cmd,
+             }
+         }
+ 
+-        if( id< CAMetalDrawable > d = [metalLayer nextDrawable] )
++        if( id< CAMetalDrawable > d = PresentStats::Get().Next( metalLayer ) )
+         {
++            PresentStats::Get().Track( d );
+             l_blit( d, real, @"Blit to swapchain" );
+             if( capturePath && !captureBuffer )
+             {
+@@ -3139,8 +3193,9 @@ void RTGL1::MetalDevice::DrawFrame( const RgDrawFrameInfo* pInfo )
+             pc.label                  = @"RTGL1 present";
+ 
+             // acquire the drawable as late as possible
+-            if( id< CAMetalDrawable > drawable = [impl->layer nextDrawable] )
++            if( id< CAMetalDrawable > drawable = PresentStats::Get().Next( impl->layer ) )
+             {
++                PresentStats::Get().Track( drawable );
+                 MTLRenderPassDescriptor* pass          = [MTLRenderPassDescriptor renderPassDescriptor];
+                 pass.colorAttachments[ 0 ].texture     = drawable.texture;
+                 pass.colorAttachments[ 0 ].loadAction  = MTLLoadActionDontCare;
+@@ -3241,6 +3296,20 @@ void RTGL1::MetalDevice::DrawFrame( const RgDrawFrameInfo* pInfo )
+                         double( c.primitives ) / n, double( c.uploadVerts ) / n / 1000.0, c.drawFrame / n, c.sceneBuild / n, c.render / n,
+                         c.clouds / n, c.skyCubemap / n, c.skyAlbedo / n, double( c.skyDraws ) / n,
+                         100.0 * double( c.skyReused ) / n );
++        {
++            auto&           ps = PresentStats::Get();
++            std::lock_guard l( ps.m );
++            const double    sec = std::max( 0.001, c.sincePrint / 1000.0 );
++            debug::Warning( "Metal profile: display: {:.0f} Hz reported, sync {}; {:.1f} drawables presented a second, "
++                            "{:.1f} shown a second ({} under 10 ms apart, {} 10-20 ms, {} over 20 ms; {:.2f} ms on average), "
++                            "{} not shown; waiting for drawables {:.2f} ms a second (the longest {:.2f} ms)",
++                            1.0 / impl->RefreshInterval(), impl->layer.displaySyncEnabled ? "on" : "off",
++                            double( ps.presents ) / sec, double( ps.shown ) / sec, ps.under10, ps.under20, ps.over20,
++                            ps.shown ? ps.intervalSum / double( ps.shown ) : 0.0, ps.dropped,
++                            ps.drawableWait / sec, ps.drawableWaitMax );
++            ps.presents = ps.shown = ps.dropped = ps.under10 = ps.under20 = ps.over20 = 0;
++            ps.intervalSum = ps.drawableWait = ps.drawableWaitMax = 0;
++        }
+         if( impl->scene )
+         {
+             const auto& st = impl->scene->lastStats;

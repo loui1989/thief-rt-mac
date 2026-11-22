@@ -1,0 +1,17 @@
+--- a/Source/Metal/MetalScene.mm
++++ b/Source/Metal/MetalScene.mm
+@@ -1557,7 +1557,13 @@
+     // a geometry joins after coming unchanged this many frames in a row (a second: an
+     // animation's frames -- a voxel fire's -- come and go faster, and each one that had
+     // joined made a rebuild when it went)...
+-    constexpr uint32_t StableMinAge = 60;
++    // (RTGL1_METAL_STABLE_AGE: another number of frames -- a game whose rooms stand still in
++    // world space can take them in sooner, rather than tracing them slowly for a second or more)
++    static const uint32_t StableMinAge = [] {
++        const char* e = std::getenv( "RTGL1_METAL_STABLE_AGE" );
++        const long  v = e ? std::strtol( e, nullptr, 10 ) : 0;
++        return v > 0 ? uint32_t( std::min( v, 100000L ) ) : 60u;
++    }();
+     // ...and only when there are this many triangles to keep
+     constexpr size_t StableMinTriangles = 2000;
+     // a kept BLAS takes in more stable geometry at most this often, when it's 5% more

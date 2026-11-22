@@ -1,0 +1,168 @@
+diff --git a/Source/Metal/MetalDevice.mm b/Source/Metal/MetalDevice.mm
+index c25be97..b66ae60 100644
+--- a/Source/Metal/MetalDevice.mm
++++ b/Source/Metal/MetalDevice.mm
+@@ -3239,12 +3239,12 @@ void RTGL1::MetalDevice::DrawFrame( const RgDrawFrameInfo* pInfo )
+                             "{} static geometries, {} TLAS instances, {} geometry infos ({} polished); "
+                             "kept: {} geometries ({} triangles) in {} pieces, {} piece rebuilds so far; "
+                             "models instanced: {} ({} kept BLAS-es, {} built so far); rebuilt each frame: {} geometries ({} triangles); "
+-                            "moving geometry's BLAS-es so far: {} refitted, {} built",
++                            "moving geometry's BLAS-es so far: {} refitted, {} built ({} moving objects with their own)",
+                             st.dynamicGeometries, st.dynamicTriangles, st.dynamicVertices,
+                             st.staticGeometries, st.tlasInstances, st.geometryInfos, st.polishedGeometries,
+                             st.stableGeometries, st.stableTriangles, st.stableCells, st.stableRebuilds,
+                             st.instancedModels, st.modelBlases, st.modelBuilds, st.volatileGeometries, st.volatileTriangles,
+-                            st.dynamicRefits, st.dynamicBuilds );
++                            st.dynamicRefits, st.dynamicBuilds, st.movingObjects );
+         }
+         c.waitFrame = c.startFrame = c.betweenFrames = c.uploads = c.sceneBuild = c.render = c.drawFrame = 0;
+         c.clouds = c.skyCubemap = c.skyAlbedo = 0;
+diff --git a/Source/Metal/MetalScene.h b/Source/Metal/MetalScene.h
+index d42a646..121cf0e 100644
+--- a/Source/Metal/MetalScene.h
++++ b/Source/Metal/MetalScene.h
+@@ -111,6 +111,7 @@ public:
+         size_t instancedModels, modelBlases, modelBuilds, volatileGeometries, volatileTriangles;
+         // Thief RT: the frames' dynamic BLAS-es refitted and built since the last stats
+         size_t dynamicRefits, dynamicBuilds;
++        size_t movingObjects;   // with a BLAS of their own (objectBlas)
+     };
+     Stats lastStats{};
+ 
+@@ -395,6 +396,19 @@ private:
+         uint32_t  lastFrame{ 0 };
+     };
+     std::array< std::unordered_map< uint64_t, ModelBlas >, GroupCount > modelBlas;
++    // Thief RT: each moving object of some size (a guard, a swinging door) its own BLAS,
++    // one for each frame of the ring, each refitted from the one of the frame before
++    // (BuildBlas's refitFrom): the frame's one shared dynamic BLAS was built anew whenever
++    // anything in it changed -- a guard coming into view, a particle -- and with it every
++    // other moving thing. Its key: the game's object (Thief RT gives an object's parts the
++    // ids 0x500000000 + object << 12 + part, so objectId >> 12).
++    struct ObjectBlas
++    {
++        std::array< BuiltBlas, RingSize > slots;
++        uint32_t                          lastRing{ ~0u };
++        uint32_t                          lastFrame{ 0 };
++    };
++    std::array< std::unordered_map< uint64_t, ObjectBlas >, GroupCount > objectBlas;
+     std::unordered_map< uint64_t, uint32_t >                             localAge;
+     size_t                                                               modelBuilds{ 0 };
+ };
+diff --git a/Source/Metal/MetalScene.mm b/Source/Metal/MetalScene.mm
+index dc34938..ac672d3 100644
+--- a/Source/Metal/MetalScene.mm
++++ b/Source/Metal/MetalScene.mm
+@@ -1250,6 +1250,42 @@ bool RTGL1::MetalScene::Build( id< MTLCommandBuffer > cmd, uint32_t rayCullMaskW
+         }
+     }
+ 
++    // Thief RT: the moving objects of some size out of the shared dynamic BLAS, each into its
++    // own (objectBlas); the small rest stays (RTGL1_METAL_NO_OBJECT_BLAS=1: all stays)
++    std::array< std::vector< std::pair< uint64_t, std::vector< const Geometry* > > >, GroupCount > objectLists;
++    {
++        static const bool  objectsOn          = !std::getenv( "RTGL1_METAL_NO_OBJECT_BLAS" );
++        constexpr uint32_t ObjectMinTriangles = 48;
++        for( uint32_t gi = 0; objectsOn && gi < GroupCount; gi++ )
++        {
++            auto&                                  vol = volatileLists[ gi ];
++            std::unordered_map< uint64_t, uint32_t > tris;
++            for( const Geometry* g : vol )
++            {
++                tris[ g->uniqueID.objectId >> 12 ] += g->triangles;
++            }
++            std::unordered_map< uint64_t, size_t > at;
++            std::vector< const Geometry* >         rest;
++            for( const Geometry* g : vol )
++            {
++                const uint64_t key = g->uniqueID.objectId >> 12;
++                if( tris[ key ] < ObjectMinTriangles )
++                {
++                    rest.push_back( g );
++                    continue;
++                }
++                auto it = at.find( key );
++                if( it == at.end() )
++                {
++                    it = at.emplace( key, objectLists[ gi ].size() ).first;
++                    objectLists[ gi ].push_back( { key, {} } );
++                }
++                objectLists[ gi ][ it->second ].second.push_back( g );
++            }
++            vol.swap( rest );
++        }
++    }
++
+     // dynamic BLAS-es
+     if( std::ranges::any_of( dynamicGeoms, []( const auto& g ) { return !g.empty(); } ) )
+     {
+@@ -1259,6 +1295,17 @@ bool RTGL1::MetalScene::Build( id< MTLCommandBuffer > cmd, uint32_t rayCullMaskW
+         {
+             BuildBlas( enc, f.dynamicBlas[ gi ], volatileLists[ gi ], f.vertices, f.indices, true, true, @"Dynamic BLAS",
+                        &Prev().dynamicBlas[ gi ] );
++            static const BuiltBlas noneBefore{};
++            for( const auto& [ key, list ] : objectLists[ gi ] )
++            {
++                ObjectBlas& ob = objectBlas[ gi ][ key ];
++                // refitted from the frame before's, if it had one (else built, refittable)
++                const bool       had  = ob.lastRing < RingSize && ob.lastRing != ring && ob.lastFrame + 1 == frameCounter;
++                const BuiltBlas* from = had ? &ob.slots[ ob.lastRing ] : &noneBefore;
++                BuildBlas( enc, ob.slots[ ring ], list, f.vertices, f.indices, true, true, @"Object BLAS", from );
++                ob.lastRing  = ring;
++                ob.lastFrame = frameCounter;
++            }
+             for( const Geometry* g : instancedLists[ gi ] )
+             {
+                 ModelBlas& mb = modelBlas[ gi ][ g->localKey ];
+@@ -1439,6 +1486,14 @@ bool RTGL1::MetalScene::Build( id< MTLCommandBuffer > cmd, uint32_t rayCullMaskW
+             addInstance( cw.sg->blas.blas, group, 0, IdentityTransform, cw.list );
+         }
+         addInstance( f.dynamicBlas[ gi ].blas, group, 0, IdentityTransform, volatileLists[ gi ] );
++        for( const auto& [ key, list ] : objectLists[ gi ] )
++        {
++            auto it = objectBlas[ gi ].find( key );
++            if( it != objectBlas[ gi ].end() )
++            {
++                addInstance( it->second.slots[ ring ].blas, group, 0, IdentityTransform, list );
++            }
++        }
+         for( const Geometry* g : instancedLists[ gi ] )
+         {
+             auto it = modelBlas[ gi ].find( g->localKey );
+@@ -1448,6 +1503,28 @@ bool RTGL1::MetalScene::Build( id< MTLCommandBuffer > cmd, uint32_t rayCullMaskW
+             }
+         }
+     }
++    // the moving objects not seen for a while: gone (their slots kept until the frames
++    // in flight are done with them)
++    for( auto& om : objectBlas )
++    {
++        for( auto it = om.begin(); it != om.end(); )
++        {
++            if( frameCounter - it->second.lastFrame > 120 )
++            {
++                for( BuiltBlas& b : it->second.slots )
++                {
++                    StableGroup tmp;
++                    tmp.blas = b;
++                    RetireStable( tmp );
++                }
++                it = om.erase( it );
++            }
++            else
++            {
++                ++it;
++            }
++        }
++    }
+     // the models not seen for a while: gone
+     for( auto& mm : modelBlas )
+     {
+@@ -1584,6 +1661,7 @@ bool RTGL1::MetalScene::Build( id< MTLCommandBuffer > cmd, uint32_t rayCullMaskW
+             lastStats.instancedModels += instancedLists[ gi ].size();
+             lastStats.modelBlases += modelBlas[ gi ].size();
+             lastStats.volatileGeometries += volatileLists[ gi ].size();
++            lastStats.movingObjects += objectLists[ gi ].size();
+             for( const Geometry* g : volatileLists[ gi ] )
+             {
+                 lastStats.volatileTriangles += g->triangles;

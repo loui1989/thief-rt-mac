@@ -1,0 +1,245 @@
+From e9abb858b3cc989adf17193ff519375deebe76b8 Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Tue, 27 Oct 2026 12:35:10 +0000
+Subject: [PATCH] Metal: models that move but keep their shape get a kept BLAS
+ of their own, instanced with their transform
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_015h6T8xtWYtnCAyG7nuxUVJ
+---
+ Source/Metal/MetalDevice.mm |  6 ++-
+ Source/Metal/MetalScene.h   | 16 +++++++
+ Source/Metal/MetalScene.mm  | 91 +++++++++++++++++++++++++++++++++++--
+ 3 files changed, 107 insertions(+), 6 deletions(-)
+
+diff --git a/Source/Metal/MetalDevice.mm b/Source/Metal/MetalDevice.mm
+index a5544f1..e3b1dca 100644
+--- a/Source/Metal/MetalDevice.mm
++++ b/Source/Metal/MetalDevice.mm
+@@ -3205,10 +3205,12 @@ void RTGL1::MetalDevice::DrawFrame( const RgDrawFrameInfo* pInfo )
+             const auto& st = impl->scene->lastStats;
+             debug::Warning( "Metal profile: scene: {} dynamic geometries ({} triangles, {} vertices), "
+                             "{} static geometries, {} TLAS instances, {} geometry infos ({} polished); "
+-                            "kept: {} geometries ({} triangles) in {} pieces, {} piece rebuilds so far",
++                            "kept: {} geometries ({} triangles) in {} pieces, {} piece rebuilds so far; "
++                            "models instanced: {} ({} kept BLAS-es, {} built so far); rebuilt each frame: {} geometries ({} triangles)",
+                             st.dynamicGeometries, st.dynamicTriangles, st.dynamicVertices,
+                             st.staticGeometries, st.tlasInstances, st.geometryInfos, st.polishedGeometries,
+-                            st.stableGeometries, st.stableTriangles, st.stableCells, st.stableRebuilds );
++                            st.stableGeometries, st.stableTriangles, st.stableCells, st.stableRebuilds,
++                            st.instancedModels, st.modelBlases, st.modelBuilds, st.volatileGeometries, st.volatileTriangles );
+         }
+         c.waitFrame = c.startFrame = c.betweenFrames = c.uploads = c.sceneBuild = c.render = c.drawFrame = 0;
+         c.clouds = c.skyCubemap = c.skyAlbedo = 0;
+diff --git a/Source/Metal/MetalScene.h b/Source/Metal/MetalScene.h
+index e9d508f..db19fd8 100644
+--- a/Source/Metal/MetalScene.h
++++ b/Source/Metal/MetalScene.h
+@@ -107,6 +107,8 @@ public:
+         size_t polishedGeometries;
+         // Raze RT: the kept (stable) part of the dynamic geometry, and its rebuilds since the last stats
+         size_t stableGeometries, stableTriangles, stableRebuilds, stableCells;
++        // models instanced with their kept BLAS (modelBlas), the rest rebuilt each frame
++        size_t instancedModels, modelBlases, modelBuilds, volatileGeometries, volatileTriangles;
+     };
+     Stats lastStats{};
+ 
+@@ -182,6 +184,8 @@ private:
+         uint32_t           triangles{ 0 };
+         // and which piece of the map it is in (see StableGroup)
+         int64_t            cell{ 0 };
++        // its shape alone (0: not transformed), see modelBlas
++        uint64_t           localKey{ 0 };
+     };
+     static ShGeometryInstance MakeGeomInfo( const RgMeshInfo&          mesh,
+                                             const RgMeshPrimitiveInfo& prim,
+@@ -355,6 +359,18 @@ private:
+     std::unordered_map< uint64_t, uint32_t > keyAge; // a content key -> frames in a row it came
+     uint32_t                                 frameCounter{ 0 };
+     size_t                                   stableRebuilds{ 0 };
++    // Raze RT: a model that moves but keeps its shape (a spinning voxel pickup, a swinging
++    // door's voxel) changed its content key every frame: rebuilt with the dynamic BLAS each
++    // frame. By its shape alone (Geometry::localKey): a BLAS in its own space, kept while it
++    // is seen, a TLAS instance with its transform for each one of it
++    struct ModelBlas
++    {
++        BuiltBlas blas;
++        uint32_t  lastFrame{ 0 };
++    };
++    std::array< std::unordered_map< uint64_t, ModelBlas >, GroupCount > modelBlas;
++    std::unordered_map< uint64_t, uint32_t >                             localAge;
++    size_t                                                               modelBuilds{ 0 };
+ };
+ 
+ }
+diff --git a/Source/Metal/MetalScene.mm b/Source/Metal/MetalScene.mm
+index 2e46a52..520257e 100644
+--- a/Source/Metal/MetalScene.mm
++++ b/Source/Metal/MetalScene.mm
+@@ -126,7 +126,8 @@ constexpr RgTransform IdentityTransform = { {
+ } };
+ 
+ // Raze RT: what a BLAS sees of a geometry -- its positions, indices and transform
+-uint64_t ContentKey( const RTGL1::ShVertex* v, uint32_t vertexCount, const uint32_t* idx, uint32_t indexCount, const RgTransform& t )
++// (and 'local': without the transform -- the shape alone, 0 for an untransformed geometry)
++uint64_t ContentKey( const RTGL1::ShVertex* v, uint32_t vertexCount, const uint32_t* idx, uint32_t indexCount, const RgTransform& t, uint64_t* local = nullptr )
+ {
+     uint64_t h   = 0x9E3779B97F4A7C15ull ^ ( uint64_t( vertexCount ) << 32 ) ^ indexCount;
+     auto     mix = [ &h ]( uint32_t w ) {
+@@ -146,6 +147,10 @@ uint64_t ContentKey( const RTGL1::ShVertex* v, uint32_t vertexCount, const uint3
+     {
+         mix( idx[ i ] );
+     }
++    if( local )
++    {
++        *local = memcmp( &t, &IdentityTransform, sizeof( t ) ) != 0 ? ( h | 1 ) : 0;
++    }
+     uint32_t m[ 12 ];
+     memcpy( m, t.matrix, sizeof( m ) );
+     for( uint32_t w : m )
+@@ -439,6 +444,7 @@ bool RTGL1::MetalScene::AddDynamic( const RgMeshInfo&          mesh,
+ 
+     const Group group = MakeGroup( mesh, prim );
+ 
++    uint64_t localKey = 0;
+     dynamicGeoms[ group.ToIndex() ].push_back( Geometry{
+         .info            = MakeGeomInfo( mesh, prim, *range, true, textures ),
+         .uniqueID        = uniqueID,
+@@ -449,10 +455,12 @@ bool RTGL1::MetalScene::AddDynamic( const RgMeshInfo&          mesh,
+                                   range->vertexCount,
+                                   &dynamicStorage.indices[ range->firstIndex ],
+                                   range->indexCount,
+-                                  mesh.transform ),
++                                  mesh.transform,
++                                  &localKey ),
+         .triangles       = range->indexCount / 3,
+         .cell            = StableCell( &dynamicStorage.vertices[ range->firstVertex ], range->vertexCount, mesh.transform ),
+     } );
++    dynamicGeoms[ group.ToIndex() ].back().localKey = localKey;
+     frameGeomCount++;
+     return true;
+ }
+@@ -944,6 +952,21 @@ bool RTGL1::MetalScene::Build( id< MTLCommandBuffer > cmd, uint32_t rayCullMaskW
+             }
+         }
+         keyAge = std::move( age );
++
++        std::unordered_map< uint64_t, uint32_t > lage;
++        lage.reserve( localAge.size() + 64 );
++        for( const auto& g : dynamicGeoms )
++        {
++            for( const Geometry& geom : g )
++            {
++                if( geom.localKey )
++                {
++                    auto it                 = localAge.find( geom.localKey );
++                    lage[ geom.localKey ] = it != localAge.end() ? std::min( it->second + 1, 1u << 30 ) : 1u;
++                }
++            }
++        }
++        localAge = std::move( lage );
+     }
+ 
+     // a cell's few triangles stay with the rest (a BLAS of its own is not worth it)
+@@ -958,7 +981,11 @@ bool RTGL1::MetalScene::Build( id< MTLCommandBuffer > cmd, uint32_t rayCullMaskW
+         bool                           fast;
+     };
+     std::array< std::vector< CellWork >, GroupCount >        cellWork;
+-    std::array< std::vector< const Geometry* >, GroupCount > volatileLists;
++    std::array< std::vector< const Geometry* >, GroupCount > volatileLists, instancedLists;
++    // models kept by their shape (see modelBlas): RTGL1_METAL_NO_MODEL_BLAS=1 turns it off
++    static const bool  modelsOn          = stableOn && !std::getenv( "RTGL1_METAL_NO_MODEL_BLAS" );
++    constexpr uint32_t ModelMinAge       = 2;
++    constexpr uint32_t ModelMinTriangles = 32;
+     for( uint32_t gi = 0; gi < GroupCount; gi++ )
+     {
+         const auto& geoms = dynamicGeoms[ gi ];
+@@ -1087,7 +1114,15 @@ bool RTGL1::MetalScene::Build( id< MTLCommandBuffer > cmd, uint32_t rayCullMaskW
+         {
+             if( !used[ i ] )
+             {
+-                vol.push_back( &geoms[ i ] );
++                // a model that moves but keeps its shape (a spinning pickup): its own BLAS, in its
++                // own space, kept; instanced with its transform
++                const Geometry& g = geoms[ i ];
++                if( modelsOn && g.localKey && g.triangles >= ModelMinTriangles && localAge[ g.localKey ] >= ModelMinAge )
++                {
++                    instancedLists[ gi ].push_back( &g );
++                    continue;
++                }
++                vol.push_back( &g );
+             }
+         }
+     }
+@@ -1100,6 +1135,17 @@ bool RTGL1::MetalScene::Build( id< MTLCommandBuffer > cmd, uint32_t rayCullMaskW
+         for( uint32_t gi = 0; gi < GroupCount; gi++ )
+         {
+             BuildBlas( enc, f.dynamicBlas[ gi ], volatileLists[ gi ], f.vertices, f.indices, true, true, @"Dynamic BLAS" );
++            for( const Geometry* g : instancedLists[ gi ] )
++            {
++                ModelBlas& mb = modelBlas[ gi ][ g->localKey ];
++                if( !mb.blas.blas )
++                {
++                    // in its own space: the instance has the transform
++                    BuildBlas( enc, mb.blas, std::vector< const Geometry* >{ g }, f.vertices, f.indices, false, false, @"Model BLAS" );
++                    modelBuilds++;
++                }
++                mb.lastFrame = frameCounter;
++            }
+             for( const CellWork& cw : cellWork[ gi ] )
+             {
+                 if( cw.buildNow )
+@@ -1268,6 +1314,32 @@ bool RTGL1::MetalScene::Build( id< MTLCommandBuffer > cmd, uint32_t rayCullMaskW
+             addInstance( cw.sg->blas.blas, group, 0, IdentityTransform, cw.list );
+         }
+         addInstance( f.dynamicBlas[ gi ].blas, group, 0, IdentityTransform, volatileLists[ gi ] );
++        for( const Geometry* g : instancedLists[ gi ] )
++        {
++            auto it = modelBlas[ gi ].find( g->localKey );
++            if( it != modelBlas[ gi ].end() )
++            {
++                addInstance( it->second.blas.blas, group, 0, g->bakedTransform, std::span< const Geometry* const >( &g, 1 ) );
++            }
++        }
++    }
++    // the models not seen for a while: gone
++    for( auto& mm : modelBlas )
++    {
++        for( auto it = mm.begin(); it != mm.end(); )
++        {
++            if( frameCounter - it->second.lastFrame > 300 )
++            {
++                StableGroup tmp;
++                tmp.blas = it->second.blas;
++                RetireStable( tmp );
++                it = mm.erase( it );
++            }
++            else
++            {
++                ++it;
++            }
++        }
+     }
+ 
+     // GeomInfoManager: match with the previous frame, by unique IDs
+@@ -1380,6 +1452,17 @@ bool RTGL1::MetalScene::Build( id< MTLCommandBuffer > cmd, uint32_t rayCullMaskW
+             }
+         }
+         lastStats.stableRebuilds = stableRebuilds;
++        for( uint32_t gi = 0; gi < GroupCount; gi++ )
++        {
++            lastStats.instancedModels += instancedLists[ gi ].size();
++            lastStats.modelBlases += modelBlas[ gi ].size();
++            lastStats.volatileGeometries += volatileLists[ gi ].size();
++            for( const Geometry* g : volatileLists[ gi ] )
++            {
++                lastStats.volatileTriangles += g->triangles;
++            }
++        }
++        lastStats.modelBuilds = modelBuilds;
+     }
+     tlasDesc.instanceDescriptorBuffer = f.instances;
+     tlasDesc.instanceDescriptorType   = MTLAccelerationStructureInstanceDescriptorTypeUserID;
+-- 
+2.43.0
+
