@@ -885,6 +885,9 @@ bool in_face(const float v[3], float r, int face)
 }
 
 // the models near a light, into its slot of the models' shadows; false: none
+void runs_begin();
+void runs_add(GLint first, GLsizei n);
+void runs_draw();
 bool draw_casters(const sRenderBackendLight &l, int slot, float farZ)
 {
    struct Mine { const Caster *o; float v[3]; int id; };
@@ -956,11 +959,46 @@ bool draw_casters(const sRenderBackendLight &l, int slot, float farZ)
       // (from a foot out: a lamp's own fixture, round its light, casts nothing)
       face_matrix(m, l.pos, face, 1.0f, farZ);
       glUniformMatrix4fv(suViewProj, 1, GL_FALSE, m);
+      runs_begin();
       for (size_t k = 0; k < mine.size(); ++k)
          if (in_face(mine[k].v, mine[k].o->r, face))
-            glDrawArrays(GL_TRIANGLES, runs[k].first, runs[k].second);
+            runs_add(runs[k].first, runs[k].second);
+      runs_draw();
    }
    return true;
+}
+
+// Triangles in runs of the bound buffer, joined where they meet, in one call
+// (a light's six faces were a call a run: hundreds, the frame's time with
+// them going up and down as the lights' shadows were drawn again)
+std::vector<GLint> g_runFirst;
+std::vector<GLsizei> g_runCount;
+void runs_begin()
+{
+   g_runFirst.clear();
+   g_runCount.clear();
+}
+void runs_add(GLint first, GLsizei n)
+{
+   if (n <= 0)
+      return;
+   if (!g_runFirst.empty() && g_runFirst.back() + g_runCount.back() == first)
+      g_runCount.back() += n;
+   else {
+      g_runFirst.push_back(first);
+      g_runCount.push_back(n);
+   }
+}
+void runs_draw()
+{
+   if (g_runFirst.empty())
+      return;
+#ifdef DARK_OPENGL_ES
+   for (size_t k = 0; k < g_runFirst.size(); ++k)
+      glDrawArrays(GL_TRIANGLES, g_runFirst[k], g_runCount[k]);
+#else
+   glMultiDrawArrays(GL_TRIANGLES, g_runFirst.data(), g_runCount.data(), GLsizei(g_runFirst.size()));
+#endif
 }
 
 void draw_shadow(const sRenderBackendLight &l, int slot, float farZ)
@@ -1001,8 +1039,10 @@ void draw_shadow(const sRenderBackendLight &l, int slot, float farZ)
       float m[16];
       face_matrix(m, l.pos, face, 0.05f, farZ);   // (a wall right behind a swaying flame kept whole)
       glUniformMatrix4fv(suViewProj, 1, GL_FALSE, m);
+      runs_begin();
       for (const auto &r : runs)
-         glDrawArrays(GL_TRIANGLES, r.first * 3, (r.second - r.first) * 3);
+         runs_add(r.first * 3, (r.second - r.first) * 3);
+      runs_draw();
    }
 }
 
@@ -1088,7 +1128,15 @@ void lights(const sRenderBackendLight *in, int count)
    const sRenderBackendLight *base = in;   // (as given: before a flame's sway)
    {
       float t = float(std::fmod(std::chrono::duration<double>(now.time_since_epoch()).count(), 3600.0));
-      int swaying = 0;
+      int swaying = 0, swayers = 0;
+      for (const sRenderBackendLight &l : s_live)
+         swayers += l.flicker ? 1 : 0;
+      swayers = std::min(swayers, 6);
+      // (each its own place kept, two of them moved a frame by turns: as
+      // many shadows drawn again each frame, not all at once now and then)
+      static std::unordered_map<int, std::array<float, 3>> s_sway;
+      static int s_turn = 0;
+      s_turn = swayers > 0 ? (s_turn + 2) % swayers : 0;
       for (sRenderBackendLight &l : s_live) {
          if (!l.flicker)
             continue;
@@ -1101,15 +1149,15 @@ void lights(const sRenderBackendLight *in, int count)
          const float k = 1.0f + 0.09f * noise(9.0f, 0);
          for (float &c : l.color)
             c *= k;
-         if (swaying++ < 6 && g_shadows) {
-            // (its place moved 30 times a second, the lights by turns: each
-            // move is its shadows drawn again, six lights' a frame before)
-            const float t0 = t;
-            t = (std::floor(t * 30.0f + 0.5f * float(swaying & 1)) - 0.5f * float(swaying & 1)) / 30.0f;
-            l.pos[0] += 0.05f * noise(5.3f, 1);
-            l.pos[1] += 0.05f * noise(5.9f, 2);
-            l.pos[2] += 0.06f * noise(7.1f, 3);
-            t = t0;
+         if (swaying < 6 && g_shadows) {
+            const int k = swaying++;
+            auto it = s_sway.find(l.id);
+            if (it == s_sway.end() || (k - s_turn + swayers) % swayers < 2)
+               it = s_sway.insert_or_assign(l.id, std::array<float, 3>{0.05f * noise(5.3f, 1), 0.05f * noise(5.9f, 2),
+                                                                     0.06f * noise(7.1f, 3)}).first;
+            l.pos[0] += it->second[0];
+            l.pos[1] += it->second[1];
+            l.pos[2] += it->second[2];
          }
       }
       in = s_live.data();
