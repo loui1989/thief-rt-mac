@@ -237,6 +237,9 @@ class stone       0.85 0.00 0.90 0.00
 class rock        0.95 0.00 1.10 0.00
 class skin        0.80 0.00 0.15 0.00
 class blood       0.25 0.00 0.40 0.70
+class windowfire  0.90 0.00 0.60 0.00 1.6
+class wallpaper   0.80 0.00 0.20 0.00
+class parquet     0.45 0.00 0.30 0.35
 
 # pools of blood: wet and thick, a soft, uneven sheen of the room
 *blood*          blood
@@ -253,6 +256,37 @@ book/*           none
 books/*          none
 bitmap/*         none
 mesh/txt*/*      skin
+
+# Thief II's own families (first, so the general rules below do not take them):
+# the mansions' marble floors, polished parquet, damask wallpaper and marble
+# columns; the city's windows; the Mechanists' painted iron
+fam/mbfloor/*            marble
+fam/vicm*/vic*co*        marble
+fam/artdout/blackmb      marble
+fam/rescor_2/floor*      tile
+fam/wdfloor/*            parquet
+fam/vicm*/wall*          wallpaper
+fam/rescor_2/wall0*      wallpaper
+fam/*/decwal*            wallpaper
+fam/stainglass/light*    plaster
+fam/stainglass/*         stained
+fam/newkeep/keepg*       stained
+fam/rescor_1/hothou*     glass
+fam/vicwood/solwin*      window
+fam/civicb*/*win*        window
+fam/artdmisc/adwin*      window
+fam/artdout/mlight       window
+fam/ceilpain/*           plaster
+fam/artdeco/dewal*       plaster
+fam/artdeco/dceil*       wood
+fam/artdeco/mecban       cloth
+fam/core_*/crate*        wood
+fam/core_*/creat*        wood
+fam/mech/mwallw*         wood
+fam/mech/mdebri*         rock
+fam/mech/*rust*          rust
+fam/mech/*               metal
+fam/newmech/*            metal
 
 # boarded-up, shuttered and empty windows: no glass, only wood
 */rwind*         wood
@@ -275,6 +309,10 @@ fam/*/keepglass*    stained
 fam/*/tpbglass*     stained
 fam/*/tbpglass*     stained
 fam/*/spiderglass   stained
+# a fireplace with its fire painted in (Assassins): the fire glows and lights the room
+# (a "window" class: its bright, warm texels glow)
+fam/rescore/firepl02   windowfire
+
 # windows: lit panes glow; other glass is glass
 *glass*          glass
 *glpries*        glass
@@ -293,6 +331,7 @@ fam/*/spiderglass   stained
 */mar[0-9]*      marble
 *marwal*         marble
 *greenmar*       marble
+*/keeperz/floor007  tile
 *tile*           tile
 *mosaic*         tile
 # the player's sword: a polished steel blade
