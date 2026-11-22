@@ -2020,8 +2020,8 @@ void swap_presented_frame()
    // A working swap interval already paces gameplay. The old unconditional
    // post-swap delay occasionally added an extra millisecond (or a full
    // refresh on some compositors), producing visibly uneven camera motion.
-   // (v-sync off in play: as fast as it goes)
-   if (g_scene && g_vsyncSetting == 0) {
+   // (in play the game's own frame limit paces it: RenderGLFrameCap)
+   if (g_scene) {
       g_lastPresentTicks = 0;
    } else if (g_swapInterval != 1 || !g_swapIntervalApplied) {
       const Uint64 now = SDL_GetTicks64();
@@ -2035,6 +2035,24 @@ void swap_presented_frame()
    if (g_scene && g_vsyncSetting == 2)
       adapt_vsync();
 }
+
+} // namespace
+
+extern "C" int RenderGLFrameCap(void)
+{
+   if (!g_context || !g_scene || g_rt)
+      return 0;
+   if (g_vsyncSetting == 0)
+      return 240;   // (unlocked, near enough: the game's least step 4 ms)
+   SDL_DisplayMode mode{};
+   const int display = g_window ? SDL_GetWindowDisplayIndex(g_window) : 0;
+   int hz = SDL_GetCurrentDisplayMode(display < 0 ? 0 : display, &mode) == 0 ? mode.refresh_rate : 60;
+   if (hz <= 0)
+      hz = 60;
+   return std::clamp(hz, 60, 240);
+}
+
+namespace {
 
 void bind_texture(int level, Texture *texture)
 {

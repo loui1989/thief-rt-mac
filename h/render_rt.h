@@ -164,6 +164,9 @@ void RenderRTPrepBegin(void);
 // The frame rate setting: the fewest milliseconds a frame takes are 1000 /
 // this (60, 100 or 120); 0 when not set.
 int RenderRTFrameCap(void);
+// The OpenGL renderer's, in play: the screen's refresh rate with v-sync on,
+// 240 with it off; 0 out of play or with the ray tracer.
+int RenderGLFrameCap(void);
 // Nonzero once after the panel's "Skip to next mission (test)" was chosen:
 // the game wins the mission (its "win_mission" command) on its next frame.
 int RenderRTTakeSkipMission(void);
