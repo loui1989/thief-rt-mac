@@ -675,6 +675,24 @@ int g_frame = 0;
 bool g_collect = false;      // (capturing: the draws only kept, not drawn)
 uint32_t g_curObj = 0;
 float g_cam[3] = {0, 0, 0};
+// Two poses the same for the models' shadows: within a centimetre and a third
+// of a degree (objects resting under physics -- in the pool at Bafford's --
+// shifted a millimetre or two every frame, each time their shadows drawn
+// again for every light near them)
+bool pose_near(const float a[6], const float b[6])
+{
+   for (int k = 0; k < 3; ++k)
+      if (std::fabs(a[k] - b[k]) > 0.03f)
+         return false;
+   for (int k = 3; k < 6; ++k) {
+      float d = std::fabs(a[k] - b[k]);
+      d = std::fmod(d, 65536.0f);
+      if (std::min(d, 65536.0f - d) > 64.0f)
+         return false;
+   }
+   return true;
+}
+
 struct Caster { std::vector<float> tris; float pose[6]; float c[3] = {0, 0, 0}; float r = 0; int frame = 0; };
 std::unordered_map<uint32_t, Caster> g_objs;
 GLuint g_casterTex = 0, g_casterBuffer = 0, g_casterArray = 0;
@@ -888,6 +906,10 @@ bool in_face(const float v[3], float r, int face)
 void runs_begin();
 void runs_add(GLint first, GLsizei n);
 void runs_draw();
+// (a frame's redraws of models' maps for models having moved: a guard walking
+// through a courtyard was in reach of most of the 16 lights, all of them
+// drawn again every frame, 8-10 ms; the rest wait a frame or two, by turns)
+int g_casterBudget = 0, g_casterDrawn = 0, g_casterDeferred = 0;
 bool draw_casters(const sRenderBackendLight &l, int slot, float farZ)
 {
    struct Mine { const Caster *o; float v[3]; int id; };
@@ -907,7 +929,9 @@ bool draw_casters(const sRenderBackendLight &l, int slot, float farZ)
       mine.push_back({&o, {dx, dy, dz}, int(e.first)});
    }
    CasterSlotState &st = g_casterSlots[slot];
+   bool fresh = false;
    if (!(st.id == l.id && st.far == farZ && !memcmp(st.pos, l.pos, sizeof(st.pos)))) {
+      fresh = true;
       st.id = l.id;
       st.far = farZ;
       memcpy(st.pos, l.pos, sizeof(st.pos));
@@ -935,6 +959,14 @@ bool draw_casters(const sRenderBackendLight &l, int slot, float farZ)
    }
    if (!need)
       return true;
+   if (!fresh) {
+      if (g_casterBudget <= 0) {
+         ++g_casterDeferred;
+         return true;   // (its map as it was, a frame longer)
+      }
+      --g_casterBudget;
+   }
+   ++g_casterDrawn;
    // one buffer, each model's run of it
    static std::vector<std::pair<GLint, GLsizei>> runs;
    tris.clear();
@@ -1074,7 +1106,7 @@ void lights(const sRenderBackendLight *in, int count)
       for (auto it = g_objs.begin(); it != g_objs.end();) {
          float pose[6];
          if (!RenderRTGameObjectPose(it->first, pose) ||
-             (memcmp(pose, it->second.pose, sizeof(pose)) != 0 && g_frame - it->second.frame > 8))
+             (!pose_near(pose, it->second.pose) && g_frame - it->second.frame > 8))
             it = g_objs.erase(it);
          else
             ++it;
@@ -1211,6 +1243,25 @@ void lights(const sRenderBackendLight *in, int count)
          if (casterSlotOf[i] >= 0)
             s_slotOf[in[i].id] = casterSlotOf[i];
    }
+   // the models' maps first, from a light further on each frame
+   bool casterOk[kMaxLights] = {};
+   g_casterDrawn = g_casterDeferred = 0;
+   if (shadows) {
+      static int s_turn = 0;
+      g_casterBudget = 4;
+      int last = -1;
+      for (int k = 0; k < count; ++k) {
+         const int i = (k + s_turn) % count;
+         if (casterSlotOf[i] < 0)
+            continue;
+         const int before = g_casterBudget;
+         casterOk[i] = draw_casters(base[i], casterSlotOf[i], reach(in[i]) + 1.0f);
+         if (g_casterBudget < before)
+            last = i;
+      }
+      if (last >= 0 && count > 0)
+         s_turn = (last + 1) % count;
+   }
    for (int i = 0; i < count; ++i) {
       const sRenderBackendLight &l = in[i];
       const float farZ = reach(l) + 1.0f;
@@ -1230,7 +1281,7 @@ void lights(const sRenderBackendLight *in, int count)
       // (the models' maps from where the light is before its sway: a torch's
       // bracket, a foot from the flame, went in and out of them, and its
       // shadow over the walls above with it)
-      if (casterSlotOf[i] >= 0 && draw_casters(base[i], casterSlotOf[i], farZ)) {
+      if (casterSlotOf[i] >= 0 && casterOk[i]) {
          sh[i * 4 + 3] = float(casterSlotOf[i]);
          ++casterSlot;
          s_hadCasters[l.id] = true;
@@ -1453,7 +1504,7 @@ void object_end()
 bool object_cached(uint32_t obj, const float pose[6])
 {
    auto it = g_objs.find(obj);
-   return it != g_objs.end() && memcmp(it->second.pose, pose, sizeof(float) * 6) == 0;
+   return it != g_objs.end() && pose_near(it->second.pose, pose);
 }
 
 void view_end() {}
@@ -2036,10 +2087,10 @@ void perf::log_line()
    window_drawable_size(dw, dh);
    fprintf(stderr,
            "OpenGL timing (ms): game %.1f, drawing %.1f, lights' shadows %.1f, hud %.1f, swap %.1f; "
-           "GPU scene %.1f, shadows %.1f, hud %.1f; %d draws, %d lights (setting %d, shadows %s, bump %s), "
+           "GPU scene %.1f, shadows %.1f, hud %.1f; models' maps drawn %d, waiting %d; %d draws, %d lights (setting %d, shadows %s, bump %s), "
            "%dx%d at %.0f%%, canvas %dx%d\n",
            g_cpu[kGame], g_cpu[kRender], g_cpu[kShadowCpu], g_cpu[kCanvas], g_cpu[kSwap], g_gpu[kGpuScene],
-           g_gpu[kGpuShadow], g_gpu[kGpuCanvas], g_drawsShown, dyn::g_count, g_dynMaxSetting,
+           g_gpu[kGpuShadow], g_gpu[kGpuCanvas], dyn::g_casterDrawn, dyn::g_casterDeferred, g_drawsShown, dyn::g_count, g_dynMaxSetting,
            g_dynShadowsSetting ? "on" : "off", g_dynBumpSetting ? "on" : "off", dw, dh, g_renderScale * 100.0f,
            g_lastWidth, g_lastHeight);
 }
