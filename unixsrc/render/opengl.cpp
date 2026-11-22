@@ -18,6 +18,7 @@
 
 #include <algorithm>
 #include <array>
+#include <climits>
 #include <cstddef>
 #include <cstdarg>
 #include <cstdio>
@@ -130,6 +131,16 @@ bool g_dynBumpSetting = true;
 int g_vsyncSetting = 2;
 int g_adaptiveInterval = 1;
 int scene_interval() { return g_vsyncSetting == 2 ? g_adaptiveInterval : g_vsyncSetting; }
+// Internal resolution (gl_settings.txt render_scale): the 3D view drawn at
+// this fraction of the screen's pixels, then scaled up to it (the HUD and
+// menus at full). On a Retina screen the full is near 4K.
+float g_renderScale = 1.0f;
+const float kRenderScales[] = {1.0f, 0.85f, 0.75f, 0.67f, 0.5f};
+// the 3D view's own framebuffer, while the scale is under 1
+GLuint g_sceneFbo = 0, g_sceneColorRb = 0, g_sceneDepthRb = 0;
+int g_sceneW = 0, g_sceneH = 0;
+bool g_sceneFboOn = false;
+float g_sceneSX = 1.0f, g_sceneSY = 1.0f;
 void load_gl_settings()
 {
    const char *home = getenv("HOME");
@@ -160,6 +171,8 @@ void load_gl_settings()
             g_dynBumpSetting = value != 0.0f;
          else if (!strcmp(key, "vsync"))
             g_vsyncSetting = std::clamp(int(value), 0, 2);
+         else if (!strcmp(key, "render_scale"))
+            g_renderScale = std::clamp(value, 0.25f, 1.0f);
       fclose(f);
    } else if (FILE *w = fopen(path.c_str(), "w")) {
       // (written once with the default, to be edited)
@@ -188,6 +201,65 @@ void drawable_scale(float &sx, float &sy)
       sx = static_cast<float>(dw) / g_clientWidth;
       sy = static_cast<float>(dh) / g_clientHeight;
    }
+   if (g_sceneFboOn) {   // (the 3D view's own, smaller framebuffer)
+      sx *= g_sceneSX;
+      sy *= g_sceneSY;
+   }
+}
+
+// The 3D view into its own framebuffer at the internal resolution (a frame
+// begun), and out of it: scaled up onto the screen's (before the HUD and the
+// menus over it, the present, a loading bar or a movie).
+void scene_fbo_begin()
+{
+   g_sceneFboOn = false;
+   if (g_renderScale >= 0.999f || !g_context)
+      return;
+   int dw = 0, dh = 0;
+   window_drawable_size(dw, dh);
+   if (dw <= 0 || dh <= 0)
+      return;
+   const int w = std::max(16, int(dw * g_renderScale + 0.5f)), h = std::max(16, int(dh * g_renderScale + 0.5f));
+   if (!g_sceneFbo) {
+      glGenFramebuffers(1, &g_sceneFbo);
+      glGenRenderbuffers(1, &g_sceneColorRb);
+      glGenRenderbuffers(1, &g_sceneDepthRb);
+   }
+   glBindFramebuffer(GL_FRAMEBUFFER, g_sceneFbo);
+   if (w != g_sceneW || h != g_sceneH) {
+      glBindRenderbuffer(GL_RENDERBUFFER, g_sceneColorRb);
+      glRenderbufferStorage(GL_RENDERBUFFER, GL_RGBA8, w, h);
+      glBindRenderbuffer(GL_RENDERBUFFER, g_sceneDepthRb);
+      glRenderbufferStorage(GL_RENDERBUFFER, GL_DEPTH_COMPONENT24, w, h);
+      glBindRenderbuffer(GL_RENDERBUFFER, 0);
+      glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_RENDERBUFFER, g_sceneColorRb);
+      glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_RENDERBUFFER, g_sceneDepthRb);
+      g_sceneW = w;
+      g_sceneH = h;
+   }
+   if (glCheckFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE) {
+      glBindFramebuffer(GL_FRAMEBUFFER, 0);
+      g_renderScale = 1.0f;   // (not to be had here: full)
+      return;
+   }
+   g_sceneSX = float(w) / float(dw);
+   g_sceneSY = float(h) / float(dh);
+   g_sceneFboOn = true;
+}
+
+void scene_fbo_end()
+{
+   if (!g_sceneFboOn)
+      return;
+   g_sceneFboOn = false;
+   int dw = 0, dh = 0;
+   window_drawable_size(dw, dh);
+   glBindFramebuffer(GL_READ_FRAMEBUFFER, g_sceneFbo);
+   glBindFramebuffer(GL_DRAW_FRAMEBUFFER, 0);
+   glDrawBuffer(GL_BACK);
+   glBlitFramebuffer(0, 0, g_sceneW, g_sceneH, 0, 0, dw, dh, GL_COLOR_BUFFER_BIT, GL_LINEAR);
+   glBindFramebuffer(GL_FRAMEBUFFER, 0);
+   glReadBuffer(GL_BACK);
 }
 
 void window_drawable_size(int &w, int &h)
@@ -487,6 +559,12 @@ struct Caster { std::vector<float> tris; float pose[6]; float c[3] = {0, 0, 0}; 
 std::unordered_map<uint32_t, Caster> g_objs;
 GLuint g_casterTex = 0, g_casterBuffer = 0, g_casterArray = 0;
 constexpr int kCasterSlots = 16;
+// The models' maps kept: drawn again only when the light, or a model in its
+// reach (moved, captured again), changed -- they were drawn every frame, for
+// every light with them.
+struct CasterSlotState { int id = INT_MIN; float pos[3] = {0, 0, 0}; float far = 0; uint64_t sig = 0; bool any = false; };
+CasterSlotState g_casterSlots[kCasterSlots];
+
 int g_casterSize = 0;
 GLint uCasters = -1;
 // each light's models' shadows faded in as it becomes real-time (by its id)
@@ -668,15 +746,30 @@ void ensure_casters()
    glTexParameteri(GL_TEXTURE_CUBE_MAP_ARRAY, GL_TEXTURE_COMPARE_FUNC, GL_LEQUAL);
    glActiveTexture(GL_TEXTURE0);
    g_casterSize = g_shadowSize;
+   for (CasterSlotState &s : g_casterSlots)
+      s = CasterSlotState();
+}
+
+// Is a sphere (its centre v from the light, radius r) in a cube face's view
+// (90 degrees along +-x, +-y, +-z)? Each face draws only what it sees: the
+// six used to draw everything in the light's reach, six times over.
+bool in_face(const float v[3], float r, int face)
+{
+   const int ax = face / 2;
+   const float a = (face & 1) ? -v[ax] : v[ax];
+   const float o1 = std::fabs(v[(ax + 1) % 3]), o2 = std::fabs(v[(ax + 2) % 3]);
+   const float slack = r * 1.4143f;
+   return a >= -r && a - o1 >= -slack && a - o2 >= -slack;
 }
 
 // the models near a light, into its slot of the models' shadows; false: none
 bool draw_casters(const sRenderBackendLight &l, int slot, float farZ)
 {
-   static std::vector<float> mine;
+   struct Mine { const Caster *o; float v[3]; };
+   static std::vector<Mine> mine;
+   static std::vector<float> tris;
    mine.clear();
-   const float reach2 = farZ * farZ;
-   (void)reach2;
+   uint64_t sig = 1469598103934665603ull;
    for (const auto &e : g_objs) {
       const Caster &o = e.second;
       if (o.tris.empty() || e.first == l.owner)
@@ -687,16 +780,35 @@ bool draw_casters(const sRenderBackendLight &l, int slot, float farZ)
       // own fixture, another object than the light's)
       if (d > farZ + o.r || (d < 2.0f && o.r < 2.5f))
          continue;
-      mine.insert(mine.end(), o.tris.begin(), o.tris.end());
+      mine.push_back({&o, {dx, dy, dz}});
+      sig = (sig ^ uint64_t(e.first)) * 1099511628211ull;
+      sig = (sig ^ uint64_t(uint32_t(o.frame))) * 1099511628211ull;
+      sig = (sig ^ uint64_t(o.tris.size())) * 1099511628211ull;
    }
+   CasterSlotState &st = g_casterSlots[slot];
+   if (st.id == l.id && st.sig == sig && st.far == farZ && !memcmp(st.pos, l.pos, sizeof(st.pos)))
+      return st.any;
+   st.id = l.id;
+   st.sig = sig;
+   st.far = farZ;
+   memcpy(st.pos, l.pos, sizeof(st.pos));
+   st.any = !mine.empty();
    if (mine.empty())
       return false;
+   // one buffer, each model's run of it
+   static std::vector<std::pair<GLint, GLsizei>> runs;
+   tris.clear();
+   runs.clear();
+   for (const Mine &m : mine) {
+      runs.push_back({GLint(tris.size() / 3), GLsizei(m.o->tris.size() / 3)});
+      tris.insert(tris.end(), m.o->tris.begin(), m.o->tris.end());
+   }
    glUseProgram(g_shadowProgram);
    glUniform3f(suLight, l.pos[0], l.pos[1], l.pos[2]);
    glUniform1f(suFar, farZ);
    glBindVertexArray(g_casterArray);
    glBindBuffer(GL_ARRAY_BUFFER, g_casterBuffer);
-   glBufferData(GL_ARRAY_BUFFER, GLsizeiptr(mine.size() * sizeof(float)), mine.data(), GL_STREAM_DRAW);
+   glBufferData(GL_ARRAY_BUFFER, GLsizeiptr(tris.size() * sizeof(float)), tris.data(), GL_STREAM_DRAW);
    for (int face = 0; face < 6; ++face) {
       glFramebufferTextureLayer(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, g_casterTex, 0, slot * 6 + face);
       glClear(GL_DEPTH_BUFFER_BIT);
@@ -704,7 +816,9 @@ bool draw_casters(const sRenderBackendLight &l, int slot, float farZ)
       // (from a foot out: a lamp's own fixture, round its light, casts nothing)
       face_matrix(m, l.pos, face, 1.0f, farZ);
       glUniformMatrix4fv(suViewProj, 1, GL_FALSE, m);
-      glDrawArrays(GL_TRIANGLES, 0, GLsizei(mine.size() / 3));
+      for (size_t k = 0; k < mine.size(); ++k)
+         if (in_face(mine[k].v, mine[k].o->r, face))
+            glDrawArrays(GL_TRIANGLES, runs[k].first, runs[k].second);
    }
    return true;
 }
@@ -716,23 +830,32 @@ void draw_shadow(const sRenderBackendLight &l, int slot, float farZ)
    glUniform1f(suFar, farZ);
    glBindVertexArray(g_meshArray);
    // the cells near enough
+   // (the cells in reach, then for each face those it sees, in runs)
+   struct Near { int c; float v[3]; float r; };
+   static std::vector<Near> near;
    static std::vector<std::pair<int, int>> runs;
-   runs.clear();
+   near.clear();
    const int cells = int(g_cellFirst.size()) - 1;
    for (int c = 0; c < cells; ++c) {
       const float *sp = &g_cellSphere[size_t(c) * 4];
       const float dx = sp[0] - l.pos[0], dy = sp[1] - l.pos[1], dz = sp[2] - l.pos[2];
       if (dx * dx + dy * dy + dz * dz > (farZ + sp[3]) * (farZ + sp[3]))
          continue;
-      const int a = g_cellFirst[size_t(c)], b = g_cellFirst[size_t(c) + 1];
-      if (b <= a)
+      if (g_cellFirst[size_t(c) + 1] <= g_cellFirst[size_t(c)])
          continue;
-      if (!runs.empty() && runs.back().second == a)
-         runs.back().second = b;
-      else
-         runs.push_back({a, b});
+      near.push_back({c, {dx, dy, dz}, sp[3]});
    }
    for (int face = 0; face < 6; ++face) {
+      runs.clear();
+      for (const Near &n : near) {
+         if (!in_face(n.v, n.r, face))
+            continue;
+         const int a = g_cellFirst[size_t(n.c)], b = g_cellFirst[size_t(n.c) + 1];
+         if (!runs.empty() && runs.back().second == a)
+            runs.back().second = b;
+         else
+            runs.push_back({a, b});
+      }
       glFramebufferTextureLayer(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, g_shadowTex, 0, slot * 6 + face);
       glClear(GL_DEPTH_BUFFER_BIT);
       float m[16];
@@ -867,6 +990,34 @@ void lights(const sRenderBackendLight *in, int count)
          wantCasters[rank[k].second] = true;
    }
    s_hadCasters.clear();
+   // each its own slot of the models' maps, kept from frame to frame (so a
+   // map kept is still its own)
+   int casterSlotOf[kMaxLights];
+   for (int i = 0; i < count; ++i)
+      casterSlotOf[i] = -1;
+   {
+      static std::unordered_map<int, int> s_slotOf;
+      bool taken[kCasterSlots] = {};
+      for (int i = 0; i < count; ++i) {
+         const auto it = wantCasters[i] ? s_slotOf.find(in[i].id) : s_slotOf.end();
+         if (it != s_slotOf.end() && !taken[it->second]) {
+            casterSlotOf[i] = it->second;
+            taken[it->second] = true;
+         }
+      }
+      for (int i = 0; i < count; ++i)
+         if (wantCasters[i] && casterSlotOf[i] < 0)
+            for (int s = 0; s < kCasterSlots; ++s)
+               if (!taken[s]) {
+                  casterSlotOf[i] = s;
+                  taken[s] = true;
+                  break;
+               }
+      s_slotOf.clear();
+      for (int i = 0; i < count; ++i)
+         if (casterSlotOf[i] >= 0)
+            s_slotOf[in[i].id] = casterSlotOf[i];
+   }
    for (int i = 0; i < count; ++i) {
       const sRenderBackendLight &l = in[i];
       const float farZ = reach(l) + 1.0f;
@@ -886,8 +1037,9 @@ void lights(const sRenderBackendLight *in, int count)
       // (the models' maps from where the light is before its sway: a torch's
       // bracket, a foot from the flame, went in and out of them, and its
       // shadow over the walls above with it)
-      if (wantCasters[i] && casterSlot < kCasterSlots && draw_casters(base[i], casterSlot, farZ)) {
-         sh[i * 4 + 3] = float(casterSlot++);
+      if (casterSlotOf[i] >= 0 && draw_casters(base[i], casterSlotOf[i], farZ)) {
+         sh[i * 4 + 3] = float(casterSlotOf[i]);
+         ++casterSlot;
          s_hadCasters[l.id] = true;
       } else
          g_fade[l.id] = 0.0f;   // (its models' shadows fade in when it has them again)
@@ -1399,7 +1551,7 @@ bool draw_vertices(GLenum primitive, const sRenderBackendVertex *vertices, int c
 namespace glpanel {
 bool g_open = false;
 int g_row = 0;
-enum { kShadow, kMinLight, kDynLights, kDynShadows, kDynBump, kVsync, kFps, kRows };
+enum { kShadow, kMinLight, kDynLights, kDynShadows, kDynBump, kScale, kVsync, kFps, kRows };
 Texture *g_font = nullptr, *g_white = nullptr;
 
 std::string settings_path()
@@ -1417,9 +1569,9 @@ std::string settings_path()
 void save()
 {
    if (FILE *w = fopen(settings_path().c_str(), "w")) {
-      fprintf(w, "min_light %.2f\nshadow_alert %d\nfps %d\ndynamic_lights %d\nlight_shadows %d\nshadow_size %d\nbump_maps %d\nvsync %d\n",
+      fprintf(w, "min_light %.2f\nshadow_alert %d\nfps %d\ndynamic_lights %d\nlight_shadows %d\nshadow_size %d\nbump_maps %d\nvsync %d\nrender_scale %.2f\n",
               g_minLight, g_PlayerShadowAlert, g_glFps ? 1 : 0, g_dynMaxSetting, g_dynShadowsSetting ? 1 : 0,
-              g_dynShadowSizeSetting, g_dynBumpSetting ? 1 : 0, g_vsyncSetting);
+              g_dynShadowSizeSetting, g_dynBumpSetting ? 1 : 0, g_vsyncSetting, g_renderScale);
       fclose(w);
    }
 }
@@ -1432,6 +1584,7 @@ const char *label(int row)
    case kDynLights: return "Real-time lights";
    case kDynShadows: return "Shadows from objects";
    case kDynBump: return "Bump maps";
+   case kScale: return "Resolution";
    case kVsync: return "V-sync";
    default: return "FPS counter";
    }
@@ -1454,6 +1607,13 @@ std::string value(int row)
    case kDynShadows: return g_dynShadowsSetting ? "On" : "Off";
    case kDynBump: return g_dynBumpSetting ? "On (real-time lights)" : "Off";
    case kVsync: return g_vsyncSetting == 2 ? "Adaptive" : g_vsyncSetting ? "On" : "Off (may tear)";
+   case kScale: {
+      int dw = 0, dh = 0;
+      window_drawable_size(dw, dh);
+      snprintf(b, sizeof(b), "%.0f%% (%d x %d)", g_renderScale * 100.0f, int(dw * g_renderScale + 0.5f),
+               int(dh * g_renderScale + 0.5f));
+      return b;
+   }
    default: return g_glFps ? "On" : "Off";
    }
 }
@@ -1474,6 +1634,16 @@ void change(int row, int dir)
    }
    case kDynShadows: g_dynShadowsSetting = !g_dynShadowsSetting; break;
    case kDynBump: g_dynBumpSetting = !g_dynBumpSetting; break;
+   case kScale: {
+      const int n = int(sizeof(kRenderScales) / sizeof(kRenderScales[0]));
+      int at = 0;
+      for (int k = 0; k < n; ++k)
+         if (std::fabs(kRenderScales[k] - g_renderScale) < std::fabs(kRenderScales[at] - g_renderScale))
+            at = k;
+      at = std::clamp(at + (dir > 0 ? 1 : -1), 0, n - 1);   // (right: lower, faster)
+      g_renderScale = kRenderScales[at];
+      break;
+   }
    case kVsync:
       g_vsyncSetting = (g_vsyncSetting + (dir > 0 ? 1 : 2)) % 3;
       g_adaptiveInterval = 1;
@@ -1661,6 +1831,7 @@ void swap_presented_frame()
 #endif
    if (!g_context || !g_presentPending)
       return;
+   scene_fbo_end();
    // Automated capture only needs the completed back buffer.  Some headless
    // compositors (notably WSLg during CI-style runs) can block indefinitely
    // in the window-system swap before the editor reaches its first hardware
@@ -2249,6 +2420,7 @@ static void present_legacy_frame(const void *pixels, int width, int height,
    }
 #endif
    if (!g_context || !pixels) return; SDL_GL_MakeCurrent(g_window, g_context);
+   scene_fbo_end();   // (the 3D view up onto the screen, under the canvas)
    int vx, vy, vw, vh; viewport(vx, vy, vw, vh);
    if (!g_scene) {
       // Logical mode changes may alter the aspect-fitted viewport. Clear the
@@ -2422,6 +2594,7 @@ uint8_t nearest_index(const uint8_t *pal, int r, int g, int b)
 
 void draw_load_bar(float fraction)
 {
+   scene_fbo_end();
    const bool deferred = g_deferredPixels != nullptr;
    const void *src = deferred ? g_deferredPixels : g_lastPixels;
    if (!src)
@@ -2556,6 +2729,8 @@ bool DarkRenderPresentMovieFrame(const void *rgba, int width, int height,
       return darkrt::MovieFrame(rgba, width, height, rowBytes, vp, dw, dh);
    }
 #endif
+   if (g_context)
+      scene_fbo_end();
    if (!g_context || !rgba || width <= 0 || height <= 0 ||
        rowBytes < width * 4)
       return false;
@@ -2655,13 +2830,14 @@ int RenderBackendBeginFrame(void)
 #endif
    if (!g_context) return 0; SDL_GL_MakeCurrent(g_window, g_context);
    set_swap_interval(scene_interval());
+   scene_fbo_begin();
    int x,y,w,h; viewport(x,y,w,h); set_gl_viewport(x,y,w,h); glClearColor(0,0,0,1);
    glDepthMask(GL_TRUE); glClear(GL_COLOR_BUFFER_BIT|GL_DEPTH_BUFFER_BIT);
    apply_depth_state(); apply_blend_state();
    g_scene=true;++g_sceneGeneration;return 1;
 }
 void RenderBackendEndFrame(void) { if (!g_rt) glFlush(); }
-void RenderBackendDeactivateScene(void) { g_scene=false;set_swap_interval(0); }
+void RenderBackendDeactivateScene(void) { if (!g_rt) scene_fbo_end(); g_scene=false;set_swap_interval(0); }
 void RenderBackendClearDepth(void)
 {
    if (g_context) clear_depth();
