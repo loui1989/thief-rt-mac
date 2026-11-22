@@ -692,10 +692,15 @@ static void report_compatibility_chunks(const char* phase)
          case kDBCompatRawPreserved:  ++rawPreserved; break;
          default:                     ++unclassified; break;
       }
-      mprintf("  %-12s %u.%u %-14s %u bytes%s%s\n",
-              chunk.tag.label,chunk.version.major,chunk.version.minor,
-              compatibility_status_name(chunk.status),(unsigned)chunk.size,
-              chunk.detail[0] ? " - " : "",chunk.detail);
+      // (each chunk on the console too, but not in the build as shipped:
+      // thousands of lines a load in its log; mission_compatibility.log has them)
+      static const bool shipping = getenv("THIEF_RT_SHIPPING") &&
+                                   atof(getenv("THIEF_RT_SHIPPING")) != 0.0;
+      if (!shipping)
+         mprintf("  %-12s %u.%u %-14s %u bytes%s%s\n",
+                 chunk.tag.label,chunk.version.major,chunk.version.minor,
+                 compatibility_status_name(chunk.status),(unsigned)chunk.size,
+                 chunk.detail[0] ? " - " : "",chunk.detail);
       if (report)
          fprintf(report,"  %-12s %u.%u %-14s %u bytes%s%s\n",
                  chunk.tag.label,chunk.version.major,chunk.version.minor,

@@ -530,6 +530,18 @@ GLuint compile_shader(GLenum type, const char *source)
 // 0 off), light_shadows (0/1), shadow_size (each cube face, pixels).
 // ---- where a frame's time goes (the frame counter on: shown under it, and
 // in the log every few seconds) ----------------------------------------------
+// the build as shipped (the launcher's launch.sh: THIEF_RT_SHIPPING=1): the
+// frame counter shows the frame rate alone, and nothing of where a frame's
+// time goes (on the screen or in the log), as the ray tracer's
+bool shipping()
+{
+   static const bool s = [] {
+      const char *e = getenv("THIEF_RT_SHIPPING");
+      return e && atof(e) != 0.0;
+   }();
+   return s;
+}
+
 namespace perf {
 using clk = std::chrono::steady_clock;
 enum { kGame, kRender, kShadowCpu, kCanvas, kSwap, kCpuN };
@@ -546,7 +558,7 @@ GLuint g_q[kRing][kQ];
 int g_qSec[kRing][kQ], g_qN[kRing], g_ring = 0, g_cur = -1;
 bool g_qMade = false;
 #endif
-bool on() { return g_glFps; }
+bool on() { return g_glFps && !shipping(); }
 float ms(clk::time_point a, clk::time_point b) { return std::chrono::duration<float, std::milli>(b - a).count(); }
 void avg(float &into, float v) { into += (v - into) * 0.05f; }
 // the GPU's time from here on is the section's (-1: none)
@@ -1362,7 +1374,7 @@ void lights(const sRenderBackendLight *in, int count)
                  in[i].color[0], in[i].color[1], in[i].color[2], in[i].radius, in[i].inner_radius,
                  in[i].spot_inner, in[i].spot_outer, sh[i * 4]);
    static int s_logged = -1;
-   if ((count != s_logged && (g_frame % 120) == 1) || (getenv("DARK_GL_LIGHTS_LIST") && g_frame % 50 == 0)) {
+   if ((count != s_logged && (g_frame % 120) == 1 && !shipping()) || (getenv("DARK_GL_LIGHTS_LIST") && g_frame % 50 == 0)) {
       s_logged = count;
       fprintf(stderr, "OpenGL: %d real-time lights, %d shadows drawn this frame; models' shadows for %d of them (%zu models kept)\n",
               count, drawn, casterSlot, g_objs.size());
@@ -2034,17 +2046,19 @@ void draw()
       // where the time goes (ms): the game's own work, the 3D view's
       // drawing (the lights' shadows of it), the HUD canvas, the wait in the
       // swap; and the graphics chip's
-      using namespace perf;
-      char l1[128], l2[128];
-      snprintf(l1, sizeof(l1), "CPU  game %4.1f  shadows %4.1f  draw %4.1f  hud %4.1f  swap %4.1f  draws %d",
-               g_cpu[kGame], g_cpu[kShadowCpu], g_cpu[kRender], g_cpu[kCanvas], g_cpu[kSwap], g_drawsShown);
-      snprintf(l2, sizeof(l2), "GPU  scene %4.1f  shadows %4.1f  hud %4.1f", g_gpu[kGpuScene], g_gpu[kGpuShadow],
-               g_gpu[kGpuCanvas]);
-      const float lh = rtfont::kCellH * s * 1.25f;
-      const size_t n = std::max(strlen(l1), strlen(l2));
-      bg.quad(8 * s, 8 * s + lh, 8 * s + (n + 1) * rtfont::kCellW * s, 8 * s + lh * 3.1f, 0, 0, 1, 1, shade);
-      text(fg, 14 * s, 10 * s + lh, s, l1, dim);
-      text(fg, 14 * s, 10 * s + lh * 2, s, l2, dim);
+      if (!shipping()) {
+         using namespace perf;
+         char l1[128], l2[128];
+         snprintf(l1, sizeof(l1), "CPU  game %4.1f  shadows %4.1f  draw %4.1f  hud %4.1f  swap %4.1f  draws %d",
+                  g_cpu[kGame], g_cpu[kShadowCpu], g_cpu[kRender], g_cpu[kCanvas], g_cpu[kSwap], g_drawsShown);
+         snprintf(l2, sizeof(l2), "GPU  scene %4.1f  shadows %4.1f  hud %4.1f", g_gpu[kGpuScene], g_gpu[kGpuShadow],
+                  g_gpu[kGpuCanvas]);
+         const float lh = rtfont::kCellH * s * 1.25f;
+         const size_t n = std::max(strlen(l1), strlen(l2));
+         bg.quad(8 * s, 8 * s + lh, 8 * s + (n + 1) * rtfont::kCellW * s, 8 * s + lh * 3.1f, 0, 0, 1, 1, shade);
+         text(fg, 14 * s, 10 * s + lh, s, l1, dim);
+         text(fg, 14 * s, 10 * s + lh * 2, s, l2, dim);
+      }
    }
    if (g_open) {
       const float lineH = rtfont::kCellH * s * 1.3f, w = 64 * rtfont::kCellW * s;
