@@ -520,6 +520,118 @@ GLuint compile_shader(GLenum type, const char *source)
 // the level's walls in a cube map each, their own light taken out of the
 // lightmaps (objlight.c). gl_settings.txt: dynamic_lights (how many at most,
 // 0 off), light_shadows (0/1), shadow_size (each cube face, pixels).
+// ---- where a frame's time goes (the frame counter on: shown under it, and
+// in the log every few seconds) ----------------------------------------------
+namespace perf {
+using clk = std::chrono::steady_clock;
+enum { kGame, kRender, kShadowCpu, kCanvas, kSwap, kCpuN };
+enum { kGpuScene, kGpuShadow, kGpuCanvas, kGpuN };
+float g_cpu[kCpuN], g_gpu[kGpuN];   // (ms, averaged)
+double g_frameCpu[kCpuN];
+double g_shadowPending = 0;   // (the lights are set before the frame begins)
+int g_draws = 0, g_drawsShown = 0;
+bool g_inFrame = false;
+clk::time_point g_swapEnd, g_begin, g_present;
+#ifdef GL_TIME_ELAPSED
+constexpr int kRing = 4, kQ = 12;
+GLuint g_q[kRing][kQ];
+int g_qSec[kRing][kQ], g_qN[kRing], g_ring = 0, g_cur = -1;
+bool g_qMade = false;
+#endif
+bool on() { return g_glFps; }
+float ms(clk::time_point a, clk::time_point b) { return std::chrono::duration<float, std::milli>(b - a).count(); }
+void avg(float &into, float v) { into += (v - into) * 0.05f; }
+// the GPU's time from here on is the section's (-1: none)
+void gpu(int sec)
+{
+#ifdef GL_TIME_ELAPSED
+   if (!on())
+      return;
+   if (!g_qMade) {
+      glGenQueries(kRing * kQ, &g_q[0][0]);
+      g_qMade = true;
+   }
+   if (g_cur >= 0)
+      glEndQuery(GL_TIME_ELAPSED);
+   g_cur = -1;
+   if (sec < 0 || g_qN[g_ring] >= kQ)
+      return;
+   glBeginQuery(GL_TIME_ELAPSED, g_q[g_ring][g_qN[g_ring]]);
+   g_qSec[g_ring][g_qN[g_ring]++] = sec;
+   g_cur = sec;
+#else
+   (void)sec;
+#endif
+}
+void frame_begin()
+{
+   if (!on()) {
+      g_inFrame = false;
+      return;
+   }
+   const auto now = clk::now();
+   for (double &c : g_frameCpu)
+      c = 0;
+   g_frameCpu[kShadowCpu] = g_shadowPending;
+   g_shadowPending = 0;
+   if (g_swapEnd.time_since_epoch().count())
+      g_frameCpu[kGame] = std::max(0.0, ms(g_swapEnd, now) - g_frameCpu[kShadowCpu]);
+   g_begin = now;
+   g_draws = 0;
+   g_inFrame = true;
+   gpu(kGpuScene);
+}
+void present_begin()
+{
+   if (!g_inFrame)
+      return;
+   g_present = clk::now();
+   g_frameCpu[kRender] = ms(g_begin, g_present);
+   gpu(kGpuCanvas);
+}
+void log_line();
+// (around the swap)
+void swap_begin()
+{
+   if (!g_inFrame)
+      return;
+   g_frameCpu[kCanvas] = ms(g_present, clk::now());
+#ifdef GL_TIME_ELAPSED
+   gpu(-1);
+   // the oldest frame's answers (3 frames on: had)
+   const int old = (g_ring + 1) % kRing;
+   float sum[kGpuN] = {};
+   bool all = g_qN[old] > 0;
+   for (int k = 0; k < g_qN[old]; ++k) {
+      GLint ready = 0;
+      glGetQueryObjectiv(g_q[old][k], GL_QUERY_RESULT_AVAILABLE, &ready);
+      if (!ready) { all = false; break; }
+      GLuint64 ns = 0;
+      glGetQueryObjectui64v(g_q[old][k], GL_QUERY_RESULT, &ns);
+      sum[g_qSec[old][k]] += float(double(ns) / 1.0e6);
+   }
+   if (all)
+      for (int s = 0; s < kGpuN; ++s)
+         avg(g_gpu[s], sum[s]);
+   g_ring = old;
+   g_qN[g_ring] = 0;
+#endif
+}
+void swap_end(clk::time_point before)
+{
+   if (!g_inFrame)
+      return;
+   g_swapEnd = clk::now();
+   g_frameCpu[kSwap] = ms(before, g_swapEnd);
+   for (int s = 0; s < kCpuN; ++s)
+      if (g_frameCpu[kGame] < 250.0)
+         avg(g_cpu[s], float(g_frameCpu[s]));
+   g_drawsShown = g_draws;
+   g_inFrame = false;
+   log_line();
+}
+} // namespace perf
+
 namespace dyn {
 int &g_max = g_dynMaxSetting;            // the settings
 bool &g_shadows = g_dynShadowsSetting;
@@ -1783,10 +1895,24 @@ void draw()
                shade[4] = {0, 0, 0, 0.72f};
    Batch bg, fg;
    if (g_glFps) {
-      char b[64];
+      char b[128];
       snprintf(b, sizeof(b), "%3.0f fps  %5.1f ms", 1000.0f / std::max(s_ms, 0.1f), s_ms);
       bg.quad(8 * s, 8 * s, 8 * s + (strlen(b) + 1) * rtfont::kCellW * s, 8 * s + rtfont::kCellH * s * 1.2f, 0, 0, 1, 1, shade);
       text(fg, 14 * s, 10 * s, s, b, white);
+      // where the time goes (ms): the game's own work, the 3D view's
+      // drawing (the lights' shadows of it), the HUD canvas, the wait in the
+      // swap; and the graphics chip's
+      using namespace perf;
+      char l1[128], l2[128];
+      snprintf(l1, sizeof(l1), "CPU  game %4.1f  shadows %4.1f  draw %4.1f  hud %4.1f  swap %4.1f  draws %d",
+               g_cpu[kGame], g_cpu[kShadowCpu], g_cpu[kRender], g_cpu[kCanvas], g_cpu[kSwap], g_drawsShown);
+      snprintf(l2, sizeof(l2), "GPU  scene %4.1f  shadows %4.1f  hud %4.1f", g_gpu[kGpuScene], g_gpu[kGpuShadow],
+               g_gpu[kGpuCanvas]);
+      const float lh = rtfont::kCellH * s * 1.25f;
+      const size_t n = std::max(strlen(l1), strlen(l2));
+      bg.quad(8 * s, 8 * s + lh, 8 * s + (n + 1) * rtfont::kCellW * s, 8 * s + lh * 3.1f, 0, 0, 1, 1, shade);
+      text(fg, 14 * s, 10 * s + lh, s, l1, dim);
+      text(fg, 14 * s, 10 * s + lh * 2, s, l2, dim);
    }
    if (g_open) {
       const float lineH = rtfont::kCellH * s * 1.3f, w = 64 * rtfont::kCellW * s;
@@ -1818,6 +1944,25 @@ void draw()
 }
 } // namespace glpanel
 
+void perf::log_line()
+{
+   static clk::time_point s_at;
+   const auto now = clk::now();
+   if (now - s_at < std::chrono::seconds(3))
+      return;
+   s_at = now;
+   int dw = 0, dh = 0;
+   window_drawable_size(dw, dh);
+   fprintf(stderr,
+           "OpenGL timing (ms): game %.1f, drawing %.1f, lights' shadows %.1f, hud %.1f, swap %.1f; "
+           "GPU scene %.1f, shadows %.1f, hud %.1f; %d draws, %d lights (setting %d, shadows %s, bump %s), "
+           "%dx%d at %.0f%%, canvas %dx%d\n",
+           g_cpu[kGame], g_cpu[kRender], g_cpu[kShadowCpu], g_cpu[kCanvas], g_cpu[kSwap], g_gpu[kGpuScene],
+           g_gpu[kGpuShadow], g_gpu[kGpuCanvas], g_drawsShown, dyn::g_count, g_dynMaxSetting,
+           g_dynShadowsSetting ? "on" : "off", g_dynBumpSetting ? "on" : "off", dw, dh, g_renderScale * 100.0f,
+           g_lastWidth, g_lastHeight);
+}
+
 void swap_presented_frame()
 {
 #ifdef DARK_RT
@@ -1838,11 +1983,14 @@ void swap_presented_frame()
    // frame.  Keep ordinary interactive presentation unchanged and make the
    // no-swap behavior an explicit test-only opt-in.
    glpanel::draw();
+   perf::swap_begin();
+   const auto swapAt = perf::clk::now();
    const char *headlessCapture = getenv("DARK_RENDER_CAPTURE_HEADLESS");
    if (headlessCapture && atoi(headlessCapture) != 0)
       glFlush();
    else
       SDL_GL_SwapWindow(g_window);
+   perf::swap_end(swapAt);
 
    // A working swap interval already paces gameplay. The old unconditional
    // post-swap delay occasionally added an extra millisecond (or a full
@@ -2420,6 +2568,8 @@ static void present_legacy_frame(const void *pixels, int width, int height,
    }
 #endif
    if (!g_context || !pixels) return; SDL_GL_MakeCurrent(g_window, g_context);
+   if (g_scene)
+      perf::present_begin();
    scene_fbo_end();   // (the 3D view up onto the screen, under the canvas)
    int vx, vy, vw, vh; viewport(vx, vy, vw, vh);
    if (!g_scene) {
@@ -2834,6 +2984,7 @@ int RenderBackendBeginFrame(void)
    int x,y,w,h; viewport(x,y,w,h); set_gl_viewport(x,y,w,h); glClearColor(0,0,0,1);
    glDepthMask(GL_TRUE); glClear(GL_COLOR_BUFFER_BIT|GL_DEPTH_BUFFER_BIT);
    apply_depth_state(); apply_blend_state();
+   perf::frame_begin();
    g_scene=true;++g_sceneGeneration;return 1;
 }
 void RenderBackendEndFrame(void) { if (!g_rt) glFlush(); }
@@ -2974,6 +3125,7 @@ int RenderBackendDraw(int primitive,const sRenderBackendVertex *vertices,int cou
    // particles queued before, an elemental's flames -- drawn as ever)
    if (dyn::g_collect && dyn::g_curObj) { dyn::collect(vertices,count,second!=0,primitive); return 1; }
    if (dyn::uNormal >= 0 && dyn::g_active) dyn::bind_normal(second ? static_cast<Texture*>(g_textures[0]) : nullptr);
+   ++perf::g_draws;
    return draw_vertices(p,vertices,count,second!=0,g_width,g_height,g_fog,
       g_fogColor,g_alphaTest);
 }
@@ -3139,7 +3291,13 @@ void RenderBackendSetDynamicLights(const sRenderBackendLight *lights, int count,
       }
    }
 #endif
+   const auto t0 = perf::clk::now();
+   perf::gpu(perf::kGpuShadow);
    dyn::lights(lights, lights ? count : 0);
+   if (perf::on())
+      perf::g_shadowPending += perf::ms(t0, perf::clk::now());
+   if (perf::g_inFrame)
+      perf::gpu(perf::kGpuScene);   // (else: the shadows' time until the frame begins)
 }
 void RenderBackendDynamicViewEnd(void)
 {
