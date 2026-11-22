@@ -674,7 +674,9 @@ constexpr int kCasterSlots = 16;
 // The models' maps kept: drawn again only when the light, or a model in its
 // reach (moved, captured again), changed -- they were drawn every frame, for
 // every light with them.
-struct CasterSlotState { int id = INT_MIN; float pos[3] = {0, 0, 0}; float far = 0; uint64_t sig = 0; bool any = false; };
+// (each face's models and their poses, as last drawn: a face no model in it
+// moved in kept -- a guard breathing redrew all six of each light near him)
+struct CasterSlotState { int id = INT_MIN; float pos[3] = {0, 0, 0}; float far = 0; uint64_t faceSig[6] = {}; bool any = false; };
 CasterSlotState g_casterSlots[kCasterSlots];
 
 int g_casterSize = 0;
@@ -877,11 +879,10 @@ bool in_face(const float v[3], float r, int face)
 // the models near a light, into its slot of the models' shadows; false: none
 bool draw_casters(const sRenderBackendLight &l, int slot, float farZ)
 {
-   struct Mine { const Caster *o; float v[3]; };
+   struct Mine { const Caster *o; float v[3]; int id; };
    static std::vector<Mine> mine;
    static std::vector<float> tris;
    mine.clear();
-   uint64_t sig = 1469598103934665603ull;
    for (const auto &e : g_objs) {
       const Caster &o = e.second;
       if (o.tris.empty() || e.first == l.owner)
@@ -892,21 +893,37 @@ bool draw_casters(const sRenderBackendLight &l, int slot, float farZ)
       // own fixture, another object than the light's)
       if (d > farZ + o.r || (d < 2.0f && o.r < 2.5f))
          continue;
-      mine.push_back({&o, {dx, dy, dz}});
-      sig = (sig ^ uint64_t(e.first)) * 1099511628211ull;
-      sig = (sig ^ uint64_t(uint32_t(o.frame))) * 1099511628211ull;
-      sig = (sig ^ uint64_t(o.tris.size())) * 1099511628211ull;
+      mine.push_back({&o, {dx, dy, dz}, int(e.first)});
    }
    CasterSlotState &st = g_casterSlots[slot];
-   if (st.id == l.id && st.sig == sig && st.far == farZ && !memcmp(st.pos, l.pos, sizeof(st.pos)))
-      return st.any;
-   st.id = l.id;
-   st.sig = sig;
-   st.far = farZ;
-   memcpy(st.pos, l.pos, sizeof(st.pos));
+   if (!(st.id == l.id && st.far == farZ && !memcmp(st.pos, l.pos, sizeof(st.pos)))) {
+      st.id = l.id;
+      st.far = farZ;
+      memcpy(st.pos, l.pos, sizeof(st.pos));
+      for (uint64_t &f : st.faceSig)
+         f = 0;   // (another light, or moved: all six again)
+   }
    st.any = !mine.empty();
-   if (mine.empty())
+   if (mine.empty()) {
+      for (uint64_t &f : st.faceSig)
+         f = 0;
       return false;
+   }
+   uint64_t sig[6];
+   bool need = false;
+   for (int face = 0; face < 6; ++face) {
+      uint64_t s = 1469598103934665603ull;
+      for (const Mine &m : mine)
+         if (in_face(m.v, m.o->r, face)) {
+            s = (s ^ uint64_t(uint32_t(m.id))) * 1099511628211ull;
+            s = (s ^ uint64_t(uint32_t(m.o->frame))) * 1099511628211ull;
+            s = (s ^ uint64_t(m.o->tris.size())) * 1099511628211ull;
+         }
+      sig[face] = s;
+      need |= s != st.faceSig[face];
+   }
+   if (!need)
+      return true;
    // one buffer, each model's run of it
    static std::vector<std::pair<GLint, GLsizei>> runs;
    tris.clear();
@@ -922,6 +939,9 @@ bool draw_casters(const sRenderBackendLight &l, int slot, float farZ)
    glBindBuffer(GL_ARRAY_BUFFER, g_casterBuffer);
    glBufferData(GL_ARRAY_BUFFER, GLsizeiptr(tris.size() * sizeof(float)), tris.data(), GL_STREAM_DRAW);
    for (int face = 0; face < 6; ++face) {
+      if (sig[face] == st.faceSig[face])
+         continue;
+      st.faceSig[face] = sig[face];
       glFramebufferTextureLayer(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, g_casterTex, 0, slot * 6 + face);
       glClear(GL_DEPTH_BUFFER_BIT);
       float m[16];
@@ -1059,7 +1079,7 @@ void lights(const sRenderBackendLight *in, int count)
    s_live.assign(in, in + count);
    const sRenderBackendLight *base = in;   // (as given: before a flame's sway)
    {
-      const float t = float(std::fmod(std::chrono::duration<double>(now.time_since_epoch()).count(), 3600.0));
+      float t = float(std::fmod(std::chrono::duration<double>(now.time_since_epoch()).count(), 3600.0));
       int swaying = 0;
       for (sRenderBackendLight &l : s_live) {
          if (!l.flicker)
@@ -1074,9 +1094,14 @@ void lights(const sRenderBackendLight *in, int count)
          for (float &c : l.color)
             c *= k;
          if (swaying++ < 6 && g_shadows) {
+            // (its place moved 30 times a second, the lights by turns: each
+            // move is its shadows drawn again, six lights' a frame before)
+            const float t0 = t;
+            t = (std::floor(t * 30.0f + 0.5f * float(swaying & 1)) - 0.5f * float(swaying & 1)) / 30.0f;
             l.pos[0] += 0.05f * noise(5.3f, 1);
             l.pos[1] += 0.05f * noise(5.9f, 2);
             l.pos[2] += 0.06f * noise(7.1f, 3);
+            t = t0;
          }
       }
       in = s_live.data();
@@ -1718,7 +1743,7 @@ std::string value(int row)
       return b;
    case kDynShadows: return g_dynShadowsSetting ? "On" : "Off";
    case kDynBump: return g_dynBumpSetting ? "On (real-time lights)" : "Off";
-   case kVsync: return g_vsyncSetting == 2 ? "Adaptive" : g_vsyncSetting ? "On" : "Off (may tear)";
+   case kVsync: return g_vsyncSetting == 2 ? "Adaptive" : g_vsyncSetting ? "On" : "Off (unlocked, may tear)";
    case kScale: {
       int dw = 0, dh = 0;
       window_drawable_size(dw, dh);
@@ -1995,7 +2020,10 @@ void swap_presented_frame()
    // A working swap interval already paces gameplay. The old unconditional
    // post-swap delay occasionally added an extra millisecond (or a full
    // refresh on some compositors), producing visibly uneven camera motion.
-   if (g_swapInterval != 1 || !g_swapIntervalApplied) {
+   // (v-sync off in play: as fast as it goes)
+   if (g_scene && g_vsyncSetting == 0) {
+      g_lastPresentTicks = 0;
+   } else if (g_swapInterval != 1 || !g_swapIntervalApplied) {
       const Uint64 now = SDL_GetTicks64();
       if (g_lastPresentTicks && now - g_lastPresentTicks < 16)
          SDL_Delay(static_cast<Uint32>(16 - (now - g_lastPresentTicks)));
