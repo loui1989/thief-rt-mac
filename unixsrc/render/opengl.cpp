@@ -213,13 +213,19 @@ void drawable_scale(float &sx, float &sy)
 void scene_fbo_begin()
 {
    g_sceneFboOn = false;
-   if (g_renderScale >= 0.999f || !g_context)
+   // (at 100% too: drawn straight into the window's own buffer the 3D view
+   // held it, on macOS, the whole frame -- waiting on the system's
+   // compositor for it now and then, the frame time unsteady; now the window
+   // is drawn into only at the end, the scene copied in and the HUD over it)
+   static bool s_failed = getenv("DARK_GL_DIRECT") != nullptr;
+   if (!g_context || s_failed)
       return;
    int dw = 0, dh = 0;
    window_drawable_size(dw, dh);
    if (dw <= 0 || dh <= 0)
       return;
-   const int w = std::max(16, int(dw * g_renderScale + 0.5f)), h = std::max(16, int(dh * g_renderScale + 0.5f));
+   const float s = g_renderScale >= 0.999f ? 1.0f : g_renderScale;
+   const int w = std::max(16, int(dw * s + 0.5f)), h = std::max(16, int(dh * s + 0.5f));
    if (!g_sceneFbo) {
       glGenFramebuffers(1, &g_sceneFbo);
       glGenRenderbuffers(1, &g_sceneColorRb);
@@ -239,7 +245,8 @@ void scene_fbo_begin()
    }
    if (glCheckFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE) {
       glBindFramebuffer(GL_FRAMEBUFFER, 0);
-      g_renderScale = 1.0f;   // (not to be had here: full)
+      g_renderScale = 1.0f;   // (not to be had here: full, straight in)
+      s_failed = true;
       return;
    }
    g_sceneSX = float(w) / float(dw);
@@ -257,7 +264,8 @@ void scene_fbo_end()
    glBindFramebuffer(GL_READ_FRAMEBUFFER, g_sceneFbo);
    glBindFramebuffer(GL_DRAW_FRAMEBUFFER, 0);
    glDrawBuffer(GL_BACK);
-   glBlitFramebuffer(0, 0, g_sceneW, g_sceneH, 0, 0, dw, dh, GL_COLOR_BUFFER_BIT, GL_LINEAR);
+   glBlitFramebuffer(0, 0, g_sceneW, g_sceneH, 0, 0, dw, dh, GL_COLOR_BUFFER_BIT,
+                     g_sceneW == dw && g_sceneH == dh ? GL_NEAREST : GL_LINEAR);
    glBindFramebuffer(GL_FRAMEBUFFER, 0);
    glReadBuffer(GL_BACK);
 }
