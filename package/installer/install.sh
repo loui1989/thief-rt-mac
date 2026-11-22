@@ -160,12 +160,12 @@ fi
 
 r="$(message "Thief RT: Thief Gold and Thief II -- and their fan missions, The Black Parade among them -- with path-traced lighting, for Apple silicon Macs.
 
-The installer looks for your copies of the games on this Mac (from Steam or GOG: the game's folder, copied from a PC or a Windows install), and for The Black Parade and the Thief Gold HD Mod in your Downloads, then puts a launcher in Applications.
+The installer looks for your copies of the games on this Mac (from Steam or GOG: the game's folder, copied from a PC or a Windows install), and for The Black Parade and the Thief Gold and Thief II HD Mods in your Downloads, then puts a launcher in Applications.
 
 macOS may ask whether the installer can read your Downloads and Documents folders: that is where it looks." "Quit" "Continue")"
 [ "$r" = "Continue" ] || exit 0
 else
-  r="$(message "Thief RT looks for your games now: Thief Gold and Thief II (the game's folder, from Steam or GOG), and The Black Parade and the Thief Gold HD Mod in your Downloads.
+  r="$(message "Thief RT looks for your games now: Thief Gold and Thief II (the game's folder, from Steam or GOG), and The Black Parade and the HD Mods (Thief Gold, Thief II) in your Downloads.
 
 macOS asks whether Thief RT may read your Downloads, Documents and Desktop folders: allow it, so it can look there (and the games can be played from there)." "Quit" "Continue")"
   [ "$r" = "Continue" ] || exit 0
@@ -187,7 +187,7 @@ if [ -n "$blocked" ] && [ -z "$SETUP" ]; then DEFER=1; fi
 if [ -n "$blocked" ] && [ -n "$SETUP" ]; then
   r="$(message "macOS did not let Thief RT look in:$blocked
 
-That is where it looks for the games, The Black Parade and the HD Mod. To allow it: System Settings > Privacy & Security > Files & Folders > Thief RT: turn those folders on, then choose File > Find Games Again in Thief RT.
+That is where it looks for the games, The Black Parade and the HD Mods. To allow it: System Settings > Privacy & Security > Files & Folders > Thief RT: turn those folders on, then choose File > Find Games Again in Thief RT.
 
 Or carry on and show it the games' folders yourself." "Quit" "Open Settings" "Carry on")"
   case "$r" in
@@ -198,6 +198,7 @@ Or carry on and show it the games' folders yourself." "Quit" "Open Settings" "Ca
 fi
 
 TG_DIR="" T2_DIR="" TAKE_BP="" TAKE_HD="" BP_HAVE="" HD_HAVE="" HD_NOTE=""
+TAKE_T2HD="" T2HD_HAVE="" T2HD_SRC="" T2HD_NOTE=""
 if [ -z "$DEFER" ]; then
 notify "Looking for the games..."
 
@@ -319,6 +320,18 @@ done
 
 # an HDMOD folder: one with the mod's objects or textures in it
 is_hdmod() { [ -d "$1" ] && [ -n "$(file_in "$1" obj)$(file_in "$1" fam)" ]; }
+# which game's HD Mod an HDMOD folder is: Thief II's has its own texture families (the
+# mansions' marble floors, the Mechanists'), Thief Gold's not
+hdmod_game() {
+  local f; f="$(file_in "$1" fam)"
+  if [ -n "$f" ] && [ -n "$(file_in "$f" mbfloor)$(file_in "$f" vicm01)$(file_in "$f" newmech)$(file_in "$f" civicbui)" ]; then
+    echo t2
+  else
+    echo tg
+  fi
+}
+# the same, from the list of an archive's or an installer's files (on stdin)
+listed_game() { if grep -qiE '/fam/(mbfloor|vicm01|newmech|civicbui)/'; then echo t2; else echo tg; fi; }
 
 HD_HAVE="" HD_SRC="" HD_NOTE=""
 if [ -n "$TG_DIR" ]; then
@@ -327,20 +340,26 @@ if [ -n "$TG_DIR" ]; then
   else
     notify "Looking for the Thief Gold HD Mod..."
     while IFS= read -r d; do
-      is_hdmod "$d" && { HD_SRC="dir:$d"; break; }
+      is_hdmod "$d" && [ "$(hdmod_game "$d")" = tg ] && { HD_SRC="dir:$d"; break; }
     done < <(for r in "$DOWNLOADS" "$HOME/Games" "$HOME/Documents" "$HOME/Desktop"; do
-               [ -d "$r" ] && find "$r" -maxdepth 5 \( -path "$TG_DIR" -o -name 'Thief RT' -o -name '.Trash' \) -prune \
+               [ -d "$r" ] && find "$r" -maxdepth 5 \( -path "$TG_DIR" -o -path "${T2_DIR:-/nonexistent}" -o -name 'Thief RT' -o -name '.Trash' \) -prune \
                  -o -type d -iname HDMOD -print 2>/dev/null
              done)
     if [ -z "$HD_SRC" ]; then
       for a in "$DOWNLOADS"/*.zip "$DOWNLOADS"/*.7z "$DOWNLOADS"/*.rar "$DOWNLOADS"/*.exe; do
         [ -f "$a" ] || continue
-        case "$(basename "$a" | tr '[:upper:]' '[:lower:]')" in *hd*mod*|*hdmod*|thief1hd*) ;; *) continue ;; esac
-        if tar -tf "$a" 2>/dev/null | grep -qiE '(^|/)hdmod/(obj|fam)/'; then HD_SRC="archive:$a"; break; fi
+        case "$(basename "$a" | tr '[:upper:]' '[:lower:]')" in
+          *thief2*|*thief?2*|*thief?ii*|t2*) continue ;;   # (Thief II's: below)
+          *hd*mod*|*hdmod*|thief1hd*) ;;
+          *) continue ;;
+        esac
+        lst="$(tar -tf "$a" 2>/dev/null)"
+        if printf '%s\n' "$lst" | grep -qiE '(^|/)hdmod/(obj|fam)/' && [ "$(printf '%s\n' "$lst" | listed_game)" = tg ]; then HD_SRC="archive:$a"; break; fi
         case "$a" in
           *.exe|*.EXE)
             if [ -n "$INNOEXTRACT" ]; then
-              if "$INNOEXTRACT" -l "$a" 2>>"$LOG" | grep -qiE '[/"]hdmod/(obj|fam)/'; then HD_SRC="inno:$a"; break; fi
+              lst="$("$INNOEXTRACT" -l "$a" 2>>"$LOG")"
+              if printf '%s\n' "$lst" | grep -qiE '[/"]hdmod/(obj|fam)/' && [ "$(printf '%s\n' "$lst" | listed_game)" = tg ]; then HD_SRC="inno:$a"; break; fi
             else
               HD_NOTE="
 
@@ -360,6 +379,56 @@ if [ -n "$HD_SRC" ]; then
 
 Install it into Thief Gold's folder? Its hand-made HD textures, models and skies are then used in the original missions and in fan missions (about 3 GB; unpacking takes a few minutes)." "Skip" "Install it")"
   [ "$r" = "Install it" ] && TAKE_HD=1
+fi
+
+# --- the Thief II HD Mod ----------------------------------------------------------------
+# The same for Thief II: its HD Mod (Thief2HDMod, Bentraxx's) in Thief II's folder, found
+# as its HDMOD folder, an archive holding one or its Windows installer (innoextract).
+
+T2HD_HAVE="" T2HD_SRC="" T2HD_NOTE=""
+if [ -n "$T2_DIR" ]; then
+  d="$(file_in "$T2_DIR" HDMOD)"
+  if [ -n "$d" ] && is_hdmod "$d"; then T2HD_HAVE="$d"
+  else
+    notify "Looking for the Thief II HD Mod..."
+    while IFS= read -r d; do
+      is_hdmod "$d" && [ "$(hdmod_game "$d")" = t2 ] && { T2HD_SRC="dir:$d"; break; }
+    done < <(for r in "$DOWNLOADS" "$HOME/Games" "$HOME/Documents" "$HOME/Desktop"; do
+               [ -d "$r" ] && find "$r" -maxdepth 5 \( -path "$T2_DIR" -o -path "${TG_DIR:-/nonexistent}" -o -name 'Thief RT' -o -name '.Trash' \) -prune \
+                 -o -type d -iname HDMOD -print 2>/dev/null
+             done)
+    if [ -z "$T2HD_SRC" ]; then
+      for a in "$DOWNLOADS"/*.zip "$DOWNLOADS"/*.7z "$DOWNLOADS"/*.rar "$DOWNLOADS"/*.exe; do
+        [ -f "$a" ] || continue
+        case "$(basename "$a" | tr '[:upper:]' '[:lower:]')" in *hd*) ;; *) continue ;; esac
+        lst="$(tar -tf "$a" 2>/dev/null)"
+        if printf '%s\n' "$lst" | grep -qiE '(^|/)hdmod/(obj|fam)/' && [ "$(printf '%s\n' "$lst" | listed_game)" = t2 ]; then T2HD_SRC="archive:$a"; break; fi
+        case "$a" in
+          *.exe|*.EXE)
+            if [ -n "$INNOEXTRACT" ]; then
+              lst="$("$INNOEXTRACT" -l "$a" 2>>"$LOG")"
+              if printf '%s\n' "$lst" | grep -qiE '[/"]hdmod/(obj|fam)/' && [ "$(printf '%s\n' "$lst" | listed_game)" = t2 ]; then T2HD_SRC="inno:$a"; break; fi
+            else
+              case "$(basename "$a" | tr '[:upper:]' '[:lower:]')" in
+                *thief2*|*thief?2*|*thief?ii*|t2*) T2HD_NOTE="
+
+The Thief II HD Mod's installer is in your Downloads ($(basename "$a")), but it is a Windows installer: to unpack it, install innoextract (in Terminal: brew install innoextract), then choose File > Find Games Again in Thief RT." ;;
+              esac
+            fi ;;
+        esac
+      done
+    fi
+  fi
+fi
+echo "t2 hd mod: have=$T2HD_HAVE src=$T2HD_SRC" >&3
+
+TAKE_T2HD=""
+if [ -n "$T2HD_SRC" ]; then
+  src="${T2HD_SRC#*:}"
+  r="$(message "The Thief II HD Mod was found: ${src/#$HOME/$TILDE}
+
+Install it into Thief II's folder? Its HD textures, objects, skies and water are then used in the original missions and in fan missions (about 5 GB; unpacking takes several minutes)." "Skip" "Install it")"
+  [ "$r" = "Install it" ] && TAKE_T2HD=1
 fi
 
 fi   # (DEFER)
@@ -513,6 +582,77 @@ if [ -n "$HD_HAVE" ]; then
   HD_ON=1
 fi
 
+# The Thief II HD Mod into Thief II's folder (HDMOD), and cam_mod.ini to use it
+if [ -n "$TAKE_T2HD" ]; then
+  notify "Installing the Thief II HD Mod... (several minutes)"
+  src="${T2HD_SRC#*:}"
+  t="$(mktemp -d "$T2_DIR/.thiefrt-hdmod.XXXXXX")"
+  ok=""
+  case "${T2HD_SRC%%:*}" in
+    dir) "$DITTO" "$src" "$t/HDMOD" >&3 2>&1 && ok=1 ;;
+    archive) tar -xf "$src" -C "$t" >&3 2>&1 && ok=1 ;;
+    # (its vegetation choices -- animated, still, original -- all unpacked: the last of
+    # each file wins, as innoextract does)
+    inno) "$INNOEXTRACT" -s -d "$t" "$src" >&3 2>&1 && ok=1 ;;
+  esac
+  hd=""
+  if [ -n "$ok" ]; then
+    while IFS= read -r d; do is_hdmod "$d" && { hd="$d"; break; }; done < <(find "$t" -maxdepth 4 -type d -iname HDMOD)
+  fi
+  if [ -n "$hd" ]; then
+    old="$(file_in "$T2_DIR" HDMOD)"
+    [ -n "$old" ] && mv "$old" "$T2_DIR/HDMOD.before-thief-rt.$$"
+    mv "$hd" "$T2_DIR/HDMOD" && T2HD_HAVE="$T2_DIR/HDMOD"
+  else
+    T2HD_NOTE="
+
+The Thief II HD Mod could not be installed (no HDMOD folder in what was unpacked; the details are in $LOG)."
+  fi
+  rm -rf "$t"
+fi
+
+T2HD_ON=""
+if [ -n "$T2HD_HAVE" ]; then
+  CM="$(file_in "$T2_DIR" cam_mod.ini)"
+  if [ -z "$CM" ] || ! grep -qiE '^[[:space:]]*mod_path[[:space:]].*hdmod' "$CM"; then
+    sky=""; [ -n "$(file_in "$T2HD_HAVE" t2skies)" ] && sky="+hdmod/t2skies"
+    kept=""
+    if [ -n "$CM" ]; then
+      cp "$CM" "$T2_DIR/cam_mod.ini.before-thief-rt"
+      kept="$(tr -d '\r' < "$CM" | grep -viE '^[[:space:]]*(;|$)|^[[:space:]]*(fm_)?mod_path|^[[:space:]]*(ObjTextures16|MeshTextures16|character_detail)')"
+      rm -f "$CM"
+    fi
+    {
+      echo "; Thief RT: mods, NewDark style (searched after a fan mission, before the game's own files)"
+      echo ";"
+      echo "; Thief II HD Mod: HD textures, objects, skies and water"
+      echo "mod_path hdmod$sky"
+      echo
+      echo "; in fan missions too (a fan mission's own textures and models still come first)."
+      echo "; Replace this line with mod_path_skip_fm to keep fan missions as they were made."
+      echo "fm_mod_path hdmod$sky"
+      if [ -n "$(file_in "$T2HD_HAVE/obj" txt16)$(file_in "$T2HD_HAVE/mesh" txt16)" ]; then
+        echo
+        echo "; the HD mod's model textures are in obj/txt16 and mesh/txt16 (the game's own"
+        echo "; txt folders are still searched after them)"
+        echo "ObjTextures16"
+        echo "MeshTextures16"
+      fi
+      if [ -n "$(file_in "$T2HD_HAVE/mesh" hipoly)" ]; then
+        echo
+        echo "; the HD mod's characters: its high-poly models (mesh/hipoly), made for its textures"
+        echo "character_detail 1"
+      fi
+      if [ -n "$kept" ]; then
+        echo
+        echo "; (from the cam_mod.ini before)"
+        echo "$kept"
+      fi
+    } > "$T2_DIR/cam_mod.ini"
+  fi
+  T2HD_ON=1
+fi
+
 # --- the launcher --------------------------------------------------------------------
 
 if [ -z "$SETUP" ]; then
@@ -538,16 +678,23 @@ games=""
    The Black Parade: in Thief Gold's fan missions"
 [ -n "$HD_ON" ] && games="$games
    The Thief Gold HD Mod: on"
+[ -n "$T2HD_ON" ] && games="$games
+   The Thief II HD Mod: on"
 if [ -n "$TG_DIR" ] && [ -z "$HD_ON" ] && [ -z "$HD_NOTE" ]; then
   HD_NOTE="
 
 Optional: the Thief Gold HD Mod (HD textures, models and skies). Download its installer (Thief1HDMod1.2.exe, from ModDB) to your Downloads, install innoextract (in Terminal: brew install innoextract), then choose File > Find Games Again in Thief RT."
 fi
+if [ -n "$T2_DIR" ] && [ -z "$T2HD_ON" ] && [ -z "$T2HD_NOTE" ]; then
+  T2HD_NOTE="
+
+Optional: the Thief II HD Mod (HD textures, objects, skies and water). Download its installer (Thief 2 HD Mod 1.0, from ModDB or Nexus Mods) to your Downloads, install innoextract (in Terminal: brew install innoextract), then choose File > Find Games Again in Thief RT."
+fi
 
 if [ -n "$SETUP" ]; then
   [ -n "$games" ] || games="
    (none)"
-  message "Your games for Thief RT:$games$BP_NOTE$HD_NOTE" >/dev/null
+  message "Your games for Thief RT:$games$BP_NOTE$HD_NOTE$T2HD_NOTE" >/dev/null
   exit 0
 fi
 if [ -n "$DEFER" ]; then
@@ -565,7 +712,7 @@ r="$(message "Done. Thief RT is in your ${APPS/#$HOME/$TILDE} folder.$games
 
 Open it to choose the game (or a fan mission from its FMs folder), ray tracing or OpenGL, and the quality: Ultra, High, Medium or Low. In the game, Cmd+, (or F10) shows the ray tracing settings.
 
-The first time a level is played, the materials of its textures are made and kept: it can look plain for a few seconds.$BP_NOTE$HD_NOTE" "Show in Finder" "Open Thief RT")"
+The first time a level is played, the materials of its textures are made and kept: it can look plain for a few seconds.$BP_NOTE$HD_NOTE$T2HD_NOTE" "Show in Finder" "Open Thief RT")"
 case "$r" in
   "Open Thief RT") open "$A" ;;
   "Show in Finder") open -R "$A" ;;

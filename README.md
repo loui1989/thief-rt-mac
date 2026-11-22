@@ -27,7 +27,7 @@ The app isn't notarised: the first time, macOS refuses to open it. Go to **Syste
 - **Path tracing** (RTGL1 on Metal): ray-traced lighting, shadows, reflections, bounce light and god rays, with MetalFX upscaling.
   Quality presets Ultra / High / Medium / Low; dynamic resolution keeps 60 fps. About 60 fps on High (1800p) on an M3 Max.
 - **OpenGL renderer** for any Apple silicon Mac: the game's own look with sharper textures, real-time torch and lamp light with shadows, bump maps, an internal-resolution setting and unlocked frame rate.
-- **Thief Gold HD Mod** support: materials (normal and roughness) are made from its textures the first time you play each level.
+- **Thief Gold and Thief II HD Mod** support: materials (normal and roughness) are made from the textures the first time you play each level, with Thief II's own surfaces (marble floors, parquet, wallpaper, stained glass, the Mechanists' iron) recognised too.
 - **Fan missions** from the game's `FMs` folder, The Black Parade first.
 - A **launcher** (game, campaign or fan mission, renderer, quality, OpenGL options) and an **installer** that finds your games and offers to set up The Black Parade and the HD Mod.
 - In game, **Cmd+,** or **F10** opens the graphics settings.
@@ -38,6 +38,13 @@ Hand-made HD textures, models and skies for Thief Gold. Download the full instal
 
 - ModDB: https://www.moddb.com/mods/thief-gold-hd-texture-mod
 - Nexus Mods: https://www.nexusmods.com/thiefthedarkproject/mods/1
+
+### Optional: the Thief II HD Mod
+
+The same author's HD Mod for Thief II (version 1.0): HD textures, objects, skies and water. Put its full installer in Downloads too; the installer (or the launcher's *File → Find Games Again*) finds it and installs it into Thief II's folder (about 5 GB; also needs `innoextract`).
+
+- ModDB: https://www.moddb.com/mods/thief-2-hd-texture-mod
+- Nexus Mods: https://www.nexusmods.com/thief2/mods/5
 
 ## Building from source
 
@@ -64,7 +71,7 @@ This port was made with an AI coding assistant (Claude, by Anthropic), directed 
 
 ## Credits
 
-The Dark Engine restoration (its contributors) · RTGL1 path tracer (Sultim Tsyrendashiev) · Steam Audio (Valve) · SDL, OpenAL Soft, FFmpeg, Ogg Vorbis, libpng, Squirrel · Thief: The Dark Project, Thief Gold and Thief II (Looking Glass Studios; now Square Enix) · The Thief Gold HD Mod (Bentraxx Productions) · The Black Parade and the other fan missions (their authors). Details: `package/CREDITS.txt`.
+The Dark Engine restoration (its contributors) · RTGL1 path tracer (Sultim Tsyrendashiev) · Steam Audio (Valve) · SDL, OpenAL Soft, FFmpeg, Ogg Vorbis, libpng, Squirrel · Thief: The Dark Project, Thief Gold and Thief II (Looking Glass Studios; now Square Enix) · The Thief Gold and Thief II HD Mods (Bentraxx Productions) · The Black Parade and the other fan missions (their authors). Details: `package/CREDITS.txt`.
 
 Thief is a trademark of its owners. This project is not made or endorsed by them, and contains none of the games' data.
 
