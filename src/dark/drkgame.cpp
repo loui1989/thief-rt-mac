@@ -1201,8 +1201,9 @@ static void console_whereami(void)
    }
 }
 
-// Where to see the ray tracer's effects (Thief Gold, its HD Mod's missions):
-// the mission, and an object of an archetype in it, or a texture on its walls
+// Where to see the ray tracer's effects (Thief Gold, its HD Mod's missions;
+// Thief II's, marked t2): the mission, and an object of an archetype in it,
+// or a texture on its walls
 struct sRtTestSite
 {
    const char* name;
@@ -1210,6 +1211,7 @@ struct sRtTestSite
    char kind;            // 'o' an object of this archetype, 't' a wall or floor with this texture
    const char* match;
    const char* what;
+   BOOL t2;              // a Thief II site
 };
 
 static const sRtTestSite gRtTestSites[] =
@@ -1241,6 +1243,19 @@ static const sRtTestSite gRtTestSites[] =
    { "lamp",          3,  'o', "HangSpotFlush",  "Cragscleft: a flickering lamp" },
    { "torch",         2,  'o', "torch",          "Lord Bafford's Manor: a wall torch (its flicker)" },
    { "water",         2,  't', "waterhw\\",      "water (any mission: rt_test water,n)" },
+   // Thief II: its own surfaces (the material table's Thief II rules)
+   { "marble",        7,  't', "mbfloor\\",          "First City Bank and Trust: marble floors", TRUE },
+   { "parquet",       9,  't', "wdfloor\\",          "Blackmail: parquet floors", TRUE },
+   { "wallpaper",     9,  't', "vicm09\\wall",       "Blackmail: damask wallpaper", TRUE },
+   { "columns",       9,  't', "vic61co",             "Blackmail: marble columns", TRUE },
+   { "solwin",        9,  't', "vicwood\\solwin",     "Blackmail: the mansion's windows (lit panes glow)", TRUE },
+   { "saintglass",    9,  't', "rescor_2\\stain",     "Blackmail: stained glass", TRUE },
+   { "mechglass",     6,  't', "stainglass\\",        "Eavesdropping: the Mechanists' stained glass", TRUE },
+   { "bankwindows",   7,  't', "civicb2\\awin",       "First City Bank and Trust: the city's windows (lit panes glow)", TRUE },
+   { "ceiling",       7,  't', "ceilpain\\",          "First City Bank and Trust: painted ceilings", TRUE },
+   { "hothouse",      7,  't', "rescor_1\\hothou",    "First City Bank and Trust: hothouse glass", TRUE },
+   { "decowindows",   11, 't', "artdmisc\\adwin",     "Life of the Party: Art Deco windows", TRUE },
+   { "machines",      16, 't', "mech\\gwal",          "Sabotage at Soulforge: the Mechanists' machinery (painted iron)", TRUE },
 };
 
 static const sRtTestSite* gRtTestPending = NULL;
@@ -1448,15 +1463,18 @@ static void console_rt_test(char* value)
          fprintf(log, "\nRay tracing test sites (rt_test <name> [number]):\n");
       for (int i = 0; i < (int)(sizeof(gRtTestSites) / sizeof(gRtTestSites[0])); ++i)
       {
-         mprintf("%-14s %s (mission %d)\n", gRtTestSites[i].name, gRtTestSites[i].what, gRtTestSites[i].mission);
+         mprintf("%-14s %s (%s mission %d)\n", gRtTestSites[i].name, gRtTestSites[i].what,
+                 gRtTestSites[i].t2 ? "Thief II" : "Thief Gold", gRtTestSites[i].mission);
          if (log)
-            fprintf(log, "%-14s %s (mission %d)\n", gRtTestSites[i].name, gRtTestSites[i].what,
-                    gRtTestSites[i].mission);
+            fprintf(log, "%-14s %s (%s mission %d)\n", gRtTestSites[i].name, gRtTestSites[i].what,
+                    gRtTestSites[i].t2 ? "Thief II" : "Thief Gold", gRtTestSites[i].mission);
       }
       if (log)
          fclose(log);
       console_message("rt_test <name> [number]: lava, elemental, firemage, priest, firearrow, flash, mine, "
-                      "gasmine, gasarrow, moss, coals, watercrystal, talisman, portal, eye, gem, arc... (all in thief-console.log)");
+                      "gasmine, gasarrow, moss, coals, watercrystal, talisman, portal, eye, gem, arc...; Thief II: marble, "
+                      "parquet, wallpaper, columns, solwin, saintglass, mechglass, bankwindows, ceiling, hothouse, "
+                      "decowindows, machines (all in thief-console.log)");
       return;
    }
    const sRtTestSite* site = NULL;
@@ -1466,6 +1484,15 @@ static void console_rt_test(char* value)
    if (!site)
    {
       console_message("No test site %s (rt_test alone lists them).", name);
+      return;
+   }
+   // (a Thief II site in Thief II only, a Thief Gold one in Thief Gold: the
+   // missions are numbered alike)
+   const BOOL playingT2 = _stricmp(DarkContentProfile(), "thief2") == 0;
+   if (site->t2 != playingT2)
+   {
+      console_message("%s is a %s test site: start %s for it.", site->name, site->t2 ? "Thief II" : "Thief Gold",
+                      site->t2 ? "Thief II" : "Thief Gold");
       return;
    }
    const sMissionData* mission = GetMissionData();
