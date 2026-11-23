@@ -311,8 +311,14 @@ extern "C" int ObjLODModelNumber(ObjID obj, int idx)
    if (s_forceLow && level == 0)
       level = 1;
    was = level;
+   // (in the game NewDark draws the LOD models only -- Model Name is the
+   // editor's -- so LOD 0's too, when it is another)
    if (level == 0)
-      return idx;
+   {
+      const char* base = objmodelGetName(idx);
+      if (base && stricmp(base, lod->model[0].text) == 0)
+         return idx;
+   }
    // its model's number (loaded once: a model kept by name, checked again
    // in case a mission's models were let go since)
    struct sIndex { int at = 0; };
