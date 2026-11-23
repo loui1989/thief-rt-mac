@@ -487,6 +487,7 @@ enum { kRowQuality = 4, kRowGem = 6, kRowGlFirst = 7, kRowGlLast = 10 };
       [self findGames:nil];
    else
       [self showWindow];
+   [self checkForUpdates:NO];
 }
 
 - (void)showWindow
@@ -522,6 +523,126 @@ enum { kRowQuality = 4, kRowGem = 6, kRowGlFirst = 7, kRowGlLast = 10 };
 
 - (BOOL)applicationShouldTerminateAfterLastWindowClosed:(NSApplication *)app { return YES; }
 
+// ---- updates -------------------------------------------------------------------------
+// The latest release on GitHub (loui1989/thief-rt-mac), its tag (v2026.11.23.3) against this
+// app's version (make-dmg.sh: the same numbers): looked at when the launcher opens, once a
+// day (Thief RT menu: Check for Updates Automatically), or from the menu at any time.
+// Nothing is downloaded or installed here: Download opens the release's page.
+
+static NSString *const kUpdatesRepo = @"loui1989/thief-rt-mac";
+
+// a.b.c.d against another: <0 older, 0 the same, >0 newer (a missing number counts as 0)
+static NSComparisonResult CompareVersions(NSString *a, NSString *b)
+{
+   NSArray<NSString *> *x = [a componentsSeparatedByString:@"."], *y = [b componentsSeparatedByString:@"."];
+   for (NSUInteger i = 0; i < MAX(x.count, y.count); ++i) {
+      const long p = i < x.count ? x[i].integerValue : 0, q = i < y.count ? y[i].integerValue : 0;
+      if (p != q)
+         return p < q ? NSOrderedAscending : NSOrderedDescending;
+   }
+   return NSOrderedSame;
+}
+
+static NSString *AppVersion(void)
+{
+   NSString *v = NSBundle.mainBundle.infoDictionary[@"CFBundleShortVersionString"];
+   return v.length ? v : @"0";
+}
+
+- (void)checkForUpdatesNow:(id)sender { [self checkForUpdates:YES]; }
+
+- (void)toggleAutoUpdates:(NSMenuItem *)sender
+{
+   NSUserDefaults *d = NSUserDefaults.standardUserDefaults;
+   [d setBool:![d boolForKey:@"UpdatesOff"] forKey:@"UpdatesOff"];
+   sender.state = [d boolForKey:@"UpdatesOff"] ? NSControlStateValueOff : NSControlStateValueOn;
+}
+
+// asked: from the menu (every answer shown: up to date, or could not look); otherwise
+// when the launcher opens (once a day; only a newer release not skipped is shown)
+- (void)checkForUpdates:(BOOL)asked
+{
+   NSUserDefaults *d = NSUserDefaults.standardUserDefaults;
+   if (!asked) {
+      if ([d boolForKey:@"UpdatesOff"])
+         return;
+      NSDate *last = [d objectForKey:@"UpdatesLastCheck"];
+      if (last && -last.timeIntervalSinceNow < 20 * 3600)
+         return;
+   }
+   NSURL *url = [NSURL URLWithString:[NSString stringWithFormat:@"https://api.github.com/repos/%@/releases/latest", kUpdatesRepo]];
+   NSMutableURLRequest *req = [NSMutableURLRequest requestWithURL:url cachePolicy:NSURLRequestReloadIgnoringLocalCacheData
+                                                  timeoutInterval:15];
+   [req setValue:@"application/vnd.github+json" forHTTPHeaderField:@"Accept"];
+   [req setValue:[@"Thief-RT-Launcher/" stringByAppendingString:AppVersion()] forHTTPHeaderField:@"User-Agent"];
+   [[NSURLSession.sharedSession dataTaskWithRequest:req completionHandler:^(NSData *data, NSURLResponse *resp, NSError *err) {
+      NSDictionary *rel = nil;
+      if (data && !err && [(NSHTTPURLResponse *)resp statusCode] == 200) {
+         id j = [NSJSONSerialization JSONObjectWithData:data options:0 error:nil];
+         if ([j isKindOfClass:NSDictionary.class] && [j[@"tag_name"] isKindOfClass:NSString.class])
+            rel = j;
+      }
+      dispatch_async(dispatch_get_main_queue(), ^{ [self updateFound:rel asked:asked]; });
+   }] resume];
+}
+
+- (void)updateFound:(NSDictionary *)rel asked:(BOOL)asked
+{
+   NSUserDefaults *d = NSUserDefaults.standardUserDefaults;
+   NSAlert *a = [NSAlert new];
+   if (!rel) {
+      if (!asked)
+         return;   // (offline: looked at again next time)
+      a.messageText = @"Couldn't check for updates";
+      a.informativeText = @"GitHub could not be reached. Check your internet connection and try again.";
+      [self showUpdateAlert:a then:nil];
+      return;
+   }
+   [d setObject:[NSDate date] forKey:@"UpdatesLastCheck"];
+   NSString *tag = rel[@"tag_name"];
+   NSString *latest = [tag hasPrefix:@"v"] ? [tag substringFromIndex:1] : tag;
+   NSString *page = [rel[@"html_url"] isKindOfClass:NSString.class] ? rel[@"html_url"]
+                    : [NSString stringWithFormat:@"https://github.com/%@/releases/latest", kUpdatesRepo];
+   if (CompareVersions(latest, AppVersion()) != NSOrderedDescending ||
+       (!asked && [[d stringForKey:@"UpdatesSkipped"] isEqualToString:latest])) {
+      if (!asked)
+         return;
+      a.messageText = @"Thief RT is up to date";
+      a.informativeText = [NSString stringWithFormat:@"You have version %@, the latest.", AppVersion()];
+      [self showUpdateAlert:a then:nil];
+      return;
+   }
+   // the release's notes, plainer (no Markdown marks), not too long for the dialog
+   NSString *notes = [rel[@"body"] isKindOfClass:NSString.class] ? rel[@"body"] : @"";
+   notes = [[notes stringByReplacingOccurrencesOfString:@"**" withString:@""]
+            stringByReplacingOccurrencesOfString:@"\r" withString:@""];
+   if (notes.length > 900)
+      notes = [[notes substringToIndex:900] stringByAppendingString:@"..."];
+   a.messageText = [NSString stringWithFormat:@"Thief RT %@ is available", latest];
+   a.informativeText = [NSString stringWithFormat:@"You have version %@.\n\n%@", AppVersion(), notes];
+   [a addButtonWithTitle:@"Download"];
+   [a addButtonWithTitle:@"Later"];
+   [a addButtonWithTitle:@"Skip This Version"];
+   [self showUpdateAlert:a then:^(NSModalResponse r) {
+      if (r == NSAlertFirstButtonReturn)
+         [NSWorkspace.sharedWorkspace openURL:[NSURL URLWithString:page]];
+      else if (r == NSAlertThirdButtonReturn)
+         [d setObject:latest forKey:@"UpdatesSkipped"];
+   }];
+}
+
+- (void)showUpdateAlert:(NSAlert *)a then:(void (^)(NSModalResponse))done
+{
+   if (self.window.visible && !self.window.attachedSheet)
+      [a beginSheetModalForWindow:self.window completionHandler:done];
+   else {
+      [NSApp activateIgnoringOtherApps:YES];
+      const NSModalResponse r = [a runModal];
+      if (done)
+         done(r);
+   }
+}
+
 - (void)buildMenu
 {
    NSMenu *bar = [NSMenu new];
@@ -529,6 +650,12 @@ enum { kRowQuality = 4, kRowGem = 6, kRowGlFirst = 7, kRowGlLast = 10 };
    [bar addItem:appItem];
    NSMenu *appMenu = [NSMenu new];
    [appMenu addItemWithTitle:@"About Thief RT" action:@selector(orderFrontStandardAboutPanel:) keyEquivalent:@""];
+   [appMenu addItemWithTitle:@"Check for Updates..." action:@selector(checkForUpdatesNow:) keyEquivalent:@"u"].target = self;
+   NSMenuItem *autoUpdates = [appMenu addItemWithTitle:@"Check for Updates Automatically"
+                                                action:@selector(toggleAutoUpdates:) keyEquivalent:@""];
+   autoUpdates.target = self;
+   autoUpdates.state = [NSUserDefaults.standardUserDefaults boolForKey:@"UpdatesOff"] ? NSControlStateValueOff
+                                                                                    : NSControlStateValueOn;
    [appMenu addItem:NSMenuItem.separatorItem];
    [appMenu addItemWithTitle:@"Hide Thief RT" action:@selector(hide:) keyEquivalent:@"h"];
    [appMenu addItemWithTitle:@"Quit Thief RT" action:@selector(terminate:) keyEquivalent:@"q"];

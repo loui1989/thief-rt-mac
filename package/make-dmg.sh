@@ -12,7 +12,22 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 ROOT="$(pwd)"
 PKG="$ROOT/package"
-VERSION="$(date +%Y.%m.%d)"
+# The version: today's date and the next release number of the day (v2026.11.23.3 on GitHub
+# -> 2026.11.23.4), the release's tag to give it; the launcher's update check compares the
+# two. Given: bash package/make-dmg.sh 2026.11.24.1
+DAY="$(date +%Y.%m.%d)"
+if [ -n "${1:-}" ]; then
+  VERSION="$1"
+else
+  N=0
+  TAGS="$(curl -fsS --max-time 15 "https://api.github.com/repos/loui1989/thief-rt-mac/tags?per_page=100" 2>/dev/null || true)"
+  [ -n "$TAGS" ] || echo "  (GitHub could not be reached: the version may be one already released -- give it: bash package/make-dmg.sh $DAY.N)"
+  for t in $(printf '%s' "$TAGS" | grep -o "\"v$DAY\.[0-9][0-9]*\"" | tr -d '"v'); do
+    n="${t##*.}"
+    [ "$n" -gt "$N" ] && N="$n"
+  done
+  VERSION="$DAY.$((N + 1))"
+fi
 say() { printf '  %s\n' "$*"; }
 
 APP="$ROOT/Thief RT.app"
