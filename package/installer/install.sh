@@ -20,6 +20,11 @@
 # keeps its saves there, as it always has). The Black Parade, when it was found outside
 # Thief Gold's FMs folder, is put in it.
 
+# Under Rosetta (this script's bash started as an Intel process): again, natively
+if [ "$(sysctl -n sysctl.proc_translated 2>/dev/null)" = 1 ] && [ -z "${THIEF_RT_NATIVE:-}" ] && [ -x /usr/bin/arch ]; then
+  THIEF_RT_NATIVE=1 exec /usr/bin/arch -arm64 /bin/bash "$0" "$@"
+fi
+
 SETUP=""; [ "${1:-}" = --setup ] && SETUP=1
 ME="Install Thief RT"; [ -n "$SETUP" ] && ME="Thief RT"
 RES="$(cd "$(dirname "$0")/../Resources" 2>/dev/null && pwd)"
@@ -149,7 +154,10 @@ GAME_ROOTS=("$HOME/Games" "$HOME/Library/Application Support/Steam/steamapps/com
 if [ -z "$SETUP" ]; then
 [ -x "$PAYLOAD/Engine/Thief RT.app/Contents/MacOS/thief-runner" ] || fail "This installer is incomplete (its Payload is missing)."
 
-if [ "$(uname -m)" != arm64 ] && [ -z "$THIEF_RT_TEST" ]; then
+# (Apple silicon by the hardware: uname -m says x86_64 when this script runs under
+# Rosetta -- as an app made of a script can be started, on a Mac that has Rosetta --
+# and an M4 was told it had an Intel processor)
+if [ "$(sysctl -n hw.optional.arm64 2>/dev/null)" != 1 ] && [ "$(uname -m)" != arm64 ] && [ -z "$THIEF_RT_TEST" ]; then
   message "Thief RT needs a Mac with Apple silicon (M1 or later). This Mac has an Intel processor." "Quit" >/dev/null
   exit 1
 fi

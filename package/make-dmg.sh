@@ -114,6 +114,8 @@ cat > "$INST/Contents/Info.plist" <<PLIST
   <key>CFBundlePackageType</key><string>APPL</string>
   <key>CFBundleShortVersionString</key><string>$VERSION</string>
   <key>LSMinimumSystemVersion</key><string>13.0</string>
+  <key>LSRequiresNativeExecution</key><true/>
+  <key>LSArchitecturePriority</key><array><string>arm64</string></array>
   <key>NSHighResolutionCapable</key><true/>
 </dict>
 </plist>

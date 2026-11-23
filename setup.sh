@@ -31,7 +31,10 @@ FFMPEG_TAG="n7.1"
 OPENAL_TAG="1.24.1"
 
 say "Checking tools"
-[[ "$(uname -m)" == arm64 ]] || fail "this needs an Apple silicon Mac (and Terminal not running under Rosetta)"
+if [ "$(sysctl -n sysctl.proc_translated 2>/dev/null)" = 1 ] && [ -z "${THIEF_RT_NATIVE:-}" ]; then
+  THIEF_RT_NATIVE=1 exec /usr/bin/arch -arm64 /bin/bash "$0" "$@"   # (Terminal under Rosetta: natively)
+fi
+[[ "$(uname -m)" == arm64 ]] || fail "this needs an Apple silicon Mac"
 xcode-select -p >/dev/null 2>&1 || fail "Xcode command-line tools missing. Run: xcode-select --install"
 TOOLS="$ROOT/deps/tools"
 mkdir -p "$TOOLS/bin"
