@@ -2543,6 +2543,7 @@ uint64_t texture_hash(const std::string &t)
 // apart from a near copy of it: same_within.
 struct TolIndex {
    uint64_t forHash = 0;
+   float cell = 0.0f;
    struct Corner { float p[3], uv[2]; };
    std::vector<Corner> tris;   // three a triangle (copies: the model's own arrays are replaced)
    std::vector<uint64_t> tex;
@@ -2898,7 +2899,14 @@ std::vector<uint64_t> object_prim_ids(uint32_t obj, const std::vector<CapturedPr
 
 bool same_within(CachedObject &c, const std::vector<CapturedPrim> &cap)
 {
-   constexpr float kTol = 0.002f, kCell = 0.01f;
+   // (2 mm near, more far off: its vertices come back from the screen, and
+   // the HD Mod's grass clumps 20 m off moved by more than 2 mm as the camera
+   // turned -- each one captured anew, 9900 vertices, every frame)
+   const RgFloat3D cam = to_rt(g_camera.pos);
+   const float cdx = c.center[0] - cam.data[0], cdy = c.center[1] - cam.data[1], cdz = c.center[2] - cam.data[2];
+   const float far = 0.0005f * std::sqrt(cdx * cdx + cdy * cdy + cdz * cdz);
+   const float kTol = far < 0.005f ? 0.002f : far < 0.01f ? 0.005f : far < 0.02f ? 0.01f : 0.02f;
+   const float kCell = std::max(0.01f, kTol);   // (two sizes: its index made again seldom)
    size_t a = 0, b = 0;
    for (const CapturedPrim &p : c.prims)
       if (!p.sprite)
@@ -2910,13 +2918,14 @@ bool same_within(CachedObject &c, const std::vector<CapturedPrim> &cap)
    }
    if (a != b || a < 3)
       return false;
-   if (!c.tol || c.tol->forHash != c.hash) {
+   if (!c.tol || c.tol->forHash != c.hash || c.tol->cell != kCell) {
       auto t = std::make_shared<TolIndex>();
       t->forHash = c.hash;
+      t->cell = kCell;
       for (const CapturedPrim &p : c.prims) {
          if (p.sprite)
             continue;
-         const uint64_t th = texture_hash(p.texture);
+         const uint64_t th = texture_hash(p.family.empty() ? p.texture : p.family);
          for (size_t i = 0; i + 2 < p.verts.size(); i += 3) {
             const uint32_t idx = uint32_t(t->tex.size());
             for (int m = 0; m < 3; ++m) {
@@ -2944,14 +2953,14 @@ bool same_within(CachedObject &c, const std::vector<CapturedPrim> &cap)
       c.tol = std::move(t);
    }
    const TolIndex &t = *c.tol;
-   auto near = [](const RgPrimitiveVertex &u, const TolIndex::Corner &v) {
+   auto near = [kTol](const RgPrimitiveVertex &u, const TolIndex::Corner &v) {
       for (int k = 0; k < 3; ++k)
          if (std::fabs(u.position[k] - v.p[k]) > kTol)
             return false;
       return std::fabs(u.texCoord[0] - v.uv[0]) < 0.002f && std::fabs(u.texCoord[1] - v.uv[1]) < 0.002f;
    };
    for (const CapturedPrim &p : cap) {
-      const uint64_t th = texture_hash(p.texture);
+      const uint64_t th = texture_hash(p.family.empty() ? p.texture : p.family);
       for (size_t i = 0; i + 2 < p.verts.size(); i += 3) {
          const RgPrimitiveVertex *v = &p.verts[i];
          int64_t q[3];
