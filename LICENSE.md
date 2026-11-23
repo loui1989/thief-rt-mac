@@ -1,5 +1,27 @@
 # License
 
+This repository contains historical third-party source code together with
+modernization contributions made by repository contributors. It is an
+unofficial preservation and modernization project and is not affiliated with,
+supported by, or endorsed by the rights holders of the Dark Engine or the
+games built with it.
+
+## Historical Dark Engine source
+
+Portions of this repository derive from Dark Engine source code originating
+from the unauthorized 2010 source leak. That historical source remains
+copyrighted by its respective rights holders and was not released under an
+open-source license.
+
+No license to the historical Dark Engine source, retail game assets, or other
+third-party material is granted by this file, whether express or implied.
+
+## Modernization contributions
+
+Except where otherwise identified, modernization code, patches, build files, tools,
+documentation, and other material not from the Historical Dark Engine source are licensed
+under the MIT License below.
+
 Copyright (c) 2026 the individual contributors
 
 Permission is hereby granted, free of charge, to any person obtaining a copy
