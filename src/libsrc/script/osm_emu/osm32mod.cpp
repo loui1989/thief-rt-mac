@@ -4485,6 +4485,7 @@ private:
    cOsm32Module *m_module;
    uint32_t m_guest;
    std::string m_className;
+   int m_native = -1;   // run natively (NativePhantom): -1 not decided yet
 };
 
 class cOsm32Module : public cCTUnaggregated<IScriptModule,
@@ -4767,10 +4768,260 @@ void NoteScriptCost(const std::string &cls, const char *message, double secs, ui
 }
 } // namespace
 
+// ---- NVPhantomTrap, natively ---------------------------------------------
+//
+// Nameless Voice's NVPhantomTrap (NVScript.osm) fades its object's
+// transparency (RenderAlpha): TurnOn to NVPhantomAlphaMax (1.00) at the rate
+// of NVPhantomFadeOn ms from 0 to 1 (1000), TurnOff to NVPhantomAlphaMin
+// (0.00) at the rate of NVPhantomFadeOff -- from the alpha it has, so a fade
+// turns back smoothly -- and on reaching it sends its object PhantomOn or
+// PhantomOff. NVPhantomTrapOn / NVPhantomTrapOff name other messages for on
+// and off ("Null": none). The HD Mods' fire and water give it to every puff
+// they throw out (NVPhantomTrapOff="BeginScript", 750 ms: forty puffs a
+// second, each fading out as it rises): run in emulation, each of its timer
+// messages was 51 000 instructions, half of a frame on an M4 Pro. So, for an
+// object whose Design Note sets nothing else of it (any other NVPhantom
+// parameter, or a value NVScript works out -- a quest variable, a random
+// range -- and the object's NVPhantomTrap stays NVScript's), it is run here.
+// Its fade is carried by its own timer, its target, its time and which fade
+// in its data: a saved game, loaded, goes on with it.
+namespace
+{
+const char kPhantomTimer[] = "NVPhantomNativeFade";
+const unsigned kPhantomStepMs = 40;
+
+struct sPhantomParams
+{
+   float alphaMin = 0.0f, alphaMax = 1.0f;
+   unsigned fadeOn = 1000, fadeOff = 1000;
+   std::string onMsg = "TurnOn", offMsg = "TurnOff";
+};
+
+std::string Trimmed(const std::string &text)
+{
+   size_t a = 0, b = text.size();
+   while (a < b && isspace((unsigned char)text[a])) ++a;
+   while (b > a && isspace((unsigned char)text[b - 1])) --b;
+   std::string t = text.substr(a, b - a);
+   if (t.size() >= 2 && (t[0] == '"' || t[0] == '\'') && t[t.size() - 1] == t[0])
+      t = t.substr(1, t.size() - 2);
+   return t;
+}
+
+bool SameText(const std::string &a, const char *b)
+{
+   return _stricmp(a.c_str(), b) == 0;
+}
+
+// the object's NVPhantomTrap parameters, if all of them are ones run here
+bool PhantomParams(const char *note, sPhantomParams *out)
+{
+   std::string text = note ? note : "";
+   size_t at = 0;
+   while (at <= text.size())
+   {
+      size_t end = text.find(';', at);
+      if (end == std::string::npos)
+         end = text.size();
+      const std::string item = text.substr(at, end - at);
+      at = end + 1;
+      const size_t eq = item.find('=');
+      if (eq == std::string::npos)
+         continue;
+      const std::string key = Trimmed(item.substr(0, eq));
+      const std::string value = Trimmed(item.substr(eq + 1));
+      if (_strnicmp(key.c_str(), "NVPhantom", 9) != 0)
+         continue;   // (another script's)
+      // a value NVScript works out (quest variables, random ranges, ...)
+      if (value.find_first_of("$[{^&%:*/+") != std::string::npos)
+         return false;
+      char *rest = 0;
+      if (SameText(key, "NVPhantomAlphaMax") || SameText(key, "NVPhantomAlphaMin"))
+      {
+         const double v = strtod(value.c_str(), &rest);
+         if (rest == value.c_str() || *rest || v < 0.0 || v > 1.0)
+            return false;
+         (SameText(key, "NVPhantomAlphaMax") ? out->alphaMax : out->alphaMin) = float(v);
+      }
+      else if (SameText(key, "NVPhantomFadeOn") || SameText(key, "NVPhantomFadeOff"))
+      {
+         const long v = strtol(value.c_str(), &rest, 10);
+         if (rest == value.c_str() || *rest || v < 0 || v > 80000)
+            return false;
+         (SameText(key, "NVPhantomFadeOn") ? out->fadeOn : out->fadeOff) = unsigned(v);
+      }
+      else if (SameText(key, "NVPhantomTrapOn") || SameText(key, "NVPhantomTrapOff"))
+      {
+         if (value.empty() || value.find_first_of(" \t,") != std::string::npos)
+            return false;
+         (SameText(key, "NVPhantomTrapOn") ? out->onMsg : out->offMsg) = value;
+      }
+      else
+         return false;   // (NVPhantomTrapCount, render type options, ...: NVScript's)
+   }
+   return out->alphaMin <= out->alphaMax;
+}
+
+IPropertyScriptService *PropertyService()
+{
+   AutoAppIPtr(ScriptMan);
+   GUID guid;
+   MAKE_LG_GUID(&guid, 0x00da);   // (IPropertyScriptService)
+   return pScriptMan ? (IPropertyScriptService *)pScriptMan->GetService(&guid) : 0;
+}
+
+bool PhantomNote(ObjID obj, std::string *note)
+{
+   IPropertyScriptService *service = PropertyService();
+   if (!service)
+      return false;
+   if (!service->Possessed(obj, "DesignNote"))
+   {
+      note->clear();
+      return true;
+   }
+   cMultiParm v = service->Get(obj, "DesignNote");
+   if (v.type == kMT_String)
+      *note = (const char *)v;
+   else
+      note->clear();
+   return true;
+}
+
+float PhantomAlpha(ObjID obj)
+{
+   IPropertyScriptService *service = PropertyService();
+   if (!service || !service->Possessed(obj, "RenderAlpha"))
+      return 1.0f;
+   cMultiParm v = service->Get(obj, "RenderAlpha");
+   return v.type == kMT_Float ? (float)v : v.type == kMT_Int ? float((int)v) : 1.0f;
+}
+
+void PhantomSetAlpha(ObjID obj, float alpha)
+{
+   if (IPropertyScriptService *service = PropertyService())
+      service->Set(obj, "RenderAlpha", cMultiParm(alpha));
+}
+
+// a fade's next step: its target (in thousandths), its time (in 10 ms), on
+// or off
+int PhantomData(float target, unsigned fadeMs, bool on)
+{
+   const int t = std::max(0, std::min(1000, int(target * 1000.0f + 0.5f)));
+   const int ms = std::min(8191, int((fadeMs + 5) / 10));
+   return t | (ms << 10) | (on ? 1 << 24 : 0);
+}
+
+// when each object's fade last stepped (sim time): a step goes as far as the
+// time since (timers come with the frames: forty puffs at 25 fps faded slower)
+std::unordered_map<ObjID, unsigned long> g_phantomLast;
+
+void PhantomStep(ObjID obj, int data, unsigned long now)
+{
+   const float target = (data & 1023) / 1000.0f;
+   const unsigned fadeMs = unsigned((data >> 10) & 8191) * 10u;
+   const bool on = (data >> 24) & 1;
+   float alpha = PhantomAlpha(obj);
+   unsigned long elapsed = kPhantomStepMs;
+   auto last = g_phantomLast.find(obj);
+   if (last != g_phantomLast.end() && now >= last->second && now - last->second <= 2000)
+      elapsed = now - last->second;
+   const float step = fadeMs ? float(elapsed) / float(fadeMs) : 2.0f;
+   bool done;
+   if (alpha < target)
+      done = (alpha = std::min(target, alpha + step)) >= target;
+   else
+      done = (alpha = std::max(target, alpha - step)) <= target;
+   PhantomSetAlpha(obj, alpha);
+   if (TraceOn())
+      fprintf(stderr, "NVPhantomTrap (native) %d: alpha %.3f toward %.2f%s\n", obj, alpha, target, done ? ", there" : "");
+   AutoAppIPtr(ScriptMan);
+   if (!pScriptMan)
+      return;
+   if (done)
+   {
+      g_phantomLast.erase(obj);
+      pScriptMan->PostMessage2(obj, obj, on ? "PhantomOn" : "PhantomOff", cMultiParm(), cMultiParm(), cMultiParm());
+   }
+   else
+   {
+      g_phantomLast[obj] = now;
+      pScriptMan->SetTimedMessage2(obj, kPhantomTimer, kPhantomStepMs, kSTM_OneShot, cMultiParm(data));
+   }
+}
+
+// the current fade of each object (its timer: a new fade stops the last)
+std::unordered_map<ObjID, tScrTimer> g_phantomTimers;
+
+HRESULT NativePhantom(sScrMsg *message, const sPhantomParams &p)
+{
+   const ObjID obj = message->to;
+   const char *name = message->message ? message->message : "";
+   if (!_stricmp(name, "Timer"))
+   {
+      sScrTimerMsg *timer = static_cast<sScrTimerMsg *>(message);
+      if (_stricmp((const char *)timer->name, kPhantomTimer) == 0)
+      {
+         g_phantomTimers.erase(obj);
+         PhantomStep(obj, (int)message->data, message->time);
+         return S_OK;
+      }
+   }
+   if (!_stricmp(name, "EndScript") || !_stricmp(name, "Destroy"))
+   {
+      g_phantomTimers.erase(obj);
+      g_phantomLast.erase(obj);
+      return S_OK;
+   }
+   const bool on = !SameText(p.onMsg, "Null") && SameText(p.onMsg, name);
+   const bool off = !on && !SameText(p.offMsg, "Null") && SameText(p.offMsg, name);
+   if (!on && !off)
+      return S_OK;
+   AutoAppIPtr(ScriptMan);
+   auto last = g_phantomTimers.find(obj);
+   if (last != g_phantomTimers.end())
+   {
+      if (pScriptMan)
+         pScriptMan->KillTimedMessage(last->second);
+      g_phantomTimers.erase(last);
+   }
+   const float target = on ? p.alphaMax : p.alphaMin;
+   const unsigned fade = on ? p.fadeOn : p.fadeOff;
+   if (!fade)
+   {
+      PhantomSetAlpha(obj, target);
+      if (pScriptMan)
+         pScriptMan->PostMessage2(obj, obj, on ? "PhantomOn" : "PhantomOff", cMultiParm(), cMultiParm(), cMultiParm());
+      return S_OK;
+   }
+   if (pScriptMan)
+   {
+      g_phantomLast[obj] = message->time;
+      g_phantomTimers[obj] = pScriptMan->SetTimedMessage2(obj, kPhantomTimer, kPhantomStepMs, kSTM_OneShot,
+                                                           cMultiParm(PhantomData(target, fade, on)));
+   }
+   return S_OK;
+}
+} // namespace
+
 STDMETHODIMP cOsm32Script::ReceiveMessage(sScrMsg *message,
                                           sMultiParm *reply,
                                           eScrTraceAction debugAction)
 {
+   // NVScript's NVPhantomTrap, natively (above), for an object whose Design
+   // Note asks nothing more of it; DARK_OSM32_NATIVE=0: never
+   if (m_native != 0 && message && m_className == "NVPhantomTrap")
+   {
+      static const bool allowed = !getenv("DARK_OSM32_NATIVE") || atoi(getenv("DARK_OSM32_NATIVE")) != 0;
+      sPhantomParams params;
+      std::string note;
+      if (allowed && PhantomNote(message->to, &note) && PhantomParams(note.c_str(), &params))
+      {
+         m_native = 1;
+         return NativePhantom(message, params);
+      }
+      m_native = 0;
+   }
    if (!g_scriptCostOn)
       return m_module->ReceiveMessage(m_guest, message, reply, debugAction);
    const auto t0 = std::chrono::steady_clock::now();
