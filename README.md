@@ -77,4 +77,6 @@ Thief is a trademark of its owners. This project is not made or endorsed by them
 
 ## Licence
 
-The engine is under its MIT-style licence (`src/LICENSE.md`); the scripts, launcher and installer here are under the same terms. RTGL1 is MIT. The libraries keep their own licences (listed in `package/CREDITS.txt`).
+The engine is built on Dark Engine source code from the unauthorized 2010 source leak. That historical source is still copyrighted by its rights holders and was never released under an open-source licence; no licence to it is granted here. This repository exists for preservation, research and modernization, and you need your own copies of the games to play.
+
+The modernization and porting work (the restoration's contributions, and this port's platform layer, renderers, scripts, launcher and installer) is under the MIT License, as set out in `LICENSE.md` (and the restoration's own `src/LICENSE.md`). RTGL1 is MIT. The libraries keep their own licences (listed in `package/CREDITS.txt`).

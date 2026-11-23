@@ -141,7 +141,8 @@ LIC="$VOL/Licences and Source"
 mkdir -p "$LIC/Licences" "$LIC/Source"
 cp "$PKG/CREDITS.txt" "$LIC/"
 lic() { [ -f "$2" ] && cp "$2" "$LIC/Licences/$1" || echo "   (no licence file for $1: $2)"; }
-lic "Dark Engine Restored (MIT).txt" src/LICENSE.md
+lic "Thief RT.txt" LICENSE.md
+lic "Dark Engine Restored.txt" src/LICENSE.md
 lic "RTGL1 (MIT).txt" "$PKG/RTGL1-LICENSE.txt"
 lic "SDL2 (zlib).txt" deps/src/SDL2/LICENSE.txt
 lic "OpenAL Soft (LGPL 2).txt" "$PKG/licences/OpenAL-Soft-COPYING.txt"

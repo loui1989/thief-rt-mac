@@ -5,7 +5,12 @@ What this disk image contains, who made it, and under what terms. The licences
 themselves are in the Licences folder.
 
 The Dark Engine, restored (the game engine)
-  Its contributors. MIT-style licence (Licences/Dark Engine Restored (MIT).txt).
+  Its contributors. https://github.com/inkmaker-droid/darkengine
+  Built on Dark Engine source code from the unauthorized 2010 source leak. That
+  historical source is still copyrighted by its rights holders and was never released
+  under an open-source licence; no licence to it is granted. The restoration's and this
+  port's own contributions are under the MIT License (Licences/Thief RT.txt and
+  Licences/Dark Engine Restored.txt).
   Thief RT is that engine built for Apple silicon Macs with a path-traced renderer and
   an OpenGL renderer; its source as built is Source/thief-rt-engine-src.tar.gz, and
   Source/setup.sh builds it (with the libraries below).
