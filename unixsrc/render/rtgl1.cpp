@@ -9209,7 +9209,10 @@ void thin_see_through(std::vector<CapturedPrim> &cap)
             continue;
          }
          uint8_t cls = 2;
-         if (alpha) {
+         // (not an animated texture's: which of its faces are opaque or clear
+         // changes with its frame, and the model with it -- each frame a new
+         // model, sorted and its normals found again: the HD Mod's grass)
+         if (alpha && p.family.empty()) {
             uint64_t key = (uint64_t(p.texSerial) * 0x9E3779B97F4A7C15ull) ^ triangle_key(0, v) ^ (uint64_t((p.color >> 24) & 0xffu) << 56);
             auto it = g_alphaClass.find(key);
             if (it == g_alphaClass.end()) {
@@ -9387,13 +9390,13 @@ void RenderRTObjectEnd(void)
                           g_currentWhole ? "whole" : "in pieces");
       return;
    }
-   if (g_cfg.thinSeeThrough)
-      thin_see_through(g_currentCapture);
    // (each animated texture's frames' one name: anim_family)
    bool animated = false;
    for (CapturedPrim &p : g_currentCapture)
       if (p.tex && !p.sprite && anim_family(p.tex->source, &p.family))
          animated = true;
+   if (g_cfg.thinSeeThrough)
+      thin_see_through(g_currentCapture);
    CachedObject &c = g_objects[obj];
    if (c.frame != g_frameNumber && !g_currentWhole && c.whole && !c.prims.empty() && c.posed) {
       // Only a piece of a model this time (drawn split across cells, each
