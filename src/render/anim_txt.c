@@ -31,6 +31,12 @@
 
 #include <_animtxt.h>
 
+#include <lgd3d.h>
+#include <tmgr.h>
+
+// (namedres/dds.cpp)
+extern int ResImageShrinkTrueColor(grs_bitmap *bm, int maxSide);
+
 #include <dbmem.h>
 
 #ifndef SHIP
@@ -273,6 +279,35 @@ void  ectsAnimTxtCheckLoad(IRes *me, BOOL portal_tmap, char *path, int txt_id)
             }
          }
          optConfigSpew("anim_txt_load",("- found %d frames\n",frame_idx));
+         // A model's animation (the HD Mods' grass and leaves: up to 98
+         // frames of 2048 pixels): its frames at most 1024 pixels, and all
+         // given to the renderer now, as the mission loads -- each converted
+         // and given the first time it came round was 40 to 90 ms a frame,
+         // the first loops of it, the frame rate in single figures.
+         if (!portal_tmap && frame_idx > 2)
+         {
+            int i, shrunk = 0, given = 0;
+            for (i = 0; i < frame_idx; ++i)
+            {
+               grs_bitmap *bm = (grs_bitmap *) IRes_Lock(animData->frame_hnd[i]);
+               if (bm)
+               {
+                  // (one given already keeps its size: its bits are the
+                  // texture manager's number for it, not its pixels)
+                  if (!(bm->flags & BMF_LOADED) && ResImageShrinkTrueColor(bm, 1024))
+                     ++shrunk;
+                  if (g_tmgr && !(bm->flags & BMF_LOADED))
+                  {
+                     lgd3d_load_texture(bm);
+                     ++given;
+                  }
+               }
+               IRes_Unlock(animData->frame_hnd[i]);
+            }
+            if (shrunk || given)
+               fprintf(stderr, "Animated texture %s: %d frames, %d made 1024 pixels at most, %d given to the renderer now\n",
+                       name, frame_idx, shrunk, given);
+         }
          animData->cnt=frame_idx;
          animData->lock_cnt=1;
          animData->cur=0;
