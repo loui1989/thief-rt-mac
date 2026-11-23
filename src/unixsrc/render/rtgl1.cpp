@@ -9537,21 +9537,26 @@ void RenderRTObjectEnd(void)
       }
       // (why a model holding still is captured anew: logged for the first
       // few -- its triangles and its textures, then and now)
-      if (!same && !sprites && c.whole && g_currentWhole && !c.prims.empty() && c.posed && !g_shipping) {
+      if (!same && !c.prims.empty() && !g_shipping) {
          static std::unordered_map<uint32_t, int> s_anewLogged;
-         float pose[6];
-         bool still = RenderRTGameObjectPose(obj, pose) != 0;
+         float pose[6] = {};
+         const bool posedNow = RenderRTGameObjectPose(obj, pose) != 0;
+         bool still = posedNow && c.posed;
          for (int k = 0; k < 3 && still; ++k)
             still = std::fabs(pose[k] - c.pose[k]) < 0.01f;
          still = still && pose[3] == c.pose[3] && pose[4] == c.pose[4] && pose[5] == c.pose[5];
          // (once it has been captured anew a while: not the first frames, as
          // its textures get their maps and names)
          static std::unordered_map<uint32_t, int> s_anewRun;
-         int &run = s_anewRun[obj];
-         run = still ? run + 1 : 0;
-         int &times = s_anewLogged[obj];
-         if (still && (run == 8 || run == 60) && s_anewLogged.size() <= 16 && times < 2) {
-            ++times;
+         const int run = ++s_anewRun[obj];
+         auto logged = s_anewLogged.find(obj);
+         const int times = logged == s_anewLogged.end() ? 0 : logged->second;
+         if ((run == 8 || run == 60) && times < 2 && (logged != s_anewLogged.end() || s_anewLogged.size() < 16)) {
+            s_anewLogged[obj] = times + 1;
+            fprintf(stderr, "RT: model %u: %s, %s, %s%s, %s; pose (%.3f %.3f %.3f %d %d %d) was (%.3f %.3f %.3f %d %d %d)\n", obj,
+                    still ? "still" : "moved", c.whole ? "whole" : "in pieces", g_currentWhole ? "drawn whole" : "drawn in pieces",
+                    sprites ? ", sprites" : "", c.settled ? "settled" : "not settled", pose[0], pose[1], pose[2], int(pose[3]),
+                    int(pose[4]), int(pose[5]), c.pose[0], c.pose[1], c.pose[2], int(c.pose[3]), int(c.pose[4]), int(c.pose[5]));
             auto describe = [](const std::vector<CapturedPrim> &ps) {
                std::map<std::string, size_t> tex;
                size_t tris = 0, shadow = 0, alpha = 0;
@@ -9608,7 +9613,7 @@ void RenderRTObjectEnd(void)
                         firstNew[0].position[0], firstNew[0].position[1], firstNew[0].position[2], firstNew[1].position[0],
                         firstNew[1].position[1], firstNew[1].position[2], firstNew[2].position[0], firstNew[2].position[1],
                         firstNew[2].position[2]);
-            fprintf(stderr, "RT: model %u \"%s\" captured anew %d frames running, holding still (frame %u; the shape %s; "
+            fprintf(stderr, "RT: model %u \"%s\" captured anew %d times (frame %u; the shape %s; "
                     "%zu triangles new to 1 mm, %zu gone%s): now %s; before %s\n",
                     obj, nm, run, g_frameNumber, hash_prims_unordered(a) == hash_prims_unordered(b) ? "the same" : "changed",
                     newOnes, goneOnes, first, describe(g_currentCapture).c_str(), describe(c.prims).c_str());
