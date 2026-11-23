@@ -2,7 +2,9 @@
 // Thief 2), the original campaign or a fan mission from that game's FMs folder,
 // the renderer (ray traced or OpenGL), the ray tracing quality preset or the
 // OpenGL renderer's options (resolution, real-time lights, shadows, bump maps,
-// v-sync: gl_settings.txt, the same as its panel in the game). Play
+// v-sync: gl_settings.txt, the same as its panel in the game), the light gem (ray traced
+// or the game's own: rt_settings.txt rt_detection) and the sound (traced or classic,
+// HRTF: sound_settings.txt). Play
 // starts it through launch.sh (in this app's Resources), which this process
 // becomes (exec).
 //
@@ -96,11 +98,13 @@ static void SetRtSetting(NSString *key, NSString *value)
       writeToFile:RtSettingsPath() atomically:YES encoding:NSUTF8StringEncoding error:nil];
 }
 
-// gl_settings.txt (the OpenGL renderer's): "key value" lines
+// gl_settings.txt (the OpenGL renderer's) and sound_settings.txt (the sound's, either
+// renderer: traced_sound, hrtf): "key value" lines
 static NSString *GlSettingsPath(void) { return [EngineSettingsDir() stringByAppendingPathComponent:@"gl_settings.txt"]; }
-static NSString *GlSetting(NSString *key)
+static NSString *SoundSettingsPath(void) { return [EngineSettingsDir() stringByAppendingPathComponent:@"sound_settings.txt"]; }
+static NSString *SpacedSetting(NSString *path, NSString *key)
 {
-   NSString *text = [NSString stringWithContentsOfFile:GlSettingsPath() encoding:NSUTF8StringEncoding error:nil];
+   NSString *text = [NSString stringWithContentsOfFile:path encoding:NSUTF8StringEncoding error:nil];
    for (NSString *line in [text componentsSeparatedByCharactersInSet:NSCharacterSet.newlineCharacterSet]) {
       NSArray *kv = [line componentsSeparatedByCharactersInSet:NSCharacterSet.whitespaceCharacterSet];
       if (kv.count >= 2 && [kv[0] isEqualToString:key])
@@ -108,9 +112,9 @@ static NSString *GlSetting(NSString *key)
    }
    return nil;
 }
-static void SetGlSetting(NSString *key, NSString *value)
+static void SetSpacedSetting(NSString *path, NSString *key, NSString *value)
 {
-   NSString *text = [NSString stringWithContentsOfFile:GlSettingsPath() encoding:NSUTF8StringEncoding error:nil] ?: @"";
+   NSString *text = [NSString stringWithContentsOfFile:path encoding:NSUTF8StringEncoding error:nil] ?: @"";
    NSMutableArray *out = [NSMutableArray array];
    BOOL done = NO;
    for (NSString *line in [text componentsSeparatedByCharactersInSet:NSCharacterSet.newlineCharacterSet]) {
@@ -129,8 +133,12 @@ static void SetGlSetting(NSString *key, NSString *value)
    [[NSFileManager defaultManager] createDirectoryAtPath:EngineSettingsDir()
                              withIntermediateDirectories:YES attributes:nil error:nil];
    [[[out componentsJoinedByString:@"\n"] stringByAppendingString:@"\n"]
-      writeToFile:GlSettingsPath() atomically:YES encoding:NSUTF8StringEncoding error:nil];
+      writeToFile:path atomically:YES encoding:NSUTF8StringEncoding error:nil];
 }
+static NSString *GlSetting(NSString *key) { return SpacedSetting(GlSettingsPath(), key); }
+static void SetGlSetting(NSString *key, NSString *value) { SetSpacedSetting(GlSettingsPath(), key, value); }
+static NSString *SoundSetting(NSString *key) { return SpacedSetting(SoundSettingsPath(), key); }
+static void SetSoundSetting(NSString *key, NSString *value) { SetSpacedSetting(SoundSettingsPath(), key, value); }
 
 // ---- the games' files ----------------------------------------------------------
 
@@ -262,6 +270,7 @@ static NSString *PresetNote(NSString *p)
 @property(strong) NSGridView *grid;
 @property(strong) NSPopUpButton *glScalePopup, *glLightsPopup, *glVsyncPopup;
 @property(strong) NSButton *glShadowsCheck, *glBumpCheck;
+@property(strong) NSPopUpButton *gemPopup, *soundPopup, *hrtfPopup;
 @property(strong) NSButton *devAsk, *fpsCheck;
 @end
 
@@ -312,8 +321,9 @@ static NSPopUpButton *Choices(NSArray<NSArray<NSString *> *> *items, NSString *n
    return p;
 }
 
-// the OpenGL renderer's grid rows (shown with OpenGL chosen) and the ray tracer's (Quality)
-enum { kRowQuality = 4, kRowGlFirst = 6, kRowGlLast = 9 };
+// the OpenGL renderer's grid rows (shown with OpenGL chosen) and the ray tracer's (Quality,
+// Light gem)
+enum { kRowQuality = 4, kRowGem = 6, kRowGlFirst = 7, kRowGlLast = 10 };
 
 - (void)applicationDidFinishLaunching:(NSNotification *)n
 {
@@ -386,6 +396,14 @@ enum { kRowQuality = 4, kRowGlFirst = 6, kRowGlLast = 9 };
    self.glBumpCheck.state = [(GlSetting(@"bump_maps") ?: @"1") intValue] ? NSControlStateValueOn : NSControlStateValueOff;
    NSStackView *glChecks = [NSStackView stackViewWithViews:@[self.glShadowsCheck, self.glBumpCheck]];
    glChecks.spacing = 16;
+   // the light gem (the ray tracer's: with OpenGL it is always the game's own), and the
+   // sound (either renderer); the game's panels have them too
+   self.gemPopup = Choices(@[@[@"Ray traced (the light you see)", @"1"], @[@"Classic (the game's own)", @"0"]],
+                           RtSetting(@"rt_detection"), @"1");
+   self.soundPopup = Choices(@[@[@"Ray traced (Steam Audio)", @"1"], @[@"Classic", @"0"]],
+                             SoundSetting(@"traced_sound"), @"1");
+   self.hrtfPopup = Choices(@[@[@"Automatic (with headphones)", @"0"], @[@"Always", @"1"], @[@"Never", @"2"]],
+                            SoundSetting(@"hrtf"), @"0");
 
    NSGridView *grid = [NSGridView gridViewWithViews:@[
       @[Label(@"Game:"), self.gamePopup],
@@ -394,10 +412,13 @@ enum { kRowQuality = 4, kRowGlFirst = 6, kRowGlLast = 9 };
       @[Label(@"Graphics:"), self.renderer],
       @[Label(@"Quality:"), self.qualityPopup],
       @[NSGridCell.emptyContentView, self.qualityNote],
+      @[Label(@"Light gem:"), self.gemPopup],
       @[Label(@"Resolution:"), self.glScalePopup],
       @[Label(@"Real-time lights:"), self.glLightsPopup],
       @[NSGridCell.emptyContentView, glChecks],
       @[Label(@"V-sync:"), self.glVsyncPopup],
+      @[Label(@"Sound:"), self.soundPopup],
+      @[Label(@"3D headphone sound:"), self.hrtfPopup],
       @[NSGridCell.emptyContentView, self.fpsCheck],
    ]];
    self.grid = grid;
@@ -409,7 +430,8 @@ enum { kRowQuality = 4, kRowGlFirst = 6, kRowGlLast = 9 };
    [self.gamePopup.widthAnchor constraintEqualToConstant:330].active = YES;
    [self.missionPopup.widthAnchor constraintEqualToConstant:330].active = YES;
    [self.qualityPopup.widthAnchor constraintEqualToConstant:200].active = YES;
-   for (NSPopUpButton *p in @[self.glScalePopup, self.glLightsPopup, self.glVsyncPopup])
+   for (NSPopUpButton *p in @[self.glScalePopup, self.glLightsPopup, self.glVsyncPopup,
+                              self.gemPopup, self.soundPopup, self.hrtfPopup])
       [p.widthAnchor constraintEqualToConstant:240].active = YES;
 
    NSButton *dev = [NSButton buttonWithTitle:@"Developer Settings..." target:self action:@selector(showDev:)];
@@ -676,6 +698,7 @@ enum { kRowQuality = 4, kRowGlFirst = 6, kRowGlLast = 9 };
    const BOOL gl = self.renderer.selectedSegment == 1;
    self.qualityPopup.enabled = !gl;
    [self.grid rowAtIndex:kRowQuality].hidden = gl;
+   [self.grid rowAtIndex:kRowGem].hidden = gl;
    for (NSInteger r = kRowGlFirst; r <= kRowGlLast; ++r)
       [self.grid rowAtIndex:r].hidden = !gl;
    [self qualityChanged:nil];
@@ -805,6 +828,14 @@ enum { kRowQuality = 4, kRowGlFirst = 6, kRowGlLast = 9 };
       SetGlSetting(@"fps", fps);
    if (gl)
       [self saveGlOptions];
+   else if (![RtSetting(@"rt_detection") isEqualToString:self.gemPopup.selectedItem.representedObject])
+      SetRtSetting(@"rt_detection", self.gemPopup.selectedItem.representedObject);
+   // (the sound's file is written whole: the engine reads it with both lines)
+   NSString *ts = self.soundPopup.selectedItem.representedObject, *hr = self.hrtfPopup.selectedItem.representedObject;
+   if (![SoundSetting(@"traced_sound") isEqualToString:ts] || ![SoundSetting(@"hrtf") isEqualToString:hr]) {
+      SetSoundSetting(@"traced_sound", ts);
+      SetSoundSetting(@"hrtf", hr);
+   }
    [(gl ? @"gl\n" : @"rt\n") writeToFile:[SupportDir() stringByAppendingPathComponent:@"renderer.txt"]
                               atomically:YES encoding:NSUTF8StringEncoding error:nil];
 
