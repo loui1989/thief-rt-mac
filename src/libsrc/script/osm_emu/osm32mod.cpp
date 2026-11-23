@@ -4914,7 +4914,10 @@ int PhantomData(float target, unsigned fadeMs, bool on)
 
 // when each object's fade last stepped (sim time): a step goes as far as the
 // time since (timers come with the frames: forty puffs at 25 fps faded slower)
-std::unordered_map<ObjID, unsigned long> g_phantomLast;
+// (values in types of this file's own: its headers leave the packing tight,
+// and a container of plain types laid out so would be another file's too)
+struct sPhantomLast { unsigned long time; };
+std::unordered_map<ObjID, sPhantomLast> g_phantomLast;
 
 void PhantomStep(ObjID obj, int data, unsigned long now)
 {
@@ -4924,8 +4927,8 @@ void PhantomStep(ObjID obj, int data, unsigned long now)
    float alpha = PhantomAlpha(obj);
    unsigned long elapsed = kPhantomStepMs;
    auto last = g_phantomLast.find(obj);
-   if (last != g_phantomLast.end() && now >= last->second && now - last->second <= 2000)
-      elapsed = now - last->second;
+   if (last != g_phantomLast.end() && now >= last->second.time && now - last->second.time <= 2000)
+      elapsed = now - last->second.time;
    const float step = fadeMs ? float(elapsed) / float(fadeMs) : 2.0f;
    bool done;
    if (alpha < target)
@@ -4945,13 +4948,14 @@ void PhantomStep(ObjID obj, int data, unsigned long now)
    }
    else
    {
-      g_phantomLast[obj] = now;
+      g_phantomLast[obj].time = now;
       pScriptMan->SetTimedMessage2(obj, kPhantomTimer, kPhantomStepMs, kSTM_OneShot, cMultiParm(data));
    }
 }
 
 // the current fade of each object (its timer: a new fade stops the last)
-std::unordered_map<ObjID, tScrTimer> g_phantomTimers;
+struct sPhantomTimer { tScrTimer timer; };
+std::unordered_map<ObjID, sPhantomTimer> g_phantomTimers;
 
 HRESULT NativePhantom(sScrMsg *message, const sPhantomParams &p)
 {
@@ -4982,7 +4986,7 @@ HRESULT NativePhantom(sScrMsg *message, const sPhantomParams &p)
    if (last != g_phantomTimers.end())
    {
       if (pScriptMan)
-         pScriptMan->KillTimedMessage(last->second);
+         pScriptMan->KillTimedMessage(last->second.timer);
       g_phantomTimers.erase(last);
    }
    const float target = on ? p.alphaMax : p.alphaMin;
@@ -4996,8 +5000,8 @@ HRESULT NativePhantom(sScrMsg *message, const sPhantomParams &p)
    }
    if (pScriptMan)
    {
-      g_phantomLast[obj] = message->time;
-      g_phantomTimers[obj] = pScriptMan->SetTimedMessage2(obj, kPhantomTimer, kPhantomStepMs, kSTM_OneShot,
+      g_phantomLast[obj].time = message->time;
+      g_phantomTimers[obj].timer = pScriptMan->SetTimedMessage2(obj, kPhantomTimer, kPhantomStepMs, kSTM_OneShot,
                                                            cMultiParm(PhantomData(target, fade, on)));
    }
    return S_OK;

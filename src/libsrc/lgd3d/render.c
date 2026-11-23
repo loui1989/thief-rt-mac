@@ -802,11 +802,27 @@ static void ModernSubmitFan(int n, const sLgd3dVertex *src)
 static void ModernSubmitIndexed(int count,const ushort *indices,const sLgd3dVertex *src)
 {
    int i;
-   sRenderBackendVertex *dst=(sRenderBackendVertex *)temp_malloc(count*sizeof(*dst));
+   // (a big batch -- OpenGL's, poly_batch_cap -- is more than the scratch
+   // allocator holds: from the heap)
+   static sRenderBackendVertex *s_big = NULL;
+   static int s_bigCount = 0;
+   sRenderBackendVertex *dst;
+   if (count > 150) {
+      if (count > s_bigCount) {
+         free(s_big);
+         s_big = (sRenderBackendVertex *)malloc(count * sizeof(*s_big));
+         s_bigCount = s_big ? count : 0;
+      }
+      dst = s_big;
+   } else
+      dst = (sRenderBackendVertex *)temp_malloc(count*sizeof(*dst));
+   if (!dst)
+      return;
    for(i=0;i<count;++i)ModernConvertVertex(&dst[i],&src[indices[i]]);
    if (!ModernCapture(kRenderBackendTriangles,count,dst,src,indices,FALSE))
       RenderBackendDraw(kRenderBackendTriangles,dst,count,FALSE);
-   temp_free(dst);
+   if (dst != s_big)
+      temp_free(dst);
 }
 
 static void do_points(int n, sLgd3dVertex *vlist)
@@ -826,7 +842,18 @@ static void do_trifan(int n, sLgd3dVertex *vlist)
    prim_setup(); ModernSubmitFan(n,vlist);
 }
 
-#define MAX_POLY_VERTS 50
+// Polygons gathered into one draw until 50 vertices (the path tracer's
+// capture: its batches as they were), or 600 (OpenGL: a starry sky's 1500
+// stars, each its own little polygon, went in draws of a dozen)
+#define MAX_POLY_VERTS 600
+static int poly_batch_cap(void)
+{
+#ifdef DARK_RT
+   if (RenderRTActive())
+      return 50;
+#endif
+   return MAX_POLY_VERTS;
+}
 sLgd3dVertex poly_vertex_buffer[MAX_POLY_VERTS];
 ushort tri_index_buffer[3*MAX_POLY_VERTS];
 
@@ -885,7 +912,7 @@ static sLgd3dVertex *PolyMalloc(int n)
 
    prim_setup();
 
-   if (num_poly_verts + n > MAX_POLY_VERTS)
+   if (num_poly_verts + n > poly_batch_cap())
       flush_polys();
 
    AssertMsg(num_poly_verts + n <= MAX_POLY_VERTS, "PolyMalloc(): poly too large!");

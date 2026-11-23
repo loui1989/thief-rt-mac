@@ -2388,6 +2388,8 @@ static model_funcs g_atModelFuncs[OM_NUM_TYPES] =
 };
 
 
+extern "C" int ObjLODModelNumber(ObjID obj, int idx);   // (mnamprop.cpp)
+
 // always returns something valid
 model_funcs *rendobj_get_model_funcs(ObjID obj_id, int *idx)
 {
@@ -2399,6 +2401,8 @@ model_funcs *rendobj_get_model_funcs(ObjID obj_id, int *idx)
    }
    else
    {
+      // (its Model LOD's model at this distance: mnamprop.cpp)
+      *idx = ObjLODModelNumber(obj_id, *idx);
       int type=objmodelGetModelType(*idx);
 
       return &g_atModelFuncs[type]; // XXX what error checking is appropriate?
