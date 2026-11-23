@@ -10,6 +10,10 @@
 #                                                   /Applications is not writable)
 # Running it again updates the engine and keeps the settings, the saves and the materials.
 #
+# install.sh --update (the launcher's Install Update, from the new version's disk image):
+# the engine and the launcher replaced, nothing asked and nothing else changed (the games,
+# the mods, the settings kept); THIEF_RT_APPS: the folder the launcher is in.
+#
 # The launcher runs this too (install.sh --setup, from its Resources): the finding part
 # alone -- the games, The Black Parade, the HD Mod -- when the installer could not look
 # (macOS keeps an app from a disk image, not yet installed, out of Downloads, Documents
@@ -26,6 +30,7 @@ if [ "$(sysctl -n sysctl.proc_translated 2>/dev/null)" = 1 ] && [ -z "${THIEF_RT
 fi
 
 SETUP=""; [ "${1:-}" = --setup ] && SETUP=1
+UPDATE=""; [ "${1:-}" = --update ] && UPDATE=1
 ME="Install Thief RT"; [ -n "$SETUP" ] && ME="Thief RT"
 RES="$(cd "$(dirname "$0")/../Resources" 2>/dev/null && pwd)"
 PAYLOAD="$RES/Payload"
@@ -152,6 +157,44 @@ GAME_ROOTS=("$HOME/Games" "$HOME/Library/Application Support/Steam/steamapps/com
             "$HOME/Library/Application Support/Steam/SteamApps/common" "$HOME/Applications" "/Applications"
             "$DOWNLOADS" "$HOME/Documents" "$HOME/Desktop"
             "$HOME/Library/Application Support/CrossOver/Bottles" "$HOME/Library/Containers/com.isaacmarovitz.Whisky/Bottles")
+
+# --- the engine and the launcher ------------------------------------------------------
+
+# the engine (replaced whole: an update), and the path tracer's folder for this player: the
+# engine's files linked in, and the materials made from the textures (kept: they take a
+# while to make)
+install_engine() {
+  rm -rf "$DEST/Engine.new"
+  "$DITTO" "$PAYLOAD/Engine" "$DEST/Engine.new" >&3 2>&1 || return 1
+  rm -rf "$DEST/Engine" && mv "$DEST/Engine.new" "$DEST/Engine" || return 1
+  mkdir -p "$DEST/rt/mat_dev" "$DEST/logs"
+  for f in "$DEST/Engine/rt/"*; do ln -sfn "$f" "$DEST/rt/$(basename "$f")"; done
+  [ -f "$DEST/renderer.txt" ] || echo rt > "$DEST/renderer.txt"
+  return 0
+}
+
+# the launcher, in $APPS (~/Applications if that is not writable): $A
+install_launcher() {
+  if [ ! -w "$APPS" ]; then APPS="$HOME/Applications"; mkdir -p "$APPS"; fi
+  A="$APPS/Thief RT.app"
+  rm -rf "$A.new"
+  "$DITTO" "$PAYLOAD/Thief RT.app" "$A.new" >&3 2>&1 || return 1
+  rm -rf "$A" && mv "$A.new" "$A" || return 1
+  touch "$A"
+  # copied from a downloaded disk image: not to be held up by Gatekeeper again
+  xattr -dr com.apple.quarantine "$DEST" "$A" >&3 2>&1
+  return 0
+}
+
+if [ -n "$UPDATE" ]; then
+  echo "Thief RT update: $(cat "$PAYLOAD/Engine/VERSION" 2>/dev/null) (log: $LOG)"
+  [ -x "$PAYLOAD/Engine/Thief RT.app/Contents/MacOS/thief-runner" ] || { echo "This disk image is incomplete (its Payload is missing)."; exit 1; }
+  [ -d "$DEST/Engine" ] || { echo "Thief RT is not installed here ($DEST): install it with Install Thief RT."; exit 1; }
+  install_engine || { echo "Could not copy the engine (the details are in $LOG)."; cat "$LOG"; exit 1; }
+  install_launcher || { echo "Could not replace the launcher in $APPS (the details are in $LOG)."; cat "$LOG"; exit 1; }
+  echo "Updated: $A"
+  exit 0
+fi
 
 # --- start ---------------------------------------------------------------------------
 
@@ -487,16 +530,7 @@ mkdir -p "$DEST" || fail "Could not make $DEST."
 if [ -z "$SETUP" ]; then
 notify "Installing... (this takes a few seconds)"
 
-# the engine (replaced whole: an update)
-rm -rf "$DEST/Engine.new"
-"$DITTO" "$PAYLOAD/Engine" "$DEST/Engine.new" >&3 2>&1 || fail "Could not copy the engine."
-rm -rf "$DEST/Engine" && mv "$DEST/Engine.new" "$DEST/Engine"
-
-# the path tracer's folder for this player: the engine's files linked in, and the
-# materials made from the textures (kept: they take a while to make)
-mkdir -p "$DEST/rt/mat_dev" "$DEST/logs"
-for f in "$DEST/Engine/rt/"*; do ln -sfn "$f" "$DEST/rt/$(basename "$f")"; done
-[ -f "$DEST/renderer.txt" ] || echo rt > "$DEST/renderer.txt"
+install_engine || fail "Could not copy the engine."
 fi
 
 if [ -z "$DEFER" ]; then
@@ -709,15 +743,7 @@ fi
 # --- the launcher --------------------------------------------------------------------
 
 if [ -z "$SETUP" ]; then
-if [ ! -w "$APPS" ]; then APPS="$HOME/Applications"; mkdir -p "$APPS"; fi
-A="$APPS/Thief RT.app"
-rm -rf "$A.new"
-"$DITTO" "$PAYLOAD/Thief RT.app" "$A.new" >&3 2>&1 || fail "Could not make the launcher in $APPS."
-rm -rf "$A" && mv "$A.new" "$A"
-touch "$A"
-
-# copied from a downloaded disk image: not to be held up by Gatekeeper again
-xattr -dr com.apple.quarantine "$DEST" "$A" >&3 2>&1
+install_launcher || fail "Could not make the launcher in $APPS."
 fi
 
 # --- done ----------------------------------------------------------------------------

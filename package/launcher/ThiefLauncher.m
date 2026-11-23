@@ -18,6 +18,7 @@
 //   clang -fobjc-arc -O2 -mmacosx-version-min=13.0 ThiefLauncher.m -framework AppKit -o "Thief RT"
 
 #import <AppKit/AppKit.h>
+#import <CommonCrypto/CommonDigest.h>
 #include <unistd.h>
 
 static NSString *const kTitle = @"Thief RT";
@@ -278,6 +279,12 @@ static NSString *PresetNote(NSString *p)
 @property(strong) NSButton *glShadowsCheck, *glBumpCheck;
 @property(strong) NSPopUpButton *gemPopup, *soundPopup, *hrtfPopup, *foliagePopup;
 @property(strong) NSButton *devAsk, *fpsCheck;
+// Install Update: its window (progress), the download
+@property(strong) NSPanel *updatePanel;
+@property(strong) NSProgressIndicator *updateBar;
+@property(strong) NSTextField *updateLabel;
+@property(strong) NSURLSessionDownloadTask *updateDownload;
+@property(strong) NSTimer *updateTimer;
 @end
 
 @implementation Launcher
@@ -527,7 +534,11 @@ enum { kRowQuality = 4, kRowGem = 6, kRowGlFirst = 7, kRowGlLast = 10 };
 // The latest release on GitHub (loui1989/thief-rt-mac), its tag (v2026.11.23.3) against this
 // app's version (make-dmg.sh: the same numbers): looked at when the launcher opens, once a
 // day (Thief RT menu: Check for Updates Automatically), or from the menu at any time.
-// Nothing is downloaded or installed here: Download opens the release's page.
+// Install Update: the release's disk image downloaded, checked against the SHA-256 GitHub
+// gives for it (nothing installed if it differs), opened (hidden), and its installer run
+// (install.sh --update: the engine and this launcher replaced, the games, mods and settings
+// kept); then the new launcher opened. (Without a disk image or its checksum in the release:
+// Download, its page.)
 
 static NSString *const kUpdatesRepo = @"loui1989/thief-rt-mac";
 
@@ -543,8 +554,13 @@ static NSComparisonResult CompareVersions(NSString *a, NSString *b)
    return NSOrderedSame;
 }
 
+// (for trying the update: defaults write local.thief-rt.launcher UpdatesTestVersion 2000.1.1
+// -- this app taken for that version -- and defaults delete ... after)
 static NSString *AppVersion(void)
 {
+   NSString *test = [NSUserDefaults.standardUserDefaults stringForKey:@"UpdatesTestVersion"];
+   if (test.length)
+      return test;
    NSString *v = NSBundle.mainBundle.infoDictionary[@"CFBundleShortVersionString"];
    return v.length ? v : @"0";
 }
@@ -618,17 +634,269 @@ static NSString *AppVersion(void)
             stringByReplacingOccurrencesOfString:@"\r" withString:@""];
    if (notes.length > 900)
       notes = [[notes substringToIndex:900] stringByAppendingString:@"..."];
+   // the disk image, and its checksum (GitHub's "sha256:...")
+   NSDictionary *dmg = nil;
+   if ([rel[@"assets"] isKindOfClass:NSArray.class])
+      for (NSDictionary *as in rel[@"assets"])
+         if ([as isKindOfClass:NSDictionary.class] && [as[@"name"] isKindOfClass:NSString.class] &&
+             [[as[@"name"] lowercaseString] hasSuffix:@".dmg"] &&
+             [as[@"browser_download_url"] isKindOfClass:NSString.class] && [as[@"digest"] isKindOfClass:NSString.class] &&
+             [[as[@"digest"] lowercaseString] hasPrefix:@"sha256:"]) {
+            dmg = as;
+            break;
+         }
    a.messageText = [NSString stringWithFormat:@"Thief RT %@ is available", latest];
    a.informativeText = [NSString stringWithFormat:@"You have version %@.\n\n%@", AppVersion(), notes];
-   [a addButtonWithTitle:@"Download"];
+   [a addButtonWithTitle:dmg ? @"Install Update" : @"Download"];
    [a addButtonWithTitle:@"Later"];
    [a addButtonWithTitle:@"Skip This Version"];
    [self showUpdateAlert:a then:^(NSModalResponse r) {
-      if (r == NSAlertFirstButtonReturn)
-         [NSWorkspace.sharedWorkspace openURL:[NSURL URLWithString:page]];
-      else if (r == NSAlertThirdButtonReturn)
+      if (r == NSAlertFirstButtonReturn) {
+         if (dmg)
+            [self installUpdate:latest from:[NSURL URLWithString:dmg[@"browser_download_url"]]
+                         sha256:[[dmg[@"digest"] substringFromIndex:7] lowercaseString]
+                           size:[dmg[@"size"] longLongValue] page:page];
+         else
+            [NSWorkspace.sharedWorkspace openURL:[NSURL URLWithString:page]];
+      } else if (r == NSAlertThirdButtonReturn)
          [d setObject:latest forKey:@"UpdatesSkipped"];
    }];
+}
+
+// a file's SHA-256, in hex (nil if it cannot be read)
+static NSString *FileSHA256(NSString *path)
+{
+   NSFileHandle *h = [NSFileHandle fileHandleForReadingAtPath:path];
+   if (!h)
+      return nil;
+   CC_SHA256_CTX c;
+   CC_SHA256_Init(&c);
+   for (;;) {
+      @autoreleasepool {
+         NSData *chunk = [h readDataOfLength:4 << 20];
+         if (chunk.length == 0)
+            break;
+         CC_SHA256_Update(&c, chunk.bytes, (CC_LONG)chunk.length);
+      }
+   }
+   [h closeFile];
+   unsigned char md[CC_SHA256_DIGEST_LENGTH];
+   CC_SHA256_Final(md, &c);
+   NSMutableString *hex = [NSMutableString string];
+   for (int i = 0; i < CC_SHA256_DIGEST_LENGTH; ++i)
+      [hex appendFormat:@"%02x", md[i]];
+   return hex;
+}
+
+// a program run to its end: its exit status, its output (stdout and stderr) in *out
+static int RunTool(NSString *path, NSArray<NSString *> *args, NSDictionary *env, NSString **out)
+{
+   NSTask *t = [NSTask new];
+   t.executableURL = [NSURL fileURLWithPath:path];
+   t.arguments = args;
+   if (env) {
+      NSMutableDictionary *e = [NSProcessInfo.processInfo.environment mutableCopy];
+      [e addEntriesFromDictionary:env];
+      t.environment = e;
+   }
+   NSPipe *pipe = [NSPipe pipe];
+   t.standardOutput = pipe;
+   t.standardError = pipe;
+   NSError *err = nil;
+   if (![t launchAndReturnError:&err]) {
+      if (out)
+         *out = err.localizedDescription ?: @"could not be started";
+      return -1;
+   }
+   NSData *data = [pipe.fileHandleForReading readDataToEndOfFile];
+   [t waitUntilExit];
+   if (out)
+      *out = [[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding] ?: @"";
+   return t.terminationStatus;
+}
+
+- (void)updateProgress:(NSString *)text fraction:(double)f
+{
+   self.updateLabel.stringValue = text;
+   if (f < 0) {
+      self.updateBar.indeterminate = YES;
+      [self.updateBar startAnimation:nil];
+   } else {
+      self.updateBar.indeterminate = NO;
+      self.updateBar.doubleValue = f;
+   }
+}
+
+- (void)cancelUpdate:(id)sender
+{
+   [self.updateDownload cancel];
+}
+
+- (void)endUpdate
+{
+   [self.updateTimer invalidate];
+   self.updateTimer = nil;
+   self.updateDownload = nil;
+   if (self.updatePanel.sheetParent)
+      [self.updatePanel.sheetParent endSheet:self.updatePanel];
+   else
+      [self.updatePanel orderOut:nil];
+   self.updatePanel = nil;
+}
+
+- (void)updateFailed:(NSString *)why page:(NSString *)page
+{
+   [self endUpdate];
+   NSAlert *a = [NSAlert new];
+   a.messageText = @"The update could not be installed";
+   a.informativeText = [why stringByAppendingString:@"\n\nThis version of Thief RT is unchanged. You can download the update from its page and run Install Thief RT instead."];
+   [a addButtonWithTitle:@"Open the Download Page"];
+   [a addButtonWithTitle:@"Close"];
+   [self showUpdateAlert:a then:^(NSModalResponse r) {
+      if (r == NSAlertFirstButtonReturn)
+         [NSWorkspace.sharedWorkspace openURL:[NSURL URLWithString:page]];
+   }];
+}
+
+- (void)installUpdate:(NSString *)version from:(NSURL *)url sha256:(NSString *)sha size:(long long)size page:(NSString *)page
+{
+   // the window: what is happening, a bar, Cancel (while downloading)
+   NSPanel *p = [[NSPanel alloc] initWithContentRect:NSMakeRect(0, 0, 420, 110)
+                                           styleMask:NSWindowStyleMaskTitled backing:NSBackingStoreBuffered defer:NO];
+   p.title = [NSString stringWithFormat:@"Updating Thief RT to %@", version];
+   NSTextField *label = [NSTextField labelWithString:@"Downloading..."];
+   NSProgressIndicator *bar = [NSProgressIndicator new];
+   bar.style = NSProgressIndicatorStyleBar;
+   bar.indeterminate = NO;
+   bar.minValue = 0;
+   bar.maxValue = 1;
+   NSButton *cancel = [NSButton buttonWithTitle:@"Cancel" target:self action:@selector(cancelUpdate:)];
+   NSStackView *v = [NSStackView stackViewWithViews:@[label, bar, cancel]];
+   v.orientation = NSUserInterfaceLayoutOrientationVertical;
+   v.alignment = NSLayoutAttributeLeading;
+   v.edgeInsets = NSEdgeInsetsMake(16, 20, 16, 20);
+   [bar.widthAnchor constraintEqualToConstant:380].active = YES;
+   p.contentView = v;
+   self.updatePanel = p;
+   self.updateBar = bar;
+   self.updateLabel = label;
+   if (self.window.visible)
+      [self.window beginSheet:p completionHandler:nil];
+   else {
+      [p center];
+      [p makeKeyAndOrderFront:nil];
+   }
+
+   NSString *dir = [NSTemporaryDirectory() stringByAppendingPathComponent:@"thief-rt-update"];
+   [[NSFileManager defaultManager] removeItemAtPath:dir error:nil];
+   [[NSFileManager defaultManager] createDirectoryAtPath:dir withIntermediateDirectories:YES attributes:nil error:nil];
+   NSString *dmgPath = [dir stringByAppendingPathComponent:url.lastPathComponent.length ? url.lastPathComponent : @"Thief-RT.dmg"];
+
+   __weak Launcher *me = self;
+   self.updateDownload = [NSURLSession.sharedSession downloadTaskWithURL:url
+                                                       completionHandler:^(NSURL *loc, NSURLResponse *resp, NSError *err) {
+      // (the file is gone when this returns: moved first)
+      NSError *mv = nil;
+      const BOOL got = loc && !err && [(NSHTTPURLResponse *)resp statusCode] == 200 &&
+                       [[NSFileManager defaultManager] moveItemAtPath:loc.path toPath:dmgPath error:&mv];
+      dispatch_async(dispatch_get_main_queue(), ^{
+         Launcher *s = me;
+         if (!s)
+            return;
+         [s.updateTimer invalidate];
+         s.updateTimer = nil;
+         if (err.code == NSURLErrorCancelled) {
+            [s endUpdate];
+            return;
+         }
+         if (!got) {
+            [s updateFailed:[NSString stringWithFormat:@"The download failed%@.",
+                                                       err ? [@": " stringByAppendingString:err.localizedDescription] : @""]
+                       page:page];
+            return;
+         }
+         cancel.enabled = NO;
+         [s updateProgress:@"Checking the download..." fraction:-1];
+         [s finishUpdate:version dmg:dmgPath sha256:sha page:page];
+      });
+   }];
+   [self.updateDownload resume];
+   self.updateTimer = [NSTimer scheduledTimerWithTimeInterval:0.2 repeats:YES block:^(NSTimer *t) {
+      Launcher *s = me;
+      NSURLSessionDownloadTask *dl = s.updateDownload;
+      if (!dl)
+         return;
+      const long long total = dl.countOfBytesExpectedToReceive > 0 ? dl.countOfBytesExpectedToReceive : size;
+      const long long got = dl.countOfBytesReceived;
+      [s updateProgress:[NSString stringWithFormat:@"Downloading... %.0f of %.0f MB", got / 1048576.0, total / 1048576.0]
+               fraction:total > 0 ? (double)got / (double)total : 0];
+   }];
+}
+
+// checked, opened, its installer run (away from the main thread); then the new launcher
+- (void)finishUpdate:(NSString *)version dmg:(NSString *)dmgPath sha256:(NSString *)sha page:(NSString *)page
+{
+   NSString *appPath = NSBundle.mainBundle.bundlePath;
+   NSString *appsDir = appPath.stringByDeletingLastPathComponent;
+   // (opened where macOS runs a quarantined app from -- a read-only copy: the installer's place)
+   if ([appPath containsString:@"/AppTranslocation/"]) {
+      appsDir = @"/Applications";
+      appPath = @"/Applications/Thief RT.app";
+   }
+   __weak Launcher *me = self;
+   dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
+      NSString *why = nil, *log = @"";
+      NSString *got = FileSHA256(dmgPath);
+      if (![got isEqualToString:sha])
+         why = @"The download did not match the checksum GitHub gives for it, so it was not installed.";
+      NSString *mnt = [dmgPath.stringByDeletingLastPathComponent stringByAppendingPathComponent:@"mnt"];
+      BOOL mounted = NO;
+      if (!why) {
+         dispatch_async(dispatch_get_main_queue(), ^{ [me updateProgress:@"Installing..." fraction:-1]; });
+         [[NSFileManager defaultManager] createDirectoryAtPath:mnt withIntermediateDirectories:YES attributes:nil error:nil];
+         NSString *out = nil;
+         if (RunTool(@"/usr/bin/hdiutil", @[@"attach", @"-nobrowse", @"-noautoopen", @"-readonly", @"-mountpoint", mnt, dmgPath],
+                     nil, &out) != 0)
+            why = [@"The disk image could not be opened: " stringByAppendingString:out];
+         else
+            mounted = YES;
+      }
+      if (!why) {
+         NSString *script = [mnt stringByAppendingPathComponent:@"Install Thief RT.app/Contents/MacOS/install"];
+         if (![[NSFileManager defaultManager] fileExistsAtPath:script])
+            why = @"The disk image has no installer in it.";
+         else if (RunTool(@"/bin/bash", @[script, @"--update"], @{@"THIEF_RT_APPS" : appsDir}, &log) != 0)
+            why = [@"Its installer failed:\n" stringByAppendingString:log.length > 600 ? [log substringFromIndex:log.length - 600] : log];
+      }
+      if (mounted)
+         RunTool(@"/usr/bin/hdiutil", @[@"detach", mnt, @"-force"], nil, NULL);
+      [[NSFileManager defaultManager] removeItemAtPath:dmgPath.stringByDeletingLastPathComponent error:nil];
+      // (what the installer said, kept with the logs)
+      NSString *logs = [SupportDir() stringByAppendingPathComponent:@"logs"];
+      [[NSFileManager defaultManager] createDirectoryAtPath:logs withIntermediateDirectories:YES attributes:nil error:nil];
+      [[NSString stringWithFormat:@"%@ update to %@: %@\n%@", [NSDate date], version, why ?: @"done", log]
+          writeToFile:[logs stringByAppendingPathComponent:@"update.log"] atomically:YES encoding:NSUTF8StringEncoding error:nil];
+      // (where the installer put the launcher: its last line, "Updated: <path>")
+      NSString *newApp = appPath;
+      for (NSString *line in [log componentsSeparatedByString:@"\n"])
+         if ([line hasPrefix:@"Updated: "] && [line hasSuffix:@".app"])
+            newApp = [line substringFromIndex:9];
+      dispatch_async(dispatch_get_main_queue(), ^{
+         Launcher *s = me;
+         if (why) {
+            [s updateFailed:why page:page];
+            return;
+         }
+         // the new launcher (a new instance: this one still running), then this one gone
+         [s updateProgress:@"Done. Opening the new version..." fraction:1];
+         NSWorkspaceOpenConfiguration *cfg = [NSWorkspaceOpenConfiguration configuration];
+         cfg.createsNewApplicationInstance = YES;
+         [NSWorkspace.sharedWorkspace openApplicationAtURL:[NSURL fileURLWithPath:newApp] configuration:cfg
+                                         completionHandler:^(NSRunningApplication *app, NSError *e) {
+            dispatch_async(dispatch_get_main_queue(), ^{ [NSApp terminate:nil]; });
+         }];
+      });
+   });
 }
 
 - (void)showUpdateAlert:(NSAlert *)a then:(void (^)(NSModalResponse))done
