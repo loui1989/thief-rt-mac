@@ -91,12 +91,15 @@ namespace {
 struct sGuestProfile
 {
    bool on = getenv("DARK_OSM32_PROFILE") != 0;
-   std::unordered_map<uint32_t, uint64_t> at;
+   struct sCount { uint64_t n = 0; };   // (a type of this file's own)
+   std::unordered_map<uint32_t, sCount> at;
    void Dump()
    {
       if (!on || at.empty())
          return;
-      std::vector<std::pair<uint32_t, uint64_t> > all(at.begin(), at.end());
+      std::vector<std::pair<uint32_t, uint64_t> > all;
+      for (const auto &e : at)
+         all.push_back(std::make_pair(e.first, e.second.n));
       std::sort(all.begin(), all.end(),
                 [](const std::pair<uint32_t, uint64_t> &a, const std::pair<uint32_t, uint64_t> &b)
                 { return a.second > b.second; });
@@ -3173,7 +3176,7 @@ cCpu::eRunResult cCpu::Run(uint32_t stopAddress, uint64_t instructionLimit,
       }
       const uint32_t instructionAddress = m_state.eip;
       if (g_guestProfile.on && (count & 15) == 0)
-         ++g_guestProfile.at[instructionAddress];
+         ++g_guestProfile.at[instructionAddress].n;
       if (!Step(error))
       {
          if (error && error->find("guest eip") == std::string::npos)

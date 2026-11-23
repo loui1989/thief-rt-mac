@@ -1371,6 +1371,11 @@ struct FrameTexture {
    bool dirty = true;
    std::vector<uint8_t> rgba, scratch;
    int width = 0, height = 0;
+   // (the canvas: its pixels as the game gave them last, to convert only the
+   // rows that changed -- SetCanvas)
+   std::vector<uint8_t> raw, rawPalette;
+   int rawDepth = 0;
+   bool rawScene = false;
    void upload()
    {
       dirty = false;
@@ -4786,11 +4791,42 @@ void SetCanvas(const void *pixels, int width, int height, int rowBytes, int dept
    if (!g_active || !pixels || width <= 0 || height <= 0)
       return;
    FrameTexture &t = g_canvasTex;
-   // converted into scratch, uploaded only when it differs from last frame's
-   t.scratch.resize(size_t(width) * height * 4);
+   // Only the rows that changed since last frame converted (the HUD and
+   // the text rarely change; converting all of it every frame, and comparing
+   // the result with last frame's, was some 8% of the frame), uploaded only
+   // if any did.
+   const size_t rowLen = size_t(width) * (depth == 8 ? 1 : 2);
+   const bool paletteSame = depth != 8 || !palette ||
+                            (t.rawPalette.size() == 768 && memcmp(t.rawPalette.data(), palette, 768) == 0);
+   const bool whole = t.width != width || t.height != height || t.rawDepth != depth || t.rawScene != scene ||
+                      !paletteSame || t.raw.size() != rowLen * size_t(height) || t.rgba.size() != size_t(width) * height * 4;
+   if (whole) {
+      t.raw.assign(rowLen * size_t(height), 0);
+      t.rgba.assign(size_t(width) * height * 4, 0);
+      t.rawDepth = depth;
+      t.rawScene = scene;
+      if (depth == 8 && palette)
+         t.rawPalette.assign(palette, palette + 768);
+   }
+   // (RGB565 to 8 bits a channel)
+   static uint8_t s_five[32], s_six[64];
+   static bool s_tables = false;
+   if (!s_tables) {
+      for (int i = 0; i < 32; ++i)
+         s_five[i] = uint8_t(i * 255 / 31);
+      for (int i = 0; i < 64; ++i)
+         s_six[i] = uint8_t(i * 255 / 63);
+      s_tables = true;
+   }
+   bool changed = whole;
    for (int y = 0; y < height; ++y) {
-      uint8_t *dst = t.scratch.data() + size_t(y) * width * 4;
       const uint8_t *row = static_cast<const uint8_t *>(pixels) + size_t(y) * rowBytes;
+      uint8_t *kept = t.raw.data() + size_t(y) * rowLen;
+      if (!whole && memcmp(row, kept, rowLen) == 0)
+         continue;
+      memcpy(kept, row, rowLen);
+      changed = true;
+      uint8_t *dst = t.rgba.data() + size_t(y) * width * 4;
       for (int x = 0; x < width; ++x, dst += 4) {
          uint32_t raw;
          uint8_t r, g, b;
@@ -4802,16 +4838,15 @@ void SetCanvas(const void *pixels, int width, int height, int rowBytes, int dept
          } else {
             raw = reinterpret_cast<const uint16_t *>(row)[x];
             // the canvas is RGB565 when presented at 16 bits
-            r = uint8_t(((raw >> 11) & 31) * 255 / 31);
-            g = uint8_t(((raw >> 5) & 63) * 255 / 63);
-            b = uint8_t((raw & 31) * 255 / 31);
+            r = s_five[(raw >> 11) & 31];
+            g = s_six[(raw >> 5) & 63];
+            b = s_five[raw & 31];
          }
          dst[0] = r; dst[1] = g; dst[2] = b;
          dst[3] = (scene && raw == 0) ? 0 : 255;
       }
    }
-   if (t.width != width || t.height != height || t.scratch != t.rgba) {
-      t.rgba.swap(t.scratch);
+   if (changed) {
       t.width = width;
       t.height = height;
       t.dirty = true;
@@ -8342,6 +8377,11 @@ int RenderRTSkyFaceWanted(void)
       for (double &x : g_skyBackSum)
          x = 0.0;
    }
+   // Once the whole sky is in, a face every fourth frame: drawing one -- its
+   // stars one draw each, its clouds -- was some 5% of every frame, for a
+   // sky that turns slowly (its clouds and stars a cube's lap in 24 frames)
+   if (g_skyFacesSeen == 0x3fu && (g_frameNumber & 3u) != 0)
+      return -1;
    return g_skyNextFace;
 }
 
