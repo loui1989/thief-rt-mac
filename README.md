@@ -2,7 +2,7 @@
 
 **Thief Gold, Thief II: The Metal Age and their fan missions (The Black Parade included), path traced and running natively on Apple silicon Macs.**
 
-Thief RT is the open-source restoration of Looking Glass's Dark Engine, ported to macOS, with a Metal path tracer (RTGL1) and an OpenGL renderer. No Wine, CrossOver or virtual machine: it's a native arm64 app.
+Thief RT is [Dark Engine Restored](https://github.com/inkmaker-droid/darkengine), the restoration of Looking Glass's Dark Engine by inkmaker-droid and its contributors, ported to macOS, with a Metal path tracer (RTGL1) and an OpenGL renderer. No Wine, CrossOver or virtual machine: it's a native arm64 app.
 
 | | |
 |---|---|
@@ -71,7 +71,7 @@ This port was made with an AI coding assistant (Claude, by Anthropic), directed 
 
 ## Credits
 
-The Dark Engine restoration (its contributors) · RTGL1 path tracer (Sultim Tsyrendashiev) · Steam Audio (Valve) · SDL, OpenAL Soft, FFmpeg, Ogg Vorbis, libpng, Squirrel · Thief: The Dark Project, Thief Gold and Thief II (Looking Glass Studios; now Square Enix) · The Thief Gold and Thief II HD Mods (Bentraxx Productions) · The Black Parade and the other fan missions (their authors). Details: `package/CREDITS.txt`.
+[Dark Engine Restored](https://github.com/inkmaker-droid/darkengine), the Dark Engine restoration (inkmaker-droid and its contributors) · RTGL1 path tracer (Sultim Tsyrendashiev) · Steam Audio (Valve) · SDL, OpenAL Soft, FFmpeg, Ogg Vorbis, libpng, Squirrel · Thief: The Dark Project, Thief Gold and Thief II (Looking Glass Studios; now Square Enix) · The Thief Gold and Thief II HD Mods (Bentraxx Productions) · The Black Parade and the other fan missions (their authors). Details: `package/CREDITS.txt`.
 
 Thief is a trademark of its owners. This project is not made or endorsed by them, and contains none of the games' data.
 
