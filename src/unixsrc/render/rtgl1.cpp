@@ -925,10 +925,41 @@ void settle_job(RtTexture &t)
    t.job.reset();
 }
 
+// A model's animated texture -- its frames grass_, grass_1 ... grass_98 (NewDark's,
+// from the image's name), in an object's or a mesh's folder: the frames' one
+// name (the path without the frame's number), else false. The Thief II HD Mod's
+// grass and leaves sway through 50 to 98 such frames of 1024 or 2048 pixels.
+// (Only models': a world texture named wall_2 is a texture of its own.)
+bool anim_family(const std::string &source, std::string *family)
+{
+   std::string s = source;
+   for (char &ch : s)
+      ch = ch == '\\' ? '/' : char(tolower((unsigned char)ch));
+   if (s.find("obj/") == std::string::npos && s.find("mesh/") == std::string::npos)
+      return false;
+   const size_t slash = s.rfind('/');
+   size_t dot = s.rfind('.');
+   if (dot == std::string::npos || (slash != std::string::npos && dot < slash))
+      dot = s.size();
+   size_t e = dot;
+   while (e > 0 && isdigit((unsigned char)s[e - 1]))
+      --e;
+   if (e == 0 || s[e - 1] != '_' || (slash != std::string::npos && e - 1 <= slash + 1))
+      return false;
+   if (family)
+      *family = s.substr(0, e) + s.substr(dot);
+   return true;
+}
+
 // the texture's material class, when it gets maps
 const rtmat::Class *material_class(const RtTexture *t)
 {
    if (!g_cfg.materials || t->source.empty() || g_rtDir.empty())
+      return nullptr;
+   // (not a model's animated texture's frames: maps for each of a hundred
+   // frames of the grass kept the threads busy for minutes, each frame given
+   // twice -- plain, then with maps -- and a model made anew each time)
+   if (anim_family(t->source, nullptr))
       return nullptr;
    if (g_matDir.empty()) {
       g_matDir = g_rtDir + "/mat_dev";
@@ -1945,6 +1976,8 @@ struct CapturedPrim {
    bool alphaTest = false, sprite = false;
    bool firstPerson = false;   // the player's arm, weapon, arrow (kRenderRTObjectFirstPerson)
    float avgColor[4] = {};  // the game's vertex colours, before they were replaced
+   // a model texture's animation (anim_family): its frames' one name, else ""
+   std::string family;
 };
 
 // What an object looked like the last time the engine drew it. Objects the
@@ -2536,7 +2569,10 @@ uint64_t hash_prims_unordered(const std::vector<CapturedPrim> &prims)
       if (p.sprite)
          continue;
       uint64_t th = 1469598103934665603ull;
-      for (unsigned char ch : p.texture)
+      // (an animated texture by its frames' one name: a model whose texture
+      // only turns to its next frame has not changed -- its textures are
+      // brought up to date as it is kept, RenderRTObjectEnd)
+      for (unsigned char ch : p.family.empty() ? p.texture : p.family)
          th = (th ^ ch) * 1099511628211ull;
       for (size_t t = 0; t + 2 < p.verts.size(); t += 3) {
          uint64_t h = th;
@@ -9353,6 +9389,11 @@ void RenderRTObjectEnd(void)
    }
    if (g_cfg.thinSeeThrough)
       thin_see_through(g_currentCapture);
+   // (each animated texture's frames' one name: anim_family)
+   bool animated = false;
+   for (CapturedPrim &p : g_currentCapture)
+      if (p.tex && !p.sprite && anim_family(p.tex->source, &p.family))
+         animated = true;
    CachedObject &c = g_objects[obj];
    if (c.frame != g_frameNumber && !g_currentWhole && c.whole && !c.prims.empty() && c.posed) {
       // Only a piece of a model this time (drawn split across cells, each
@@ -9495,6 +9536,16 @@ void RenderRTObjectEnd(void)
          ++c.unchanged;
          c.frame = g_frameNumber;
          c.posed = RenderRTGameObjectPose(obj, c.pose) != 0;
+         // its animated textures on their frames now (the shape as it was)
+         if (animated)
+            for (const CapturedPrim &q : g_currentCapture)
+               if (!q.family.empty())
+                  for (CapturedPrim &p : c.prims)
+                     if (p.family == q.family && p.texture != q.texture) {
+                        p.texture = q.texture;
+                        p.tex = q.tex;
+                        p.texSerial = q.texSerial;
+                     }
          g_currentCapture.clear();
          return;
       }
