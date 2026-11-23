@@ -276,6 +276,36 @@ static cModelLODProperty* modellodprop = NULL;
 extern "C" mxs_vector portal_camera_loc;
 
 // the model to draw an object with now (its Model LOD's, else idx, its own)
+// Foliage (the launcher's; detail_settings.txt beside rt_settings.txt, "foliage N"):
+// 0 off -- each object its lightest model everywhere (the Thief II HD Mod's grass: the
+// original game's tufts), 1 medium -- the mission's own distances (as NewDark), 2 high
+// (when not set) -- twice them (the HD Mod's grass went to those tufts 45 ft away, a
+// field looking bare a little way off). cam.cfg's model_lod_dist_factor, when there,
+// sets the distances still.
+static int FoliageSetting(void)
+{
+   int foliage = 2;
+   const char* home = getenv("HOME");
+   if (!home || !*home)
+      return foliage;
+   char path[1024];
+#if defined(__APPLE__)
+   snprintf(path, sizeof(path), "%s/Library/Application Support/Dark Engine Restored/detail_settings.txt", home);
+#else
+   snprintf(path, sizeof(path), "%s/.config/dark-engine-restored/detail_settings.txt", home);
+#endif
+   if (FILE* f = fopen(path, "r"))
+   {
+      char key[64];
+      int value;
+      while (fscanf(f, "%63s %d", key, &value) == 2)
+         if (!strcmp(key, "foliage"))
+            foliage = value < 0 ? 0 : value > 2 ? 2 : value;
+      fclose(f);
+   }
+   return foliage;
+}
+
 extern "C" int ObjLODModelNumber(ObjID obj, int idx)
 {
    sModelLOD* lod;
@@ -283,16 +313,17 @@ extern "C" int ObjLODModelNumber(ObjID obj, int idx)
       return idx;
    static float s_factor = -1.0f;
    static BOOL s_forceLow = FALSE;
+   static int s_foliage = 2;
    if (s_factor < 0.0f)
    {
-      // (twice NewDark's distances unless cam.cfg says: the Thief II HD Mod's
-      // grass went to the original game's sparse tufts 45 ft away, a field
-      // looking bare a little way off)
-      s_factor = 2.0f;
-      config_get_float("model_lod_dist_factor", &s_factor);
-      if (s_factor <= 0.0f)
-         s_factor = 2.0f;
+      s_foliage = FoliageSetting();
+      s_factor = s_foliage == 1 ? 1.0f : 2.0f;
+      float cfg = 0.0f;
+      if (config_get_float("model_lod_dist_factor", &cfg) && cfg > 0.0f)
+         s_factor = cfg;
       s_forceLow = config_is_defined("model_lod_force_low");
+      fprintf(stderr, "Model LOD: foliage %s, distances x%.2g\n",
+              s_foliage == 0 ? "off (lightest models)" : s_foliage == 1 ? "medium" : "high", s_factor);
    }
    const ObjPos* pos = ObjPosGet(obj);
    if (!pos)
@@ -307,7 +338,9 @@ extern "C" int ObjLODModelNumber(ObjID obj, int idx)
    int& was = s_level[obj].level;
    const float hold = 1.5f;
    int level = 0;
-   if (lod->model[2].text[0] && d > d12 + (was >= 2 ? -hold : hold))
+   if (s_foliage == 0)
+      level = lod->model[2].text[0] ? 2 : 1;
+   else if (lod->model[2].text[0] && d > d12 + (was >= 2 ? -hold : hold))
       level = 2;
    else if (d > d01 + (was >= 1 ? -hold : hold))
       level = 1;
