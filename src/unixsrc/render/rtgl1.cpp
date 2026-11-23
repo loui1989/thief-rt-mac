@@ -9535,6 +9535,46 @@ void RenderRTObjectEnd(void)
             ++g_capParts.nearSame;
          }
       }
+      // (why a model holding still is captured anew: logged for the first
+      // few -- its triangles and its textures, then and now)
+      if (!same && !sprites && c.whole && g_currentWhole && !c.prims.empty() && c.posed && !g_shipping) {
+         static std::unordered_map<uint32_t, int> s_anewLogged;
+         float pose[6];
+         bool still = RenderRTGameObjectPose(obj, pose) != 0;
+         for (int k = 0; k < 3 && still; ++k)
+            still = std::fabs(pose[k] - c.pose[k]) < 0.01f;
+         still = still && pose[3] == c.pose[3] && pose[4] == c.pose[4] && pose[5] == c.pose[5];
+         int &times = s_anewLogged[obj];
+         if (still && s_anewLogged.size() <= 12 && times < 3) {
+            ++times;
+            auto describe = [](const std::vector<CapturedPrim> &ps) {
+               std::map<std::string, size_t> tex;
+               size_t tris = 0, shadow = 0, alpha = 0;
+               for (const CapturedPrim &p : ps) {
+                  tex[(p.family.empty() ? p.texture : p.family)] += p.verts.size() / 3;
+                  tris += p.verts.size() / 3;
+                  if (p.flags & RG_MESH_PRIMITIVE_SHADOW_ONLY)
+                     shadow += p.verts.size() / 3;
+                  if (p.flags & RG_MESH_PRIMITIVE_ALPHA_TESTED)
+                     alpha += p.verts.size() / 3;
+               }
+               std::string out = std::to_string(ps.size()) + " primitives, " + std::to_string(tris) + " triangles (" +
+                                 std::to_string(shadow) + " shadow-only, " + std::to_string(alpha) + " alpha-tested):";
+               for (const auto &e : tex)
+                  out += " " + e.first + " " + std::to_string(e.second);
+               return out;
+            };
+            // the shape alone (its textures left out): the same or not
+            std::vector<CapturedPrim> a = c.prims, b = g_currentCapture;
+            for (CapturedPrim &p : a) { p.texture.clear(); p.family.clear(); }
+            for (CapturedPrim &p : b) { p.texture.clear(); p.family.clear(); }
+            char nm[128];
+            RenderRTGameObjectName(obj, nm, sizeof(nm));
+            fprintf(stderr, "RT: model %u \"%s\" captured anew, holding still (frame %u; the shape %s): now %s; before %s\n",
+                    obj, nm, g_frameNumber, hash_prims_unordered(a) == hash_prims_unordered(b) ? "the same" : "changed",
+                    describe(g_currentCapture).c_str(), describe(c.prims).c_str());
+         }
+      }
       if (!sprites && same && c.settled && c.whole && g_cfg.steadyFaces) {
          ++c.unchanged;
          c.frame = g_frameNumber;
