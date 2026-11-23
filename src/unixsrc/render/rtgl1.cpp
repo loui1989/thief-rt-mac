@@ -11112,6 +11112,18 @@ void fx_burst(const float pos[3], const float rgb[3], float peak, float life)
    g_lightEventFrames = 10;   // (the denoiser lets go: the flash seen at once, not smeared in)
 }
 
+}   // namespace
+
+// An object put with another of its kind in a container (a flash mine the
+// player picks up, joining the ones carried: contain.cpp's CombineTry, which
+// then destroys it): not gone off -- its going makes no flash or blast
+extern "C" void RenderRTGameObjectCombined(uint32_t obj)
+{
+   g_fx.erase(obj);
+}
+
+namespace {
+
 void fx_push(uint32_t id, const float pos[3], const float rgb[3], float level, float size)
 {
    if (level <= 0.01f)

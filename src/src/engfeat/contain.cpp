@@ -52,6 +52,11 @@
 #include <initguid.h>
 #include <contiid.h>
 
+#ifdef DARK_RT
+#include <stdint.h>
+extern "C" void RenderRTGameObjectCombined(uint32_t obj);
+#endif
+
 //////////////////////////////
 // internals
 
@@ -471,6 +476,10 @@ public:
          pScriptMan->SendMessage(&msg); 
 
          // now blow up the leftovers (new_obj)
+#ifdef DARK_RT
+         // (the renderer's effects: a flash mine picked up does not go off)
+         RenderRTGameObjectCombined((uint32_t)new_obj);
+#endif
          AutoAppIPtr_(ObjectSystem,pObjSys); 
          pObjSys->Destroy(new_obj); 
          return(S_OK);
