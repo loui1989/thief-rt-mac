@@ -41,7 +41,7 @@ Hand-made HD textures, models and skies for Thief Gold. Download the full instal
 
 ### Optional: the Thief II HD Mod
 
-The same author's HD Mod for Thief II (version 1.0): HD textures, objects, skies and water. Put its full installer in Downloads too; the installer (or the launcher's *File → Find Games Again*) finds it and installs it into Thief II's folder (about 5 GB).
+The same author's HD Mod for Thief II (version 1.0): HD textures, objects, skies and water. Put its full installer in Downloads too; the installer (or the launcher's *File → Find Games Again*) finds it and installs it into Thief II's folder (about 5 GB), with the installer's default animated grass. Its installer is an NSIS one: Thief RT brings its own 7-Zip to unpack it.
 
 - ModDB: https://www.moddb.com/mods/thief-2-hd-texture-mod
 - Nexus Mods: https://www.nexusmods.com/thief2/mods/5

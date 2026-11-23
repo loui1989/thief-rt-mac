@@ -25,7 +25,12 @@ Libraries inside the engine
   FFmpeg is linked into the engine: Source/setup.sh builds it from its own source and
   links the engine with it again, so a changed FFmpeg can be used.
 
-innoextract (unpacks the HD Mods' Windows installers)
+7-Zip (unpacks the Thief II HD Mod's Windows installer, an NSIS one)
+  Igor Pavlov. GNU LGPL, with BSD parts and the unRAR restriction (its licence file).
+  7-Zip 26.06, unmodified; its source: https://github.com/ip7z/7zip. In the installer's
+  and the launcher's Resources.
+
+innoextract (unpacks Inno Setup installers)
   Daniel Scharrer. zlib licence. https://github.com/dscharrer/innoextract
   Built with Boost (Boost Software License 1.0) and xz's liblzma (0BSD); in the installer's
   and the launcher's Resources.

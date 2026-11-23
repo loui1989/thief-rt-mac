@@ -146,8 +146,8 @@ game_dirs() {
 DOWNLOADS="$HOME/Downloads"
 # how to get innoextract (for the HD Mods' Windows installers): Homebrew; an Intel
 # Homebrew (in /usr/local, run under Rosetta) refuses a plain "brew install" on Apple silicon
-BREW_INNO="brew install innoextract"
-if [ ! -x /opt/homebrew/bin/brew ] && [ -x /usr/local/bin/brew ]; then BREW_INNO="arch -x86_64 /usr/local/bin/brew install innoextract"; fi
+BREW_INNO="brew install sevenzip innoextract"
+if [ ! -x /opt/homebrew/bin/brew ] && [ -x /usr/local/bin/brew ]; then BREW_INNO="arch -x86_64 /usr/local/bin/brew install sevenzip innoextract"; fi
 GAME_ROOTS=("$HOME/Games" "$HOME/Library/Application Support/Steam/steamapps/common"
             "$HOME/Library/Application Support/Steam/SteamApps/common" "$HOME/Applications" "/Applications"
             "$DOWNLOADS" "$HOME/Documents" "$HOME/Desktop"
@@ -322,26 +322,47 @@ fi
 # --- the Thief Gold HD Mod --------------------------------------------------------------
 # Its HDMOD folder in Thief Gold's folder, searched by the game as a mod (cam_mod.ini
 # mod_path). Found as: the folder already there; an HDMOD folder elsewhere (copied from a
-# Windows install); an archive holding one; or its Windows installer (Thief1HDMod1.2.exe,
-# an Inno Setup installer: unpacked with innoextract, from Homebrew, when it is there).
+# Windows install); an archive holding one; or its Windows installer (Thief1HDMod1.2.exe).
 
-# innoextract: Thief RT's own (in this app's Resources; or next to this script in the kit),
-# copied out and its download quarantine taken off, so macOS runs it; else Homebrew's
-INNOEXTRACT=""
-for x in "$RES/innoextract" "$(dirname "$0")/../innoextract/innoextract"; do
-  if [ -z "$INNOEXTRACT" ] && [ -f "$x" ]; then
-    d="$(mktemp -d "${TMPDIR:-/tmp}/thiefrt-inno.XXXXXX")"
-    if cp "$x" "$d/innoextract" 2>>"$LOG"; then
-      xattr -c "$d/innoextract" 2>/dev/null
-      chmod +x "$d/innoextract"
-      "$d/innoextract" --version >&3 2>&1 && INNOEXTRACT="$d/innoextract"
+# The HD Mods' Windows installers are NSIS installers (Thief 2 HD Mod 1.0: unpacked with
+# 7-Zip) or Inno Setup ones (unpacked with innoextract). Both are Thief RT's own (in this
+# app's Resources; or in the kit, next to this script's folder), copied out and their
+# download quarantine taken off, so macOS runs them; else Homebrew's.
+own_tool() {   # $1: its name in Resources, $2: its path in the kit, $3: a test argument
+  local x d
+  for x in "$RES/$1" "$(dirname "$0")/../$2"; do
+    [ -f "$x" ] || continue
+    d="$(mktemp -d "${TMPDIR:-/tmp}/thiefrt-tool.XXXXXX")"
+    if cp "$x" "$d/$1" 2>>"$LOG"; then
+      xattr -c "$d/$1" 2>/dev/null
+      chmod +x "$d/$1"
+      "$d/$1" $3 >&3 2>&1 && { echo "$d/$1"; return; }
     fi
-  fi
-done
+  done
+}
+INNOEXTRACT="$(own_tool innoextract innoextract/innoextract --version)"
 [ -z "$INNOEXTRACT" ] && INNOEXTRACT="$(command -v innoextract 2>/dev/null)"
 for x in /opt/homebrew/bin/innoextract /usr/local/bin/innoextract; do
   [ -z "$INNOEXTRACT" ] && [ -x "$x" ] && INNOEXTRACT="$x"
 done
+SEVENZIP="$(own_tool 7zz 7zip/7zz i)"
+[ -z "$SEVENZIP" ] && SEVENZIP="$(command -v 7zz 2>/dev/null)"
+for x in /opt/homebrew/bin/7zz /usr/local/bin/7zz; do
+  [ -z "$SEVENZIP" ] && [ -x "$x" ] && SEVENZIP="$x"
+done
+
+# a Windows installer's files, one per line (each from a /), after the line "nsis" or
+# "inno" (how it is unpacked); nothing if it is neither
+exe_files() {
+  local l
+  if [ -n "$SEVENZIP" ] && l="$("$SEVENZIP" l -slt "$1" 2>>"$LOG")" && printf '%s\n' "$l" | grep -qx 'Type = Nsis'; then
+    echo nsis
+    printf '%s\n' "$l" | sed -n 's|^Path = |/|p'
+  elif [ -n "$INNOEXTRACT" ] && l="$("$INNOEXTRACT" -l "$1" 2>>"$LOG")"; then
+    echo inno
+    printf '%s\n' "$l"
+  fi
+}
 
 # an HDMOD folder: one with the mod's objects or textures in it
 is_hdmod() { [ -d "$1" ] && [ -n "$(file_in "$1" obj)$(file_in "$1" fam)" ]; }
@@ -382,20 +403,21 @@ if [ -n "$TG_DIR" ]; then
         if printf '%s\n' "$lst" | grep -qiE '(^|/)hdmod/(obj|fam)/' && [ "$(printf '%s\n' "$lst" | listed_game)" = tg ]; then HD_SRC="archive:$a"; break; fi
         case "$a" in
           *.exe|*.EXE)
-            if [ -n "$INNOEXTRACT" ]; then
-              lst="$("$INNOEXTRACT" -l "$a" 2>>"$LOG")"
-              if printf '%s\n' "$lst" | grep -qiE '[/"]hdmod/(obj|fam)/' && [ "$(printf '%s\n' "$lst" | listed_game)" = tg ]; then HD_SRC="inno:$a"; break; fi
+            if [ -n "$SEVENZIP$INNOEXTRACT" ]; then
+              lst="$(exe_files "$a")"
+              kind="$(printf '%s\n' "$lst" | head -1)"
+              if [ -n "$kind" ] && printf '%s\n' "$lst" | grep -qiE '[/"]hdmod/(obj|fam)/' && [ "$(printf '%s\n' "$lst" | listed_game)" = tg ]; then HD_SRC="$kind:$a"; break; fi
             else
               HD_NOTE="
 
-The Thief Gold HD Mod's installer is in your Downloads ($(basename "$a")), but it is a Windows installer: to unpack it, install innoextract (in Terminal: $BREW_INNO), then choose File > Find Games Again in Thief RT."
+The Thief Gold HD Mod's installer is in your Downloads ($(basename "$a")), but it is a Windows installer, and the tools to unpack it are missing from this copy of Thief RT: download Thief RT again, or install them (in Terminal: $BREW_INNO), then choose File > Find Games Again in Thief RT."
             fi ;;
         esac
       done
     fi
   fi
 fi
-echo "hd mod: have=$HD_HAVE src=$HD_SRC innoextract=$INNOEXTRACT" >&3
+echo "hd mod: have=$HD_HAVE src=$HD_SRC 7-zip=$SEVENZIP innoextract=$INNOEXTRACT" >&3
 
 TAKE_HD=""
 if [ -n "$HD_SRC" ]; then
@@ -430,14 +452,15 @@ if [ -n "$T2_DIR" ]; then
         if printf '%s\n' "$lst" | grep -qiE '(^|/)hdmod/(obj|fam)/' && [ "$(printf '%s\n' "$lst" | listed_game)" = t2 ]; then T2HD_SRC="archive:$a"; break; fi
         case "$a" in
           *.exe|*.EXE)
-            if [ -n "$INNOEXTRACT" ]; then
-              lst="$("$INNOEXTRACT" -l "$a" 2>>"$LOG")"
-              if printf '%s\n' "$lst" | grep -qiE '[/"]hdmod/(obj|fam)/' && [ "$(printf '%s\n' "$lst" | listed_game)" = t2 ]; then T2HD_SRC="inno:$a"; break; fi
+            if [ -n "$SEVENZIP$INNOEXTRACT" ]; then
+              lst="$(exe_files "$a")"
+              kind="$(printf '%s\n' "$lst" | head -1)"
+              if [ -n "$kind" ] && printf '%s\n' "$lst" | grep -qiE '[/"]hdmod/(obj|fam)/' && [ "$(printf '%s\n' "$lst" | listed_game)" = t2 ]; then T2HD_SRC="$kind:$a"; break; fi
             else
               case "$(basename "$a" | tr '[:upper:]' '[:lower:]')" in
                 *thief2*|*thief?2*|*thief?ii*|t2*) T2HD_NOTE="
 
-The Thief II HD Mod's installer is in your Downloads ($(basename "$a")), but it is a Windows installer: to unpack it, install innoextract (in Terminal: $BREW_INNO), then choose File > Find Games Again in Thief RT." ;;
+The Thief II HD Mod's installer is in your Downloads ($(basename "$a")), but it is a Windows installer, and the tools to unpack it are missing from this copy of Thief RT: download Thief RT again, or install them (in Terminal: $BREW_INNO), then choose File > Find Games Again in Thief RT." ;;
               esac
             fi ;;
         esac
@@ -524,6 +547,9 @@ if [ -n "$TAKE_HD" ]; then
     dir) "$DITTO" "$src" "$t/HDMOD" >&3 2>&1 && ok=1 ;;
     archive) tar -xf "$src" -C "$t" >&3 2>&1 && ok=1 ;;
     inno) "$INNOEXTRACT" -s -d "$t" "$src" >&3 2>&1 && ok=1 ;;
+    # (an installer's choices are all in it: the first of each file is kept, the
+    # installer's default)
+    nsis) "$SEVENZIP" x -aos -y -bd -bsp0 -o"$t" "$src" >&3 2>&1; [ $? -le 1 ] && ok=1 ;;
   esac
   hd=""
   if [ -n "$ok" ]; then
@@ -616,9 +642,11 @@ if [ -n "$TAKE_T2HD" ]; then
   case "${T2HD_SRC%%:*}" in
     dir) "$DITTO" "$src" "$t/HDMOD" >&3 2>&1 && ok=1 ;;
     archive) tar -xf "$src" -C "$t" >&3 2>&1 && ok=1 ;;
-    # (its vegetation choices -- animated, still, original -- all unpacked: the last of
-    # each file wins, as innoextract does)
     inno) "$INNOEXTRACT" -s -d "$t" "$src" >&3 2>&1 && ok=1 ;;
+    # (an NSIS installer: Thief 2 HD Mod 1.0's. Its three vegetation choices -- new grass
+    # animated, new grass still, the original -- are all in it, animated first: the first
+    # of each file is kept, which is its installer's default, the animated grass)
+    nsis) "$SEVENZIP" x -aos -y -bd -bsp0 -o"$t" "$src" >&3 2>&1; [ $? -le 1 ] && ok=1 ;;
   esac
   hd=""
   if [ -n "$ok" ]; then
@@ -708,12 +736,12 @@ games=""
 if [ -n "$TG_DIR" ] && [ -z "$HD_ON" ] && [ -z "$HD_NOTE" ]; then
   HD_NOTE="
 
-Optional: the Thief Gold HD Mod (HD textures, models and skies). Download its installer (Thief1HDMod1.2.exe, from ModDB) to your Downloads, install innoextract (in Terminal: $BREW_INNO), then choose File > Find Games Again in Thief RT."
+Optional: the Thief Gold HD Mod (HD textures, models and skies). Download its installer (Thief1HDMod1.2.exe, from ModDB) to your Downloads, then choose File > Find Games Again in Thief RT."
 fi
 if [ -n "$T2_DIR" ] && [ -z "$T2HD_ON" ] && [ -z "$T2HD_NOTE" ]; then
   T2HD_NOTE="
 
-Optional: the Thief II HD Mod (HD textures, objects, skies and water). Download its installer (Thief 2 HD Mod 1.0, from ModDB or Nexus Mods) to your Downloads, install innoextract (in Terminal: $BREW_INNO), then choose File > Find Games Again in Thief RT."
+Optional: the Thief II HD Mod (HD textures, objects, skies and water). Download its installer (Thief 2 HD Mod 1.0, from ModDB or Nexus Mods) to your Downloads, then choose File > Find Games Again in Thief RT."
 fi
 
 if [ -n "$SETUP" ]; then
