@@ -1,5 +1,10 @@
 // Portable IA-32 interpreter for legacy OSM modules.
 
+#include <unordered_map>
+#include <chrono>
+#include <algorithm>
+#include <vector>
+#include <stdlib.h>
 #include <osm_emu/osm32cpu.h>
 
 #pragma pack(push, 8)
@@ -13,6 +18,9 @@
 namespace
 {
 
+// the traps of the C runtime functions run natively (InstallNativeHooks):
+// above the host's (0xf0000000 to 0xf3xxxxxx)
+const uint32_t kNativeTrap = 0xf4000000;
 const uint32_t kFlagCarry = 0x00000001;
 const uint32_t kFlagParity = 0x00000004;
 const uint32_t kFlagAdjust = 0x00000010;
@@ -71,6 +79,43 @@ int32_t Sign8(uint8_t value)
 namespace osm32
 {
 
+// guest instructions run, all modules (for the scripts' cost in the log)
+uint64_t g_osm32Instructions = 0;
+double g_osm32HostSecs = 0;
+uint64_t g_osm32HostCalls = 0;
+static const bool g_hostTiming = getenv("DARK_OSM32_PROFILE") != 0;
+
+// DARK_OSM32_PROFILE: where the guest spends its instructions (every 16th
+// instruction's address counted), the most in stderr as the game ends
+namespace {
+struct sGuestProfile
+{
+   bool on = getenv("DARK_OSM32_PROFILE") != 0;
+   std::unordered_map<uint32_t, uint64_t> at;
+   void Dump()
+   {
+      if (!on || at.empty())
+         return;
+      std::vector<std::pair<uint32_t, uint64_t> > all(at.begin(), at.end());
+      std::sort(all.begin(), all.end(),
+                [](const std::pair<uint32_t, uint64_t> &a, const std::pair<uint32_t, uint64_t> &b)
+                { return a.second > b.second; });
+      uint64_t total = 0;
+      for (size_t i = 0; i < all.size(); ++i)
+         total += all[i].second;
+      fprintf(stderr, "OSM32 profile: %llu samples; host calls %llu in %.0f ms\n", (unsigned long long)total,
+              (unsigned long long)g_osm32HostCalls, g_osm32HostSecs * 1000.0);
+      g_osm32HostCalls = 0;
+      g_osm32HostSecs = 0;
+      for (size_t i = 0; i < all.size() && i < 400; ++i)
+         fprintf(stderr, "  %08x %6.2f%%\n", all[i].first, 100.0 * all[i].second / total);
+   }
+};
+sGuestProfile g_guestProfile;
+}
+void DumpGuestProfile() { g_guestProfile.Dump(); g_guestProfile.at.clear(); }
+
+
 sCpuState::sCpuState()
  : eip(0),
    eflags(0x00000002),
@@ -90,12 +135,23 @@ const cMemory::sRegion *cMemory::Find(uint32_t address, size_t size,
    const uint64_t end = static_cast<uint64_t>(address) + size;
    if (end > 0x100000000ull)
       return 0;
+   size_t &last = m_last[access & 7];
+   if (last < m_regions.size())
+   {
+      const sRegion &region = m_regions[last];
+      if (address >= region.base && end <= region.end &&
+          (region.access & access) == access)
+         return &region;
+   }
    for (size_t i = 0; i < m_regions.size(); ++i)
    {
       const sRegion &region = m_regions[i];
       if (address >= region.base && end <= region.end &&
           (region.access & access) == access)
+      {
+         last = i;
          return &region;
+      }
    }
    return 0;
 }
@@ -137,6 +193,7 @@ bool cMemory::Map(uint32_t base, uint32_t size, unsigned access,
       [](const sRegion &left, const sRegion &right) {
          return left.base < right.base;
       });
+   ++m_generation;   // (the regions moved: what cCpu kept of one is stale)
    if (error)
       error->clear();
    return true;
@@ -245,6 +302,22 @@ bool cMemory::Write64(uint32_t address, uint64_t value, std::string *error)
    return true;
 }
 
+const uint8_t *cMemory::Code(uint32_t address, uint32_t *base, uint64_t *end) const
+{
+   const sRegion *region = Find(address, 1, kMemExecute);
+   if (!region)
+      return 0;
+   *base = region->base;
+   *end = region->end;
+   return region->bytes.data();
+}
+
+uint8_t *cMemory::Bytes(uint32_t address, size_t size)
+{
+   sRegion *region = Find(address, size, kMemRead);
+   return region ? &region->bytes[address - region->base] : 0;
+}
+
 bool cMemory::Fetch8(uint32_t address, uint8_t *value, std::string *error) const
 {
    const sRegion *region = Find(address, 1, kMemExecute);
@@ -282,9 +355,20 @@ bool cCpu::Pop32(uint32_t *value, std::string *error)
 
 bool cCpu::Fetch8(uint8_t *value, std::string *error)
 {
-   if (!m_memory.Fetch8(m_state.eip, value, error))
-      return false;
-   ++m_state.eip;
+   const uint32_t eip = m_state.eip;
+   if (m_codeGeneration != m_memory.Generation() || eip < m_codeBase || eip >= m_codeEnd)
+   {
+      m_code = m_memory.Code(eip, &m_codeBase, &m_codeEnd);
+      m_codeGeneration = m_memory.Generation();
+      if (!m_code)
+      {
+         m_codeBase = 0;
+         m_codeEnd = 0;
+         return m_memory.Fetch8(eip, value, error);   // (its fault)
+      }
+   }
+   *value = m_code[eip - m_codeBase];
+   m_state.eip = eip + 1;
    return true;
 }
 
@@ -712,10 +796,120 @@ bool cCpu::Condition(unsigned condition) const
    return false;
 }
 
+// ---- native C runtime functions -------------------------------------------
+//
+// Fan missions' script modules (NVScript above all) keep their objects'
+// settings in maps keyed without case: Visual C++'s __ascii_stricmp was a
+// quarter of every instruction they ran here (the Thief II HD Mod's torch
+// flames, NVPhantomTrap, 70 000 instructions a message). Found by its code,
+// its first bytes become a jump to a trap of ours, and it is run natively.
+
+namespace
+{
+enum eNative { kNativeAsciiStricmp };
+
+struct sNativeSignature
+{
+   eNative kind;
+   const uint8_t *bytes;
+   size_t size;
+};
+
+// MSVC 2008-2015 __ascii_stricmp(const char *, const char *), cdecl
+const uint8_t kAsciiStricmp[] = {
+   0x8b, 0xff, 0x55, 0x8b, 0xec, 0x8b, 0x55, 0x0c, 0x56, 0x8b, 0x75, 0x08,
+   0x57, 0x0f, 0xb6, 0x06, 0x8d, 0x48, 0xbf, 0x46, 0x83, 0xf9, 0x19, 0x77,
+   0x03, 0x83, 0xc0, 0x20, 0x0f, 0xb6, 0x0a, 0x8d, 0x79, 0xbf, 0x42, 0x83,
+   0xff, 0x19, 0x77, 0x03, 0x83, 0xc1, 0x20, 0x85, 0xc0, 0x74, 0x04, 0x3b,
+   0xc1, 0x74, 0xda, 0x5f, 0x2b, 0xc1, 0x5e, 0x5d, 0xc3
+};
+
+const sNativeSignature kNativeSignatures[] = {
+   { kNativeAsciiStricmp, kAsciiStricmp, sizeof(kAsciiStricmp) },
+};
+}
+
+unsigned cCpu::InstallNativeHooks(uint32_t base, uint32_t size)
+{
+   uint8_t *code = m_memory.Bytes(base, size);
+   if (!code)
+      return 0;
+   unsigned installed = 0;
+   for (const sNativeSignature &sig : kNativeSignatures)
+      for (uint32_t i = 0; i + sig.size <= size; ++i)
+      {
+         if (code[i] != sig.bytes[0] || memcmp(code + i, sig.bytes, sig.size) != 0)
+            continue;
+         const uint32_t trap = kNativeTrap + static_cast<uint32_t>(m_natives.size()) * 16u;
+         m_natives.push_back(sig.kind);
+         // jmp rel32 to the trap, over the function's first five bytes
+         const uint32_t rel = trap - (base + i + 5);
+         code[i] = 0xe9;
+         memcpy(code + i + 1, &rel, 4);
+         ++installed;
+         i += static_cast<uint32_t>(sig.size) - 1;
+      }
+   return installed;
+}
+
+bool cCpu::RunNative(unsigned kind, std::string *error)
+{
+   uint32_t ret, a, b;
+   if (!m_memory.Read32(m_state.reg[kEsp], &ret, error) ||
+       !m_memory.Read32(m_state.reg[kEsp] + 4, &a, error) ||
+       !m_memory.Read32(m_state.reg[kEsp] + 8, &b, error))
+      return false;
+   switch (kind)
+   {
+      case kNativeAsciiStricmp:
+      {
+         uint32_t x, y;
+         for (;;)
+         {
+            uint8_t ca, cb;
+            if (!m_memory.Read8(a++, &ca, error) || !m_memory.Read8(b++, &cb, error))
+               return false;
+            x = ca;
+            y = cb;
+            if (x - 0x41u <= 0x19u)
+               x += 0x20u;
+            if (y - 0x41u <= 0x19u)
+               y += 0x20u;
+            if (!x || x != y)
+               break;
+         }
+         m_state.reg[kEax] = x - y;
+         m_state.reg[kEcx] = y;
+         m_state.reg[kEdx] = b;
+         SetSubFlags(x, y, x - y);
+         break;
+      }
+      default:
+         return Fail(error, "unknown native function");
+   }
+   // (cdecl: the caller takes its arguments off)
+   m_state.reg[kEsp] += 4;
+   m_state.eip = ret;
+   return true;
+}
+
 bool cCpu::Step(std::string *error)
 {
-   if (m_host && m_host->Handles(m_state.eip))
-      return m_host->Invoke(m_state.eip, &m_state, &m_memory, error);
+   // (the host's traps are all at 0xf0000000 and above -- osm32env.cpp,
+   // osm32mod.cpp: guest code below them is not asked about, every instruction)
+   if (m_state.eip >= kNativeTrap && m_state.eip < kNativeTrap + m_natives.size() * 16u &&
+       (m_state.eip - kNativeTrap) % 16u == 0)
+      return RunNative(m_natives[(m_state.eip - kNativeTrap) / 16u], error);
+   if (m_host && m_state.eip >= 0xf0000000u && m_host->Handles(m_state.eip))
+   {
+      if (!g_hostTiming)
+         return m_host->Invoke(m_state.eip, &m_state, &m_memory, error);
+      const auto t0 = std::chrono::steady_clock::now();
+      const bool ok = m_host->Invoke(m_state.eip, &m_state, &m_memory, error);
+      g_osm32HostSecs += std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
+      ++g_osm32HostCalls;
+      return ok;
+   }
 
    const uint32_t instructionAddress = m_state.eip;
    uint8_t opcode;
@@ -2974,9 +3168,12 @@ cCpu::eRunResult cCpu::Run(uint32_t stopAddress, uint64_t instructionLimit,
       if (m_state.eip == stopAddress)
       {
          if (error) error->clear();
+         g_osm32Instructions += count;
          return kRunStopped;
       }
       const uint32_t instructionAddress = m_state.eip;
+      if (g_guestProfile.on && (count & 15) == 0)
+         ++g_guestProfile.at[instructionAddress];
       if (!Step(error))
       {
          if (error && error->find("guest eip") == std::string::npos)

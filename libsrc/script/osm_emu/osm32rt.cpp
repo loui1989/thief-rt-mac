@@ -3,6 +3,8 @@
 #include <osm_emu/osm32rt.h>
 
 #include <string.h>
+#include <stdio.h>
+#include <stdlib.h>
 #include <chrono>
 
 // (time spent running script modules' code, and how many calls: for perf.log)
@@ -468,6 +470,11 @@ bool cModule::Load(const char *path, const char *moduleName,
       return false;
    }
 
+   {
+      const unsigned natives = m_cpu.InstallNativeHooks(m_image.LoadedBase(), m_image.ImageSize());
+      if (natives && getenv("DARK_OSM32_TRACE"))
+         fprintf(stderr, "OSM32 %u C runtime functions run natively\n", natives);
+   }
    const uint32_t entryArguments[] = { m_image.LoadedBase(), 1, 0 };
    uint32_t result;
    if (!Call(m_image.EntryPoint(), entryArguments, 3, &result, error))

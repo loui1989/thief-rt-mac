@@ -49,6 +49,9 @@ struct sCpuState
    sCpuState();
 };
 
+extern uint64_t g_osm32Instructions;
+void DumpGuestProfile();
+
 class cMemory
 {
 public:
@@ -64,6 +67,12 @@ public:
    bool Write32(uint32_t address, uint32_t value, std::string *error);
    bool Write64(uint32_t address, uint64_t value, std::string *error);
    bool Fetch8(uint32_t address, uint8_t *value, std::string *error) const;
+   // the bytes at an address, size of them in one region (to patch), or null
+   uint8_t *Bytes(uint32_t address, size_t size);
+   // the executable region an address is in: its bytes, its first address and
+   // its end; good until Generation() changes (a region mapped)
+   const uint8_t *Code(uint32_t address, uint32_t *base, uint64_t *end) const;
+   unsigned Generation() const { return m_generation; }
 
 private:
    struct sRegion
@@ -77,6 +86,11 @@ private:
    const sRegion *Find(uint32_t address, size_t size, unsigned access) const;
    sRegion *Find(uint32_t address, size_t size, unsigned access);
    std::vector<sRegion> m_regions;
+   // the region last found, for each kind of access (its index: the regions
+   // move as more are mapped): every byte the guest fetched or touched looked
+   // through all of them
+   mutable size_t m_last[8] = {0, 0, 0, 0, 0, 0, 0, 0};
+   unsigned m_generation = 1;
 };
 
 class iHostCalls
@@ -111,8 +125,18 @@ public:
    bool Step(std::string *error);
    eRunResult Run(uint32_t stopAddress, uint64_t instructionLimit,
                   std::string *error);
+   // the C runtime's functions the guest spends its time in, recognised in
+   // its code (base, size) and run natively from then on: how many
+   unsigned InstallNativeHooks(uint32_t base, uint32_t size);
 
 private:
+   bool RunNative(unsigned kind, std::string *error);
+   // the code being run (Fetch8 without looking for its region each byte)
+   const uint8_t *m_code = 0;
+   uint32_t m_codeBase = 0;
+   uint64_t m_codeEnd = 0;
+   unsigned m_codeGeneration = 0;
+   std::vector<unsigned> m_natives;   // each hook's kind, by its trap's number
    struct sDecodedRM
    {
       bool isRegister;

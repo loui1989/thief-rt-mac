@@ -51,6 +51,19 @@
 #include <pfaceiid.h>
 #include <map>
 #include <drkuiscrapi.h>
+#include <chrono>
+#include <string>
+#include <unordered_map>
+
+namespace {
+// DARK_OSM32_TRACE: every message in and out (read once: getenv walks the
+// environment, and it was asked twice a message)
+inline bool TraceOn()
+{
+   static const bool on = getenv("DARK_OSM32_TRACE") != 0;
+   return on;
+}
+} // namespace
 
 // (live guest link queries, across every script module: for perf.log)
 extern "C" { long g_Osm32LinkQueries = 0; }
@@ -1762,7 +1775,7 @@ protected:
 
       GUID guid;
       MAKE_LG_GUID(&guid, serviceId);
-      if (getenv("DARK_OSM32_TRACE"))
+      if (TraceOn())
       {
          fprintf(stderr, "OSM32 service 0x%04x slot %u eip=%08x\n",
                  static_cast<unsigned>(serviceId), slot, state->eip);
@@ -2405,7 +2418,7 @@ private:
              !StringArgument(*state, memory, 3, &property, error) ||
              !Argument(*state, *memory, 4, &fieldAddress, error))
             return false;
-         if (getenv("DARK_OSM32_TRACE"))
+         if (TraceOn())
          {
             uint32_t args[7] = { 0 };
             for (unsigned i = 0; i < 7; ++i)
@@ -4493,7 +4506,7 @@ public:
 
    bool Load(const char *path, const char *moduleName, std::string *error)
    {
-      if (getenv("DARK_OSM32_TRACE"))
+      if (TraceOn())
       {
          fprintf(stderr, "OSM32 load '%s' from '%s' ABI=%s\n",
                  moduleName ? moduleName : "", path ? path : "",
@@ -4520,7 +4533,7 @@ public:
          m_classes[i].descriptor.pfnFactory = 0;
       }
       g_Modules.push_back(this);
-      if (getenv("DARK_OSM32_TRACE"))
+      if (TraceOn())
       {
          fprintf(stderr, "OSM32 loaded '%s' classes=%u\n",
                  m_runtime.Name().c_str(),
@@ -4569,7 +4582,7 @@ public:
          return 0;
       uint32_t guest;
       std::string error;
-      if (getenv("DARK_OSM32_TRACE"))
+      if (TraceOn())
       {
          fprintf(stderr, "OSM32 '%s' create '%s' object=%d\n",
                  m_runtime.Name().c_str(), className ? className : "",
@@ -4583,7 +4596,7 @@ public:
                  m_runtime.Name().c_str(), className ? className : "",
                  objectId, error.empty() ? "unknown guest failure" :
                                            error.c_str());
-         if (getenv("DARK_OSM32_TRACE"))
+         if (TraceOn())
          {
             fprintf(stderr,
                     "OSM32 '%s' could not create '%s' on object %d: %s\n",
@@ -4617,7 +4630,7 @@ public:
       guestMessage.name = message->message ? message->message : "";
       guestMessage.time = static_cast<uint32_t>(message->time);
       guestMessage.flags = message->flags;
-      if (getenv("DARK_OSM32_TRACE"))
+      if (TraceOn())
       {
          fprintf(stderr, "OSM32 '%s' begin message '%s' to=%d\n",
                  m_runtime.Name().c_str(), guestMessage.name.c_str(),
@@ -4656,7 +4669,7 @@ public:
          }
          return E_FAIL;
       }
-      if (getenv("DARK_OSM32_TRACE"))
+      if (TraceOn())
       {
          fprintf(stderr, "OSM32 '%s' end message '%s' result=%08x\n",
                  m_runtime.Name().c_str(), guestMessage.name.c_str(), result);
@@ -4703,11 +4716,70 @@ STDMETHODIMP_(const char *) cOsm32Script::GetClassName()
    return m_className.c_str();
 }
 
+// What the emulated scripts cost, by script and message: every 10 s of play
+// that they took time, the most costly in the log (not in a shipped build).
+// (A Thief II HD Mod torch: its flames' NVPhantomTrap, run in emulation for
+// each of the forty puffs a second, kept the frame near 35 ms.)
+namespace {
+struct sScriptCost { uint64_t count = 0; double secs = 0; uint64_t instructions = 0; };
+std::unordered_map<std::string, sScriptCost> g_scriptCost;
+std::chrono::steady_clock::time_point g_scriptCostSince = std::chrono::steady_clock::now();
+const bool g_scriptCostOn = !getenv("THIEF_RT_SHIPPING");
+
+void NoteScriptCost(const std::string &cls, const char *message, double secs, uint64_t instructions)
+{
+   sScriptCost &c = g_scriptCost[cls + " " + (message ? message : "?")];
+   ++c.count;
+   c.secs += secs;
+   c.instructions += instructions;
+   const auto now = std::chrono::steady_clock::now();
+   const double span = std::chrono::duration<double>(now - g_scriptCostSince).count();
+   if (span < 10.0)
+      return;
+   double total = 0;
+   uint64_t messages = 0;
+   std::vector<std::pair<std::string, sScriptCost> > all(g_scriptCost.begin(), g_scriptCost.end());
+   for (size_t i = 0; i < all.size(); ++i)
+   {
+      total += all[i].second.secs;
+      messages += all[i].second.count;
+   }
+   if (total > 0.05)
+   {
+      std::sort(all.begin(), all.end(),
+                [](const std::pair<std::string, sScriptCost> &a, const std::pair<std::string, sScriptCost> &b)
+                { return a.second.secs > b.second.secs; });
+      std::string top;
+      for (size_t i = 0; i < all.size() && i < 6; ++i)
+      {
+         char buf[160];
+         snprintf(buf, sizeof(buf), "%s%s %llu in %.0f ms (%lluk instructions each)", i ? ", " : "", all[i].first.c_str(),
+                  (unsigned long long)all[i].second.count, all[i].second.secs * 1000.0,
+                  (unsigned long long)(all[i].second.instructions / all[i].second.count / 1000));
+         top += buf;
+      }
+      fprintf(stderr, "Scripts (emulated .osm): %llu messages in %.1f s took %.0f ms (%.1f%%); most: %s\n",
+              (unsigned long long)messages, span, total * 1000.0, 100.0 * total / span, top.c_str());
+   }
+   osm32::DumpGuestProfile();
+   g_scriptCost.clear();
+   g_scriptCostSince = now;
+}
+} // namespace
+
 STDMETHODIMP cOsm32Script::ReceiveMessage(sScrMsg *message,
                                           sMultiParm *reply,
                                           eScrTraceAction debugAction)
 {
-   return m_module->ReceiveMessage(m_guest, message, reply, debugAction);
+   if (!g_scriptCostOn)
+      return m_module->ReceiveMessage(m_guest, message, reply, debugAction);
+   const auto t0 = std::chrono::steady_clock::now();
+   const uint64_t i0 = osm32::g_osm32Instructions;
+   const HRESULT r = m_module->ReceiveMessage(m_guest, message, reply, debugAction);
+   NoteScriptCost(m_className, message ? message->message : 0,
+                  std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count(),
+                  osm32::g_osm32Instructions - i0);
+   return r;
 }
 
 } // namespace
