@@ -347,6 +347,64 @@ static grs_bitmap* ResDdsReadImageImpl(IStoreStream* pStream,
    return bitmap;
 }
 
+// A true-colour image (a DDS's: its 16-bit pixels, then its RGBA) halved in
+// place until no side is over maxSide, a box filter; nonzero if it was. For
+// an animated model texture's frames (anim_txt.c): the Thief II HD Mod's
+// grass, 98 frames of 2048 pixels, each converted and given to the renderer
+// the first time it came round -- 40 to 90 ms a frame for the first loops.
+// (Its memory stays as it was; what it is drawn from is a quarter of it.)
+extern "C" int ResImageShrinkTrueColor(grs_bitmap* bm, int maxSide)
+{
+   if (!bm || bm->type != BMT_FLAT16 || maxSide < 16)
+      return 0;
+   uint8* rgba = const_cast<uint8*>(ResTrueColorFind(bm));
+   int w = bm->w, h = bm->h;
+   if (!rgba || (w <= maxSide && h <= maxSide) || bm->row != w * 2 ||
+       rgba != bm->bits + static_cast<size_t>(w) * h * 2)
+      return 0;   // (laid out as ResDdsReadImage makes them only)
+   while ((w > maxSide || h > maxSide) && w >= 2 && h >= 2)
+   {
+      const int nw = w / 2, nh = h / 2;
+      // (each pixel written before or at what it is made from)
+      for (int y = 0; y < nh; ++y)
+         for (int x = 0; x < nw; ++x)
+         {
+            const uint8* a = rgba + (static_cast<size_t>(2 * y) * w + 2 * x) * 4;
+            const uint8* b = a + static_cast<size_t>(w) * 4;
+            uint8* d = rgba + (static_cast<size_t>(y) * nw + x) * 4;
+            const unsigned alpha = a[3] + a[7] + b[3] + b[7];
+            for (int c = 0; c < 3; ++c)
+            {
+               // (colour weighted by alpha: the clear parts' colour not bled in)
+               const unsigned sum = a[c] * a[3] + a[4 + c] * a[7] + b[c] * b[3] + b[4 + c] * b[7];
+               d[c] = static_cast<uint8>(alpha ? (sum + alpha / 2) / alpha
+                                               : (a[c] + a[4 + c] + b[c] + b[4 + c] + 2) / 4);
+            }
+            d[3] = static_cast<uint8>((alpha + 2) / 4);
+         }
+      w = nw;
+      h = nh;
+   }
+   // the 16-bit pixels again, and the RGBA right after them
+   const ushort flags = bm->flags;
+   const uchar align = bm->align;
+   const ushort format = flags & 0x700;
+   uint16* out = reinterpret_cast<uint16*>(bm->bits);
+   const size_t n = static_cast<size_t>(w) * h;
+   uint8* moved = reinterpret_cast<uint8*>(out + n);
+   std::memmove(moved, rgba, n * 4);
+   for (size_t i = 0; i < n; ++i)
+   {
+      const RgbaPixel p{moved[i * 4], moved[i * 4 + 1], moved[i * 4 + 2], moved[i * 4 + 3]};
+      out[i] = format == BMF_RGB_4444 ? Pack4444(p) : format == BMF_RGB_1555 ? Pack1555(p) : Pack565(p);
+   }
+   gr_init_bitmap(bm, bm->bits, BMT_FLAT16, flags, w, h);
+   bm->flags = flags;
+   bm->align = align;
+   ResTrueColorRegister(bm, moved);
+   return 1;
+}
+
 uint8* ResDdsReadPalette(IStoreStream*, IResMemOverride* pResMem)
 {
    if (!pResMem)
