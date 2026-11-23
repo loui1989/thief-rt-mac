@@ -3,8 +3,8 @@
 // the renderer (ray traced or OpenGL), the ray tracing quality preset or the
 // OpenGL renderer's options (resolution, real-time lights, shadows, bump maps,
 // v-sync: gl_settings.txt, the same as its panel in the game), the light gem (ray traced
-// or the game's own: rt_settings.txt rt_detection) and the sound (traced or classic,
-// HRTF: sound_settings.txt). Play
+// or the game's own: rt_settings.txt rt_detection), the foliage (detail_settings.txt)
+// and the sound (traced or classic, HRTF: sound_settings.txt). Play
 // starts it through launch.sh (in this app's Resources), which this process
 // becomes (exec).
 //
@@ -139,6 +139,12 @@ static NSString *GlSetting(NSString *key) { return SpacedSetting(GlSettingsPath(
 static void SetGlSetting(NSString *key, NSString *value) { SetSpacedSetting(GlSettingsPath(), key, value); }
 static NSString *SoundSetting(NSString *key) { return SpacedSetting(SoundSettingsPath(), key); }
 static void SetSoundSetting(NSString *key, NSString *value) { SetSpacedSetting(SoundSettingsPath(), key, value); }
+// detail_settings.txt (either renderer: foliage 0 off, 1 medium, 2 high -- objects with
+// NewDark's Model LOD, the Thief II HD Mod's grass, at their lightest everywhere, at the
+// mission's own distances, or twice them)
+static NSString *DetailSettingsPath(void) { return [EngineSettingsDir() stringByAppendingPathComponent:@"detail_settings.txt"]; }
+static NSString *DetailSetting(NSString *key) { return SpacedSetting(DetailSettingsPath(), key); }
+static void SetDetailSetting(NSString *key, NSString *value) { SetSpacedSetting(DetailSettingsPath(), key, value); }
 
 // ---- the games' files ----------------------------------------------------------
 
@@ -270,7 +276,7 @@ static NSString *PresetNote(NSString *p)
 @property(strong) NSGridView *grid;
 @property(strong) NSPopUpButton *glScalePopup, *glLightsPopup, *glVsyncPopup;
 @property(strong) NSButton *glShadowsCheck, *glBumpCheck;
-@property(strong) NSPopUpButton *gemPopup, *soundPopup, *hrtfPopup;
+@property(strong) NSPopUpButton *gemPopup, *soundPopup, *hrtfPopup, *foliagePopup;
 @property(strong) NSButton *devAsk, *fpsCheck;
 @end
 
@@ -404,6 +410,9 @@ enum { kRowQuality = 4, kRowGem = 6, kRowGlFirst = 7, kRowGlLast = 10 };
                              SoundSetting(@"traced_sound"), @"1");
    self.hrtfPopup = Choices(@[@[@"Automatic (with headphones)", @"0"], @[@"Always", @"1"], @[@"Never", @"2"]],
                             SoundSetting(@"hrtf"), @"0");
+   self.foliagePopup = Choices(@[@[@"High", @"2"], @[@"Medium (the mod's own distances)", @"1"],
+                                 @[@"Off (the original game's grass)", @"0"]],
+                               DetailSetting(@"foliage"), @"2");
 
    NSGridView *grid = [NSGridView gridViewWithViews:@[
       @[Label(@"Game:"), self.gamePopup],
@@ -417,6 +426,7 @@ enum { kRowQuality = 4, kRowGem = 6, kRowGlFirst = 7, kRowGlLast = 10 };
       @[Label(@"Real-time lights:"), self.glLightsPopup],
       @[NSGridCell.emptyContentView, glChecks],
       @[Label(@"V-sync:"), self.glVsyncPopup],
+      @[Label(@"Foliage:"), self.foliagePopup],
       @[Label(@"Sound:"), self.soundPopup],
       @[Label(@"3D headphone sound:"), self.hrtfPopup],
       @[NSGridCell.emptyContentView, self.fpsCheck],
@@ -431,7 +441,7 @@ enum { kRowQuality = 4, kRowGem = 6, kRowGlFirst = 7, kRowGlLast = 10 };
    [self.missionPopup.widthAnchor constraintEqualToConstant:330].active = YES;
    [self.qualityPopup.widthAnchor constraintEqualToConstant:200].active = YES;
    for (NSPopUpButton *p in @[self.glScalePopup, self.glLightsPopup, self.glVsyncPopup,
-                              self.gemPopup, self.soundPopup, self.hrtfPopup])
+                              self.gemPopup, self.soundPopup, self.hrtfPopup, self.foliagePopup])
       [p.widthAnchor constraintEqualToConstant:240].active = YES;
 
    NSButton *dev = [NSButton buttonWithTitle:@"Developer Settings..." target:self action:@selector(showDev:)];
@@ -830,6 +840,8 @@ enum { kRowQuality = 4, kRowGem = 6, kRowGlFirst = 7, kRowGlLast = 10 };
       [self saveGlOptions];
    else if (![RtSetting(@"rt_detection") isEqualToString:self.gemPopup.selectedItem.representedObject])
       SetRtSetting(@"rt_detection", self.gemPopup.selectedItem.representedObject);
+   if (![DetailSetting(@"foliage") isEqualToString:self.foliagePopup.selectedItem.representedObject])
+      SetDetailSetting(@"foliage", self.foliagePopup.selectedItem.representedObject);
    // (the sound's file is written whole: the engine reads it with both lines)
    NSString *ts = self.soundPopup.selectedItem.representedObject, *hr = self.hrtfPopup.selectedItem.representedObject;
    if (![SoundSetting(@"traced_sound") isEqualToString:ts] || ![SoundSetting(@"hrtf") isEqualToString:hr]) {
