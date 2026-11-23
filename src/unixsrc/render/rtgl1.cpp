@@ -9544,8 +9544,13 @@ void RenderRTObjectEnd(void)
          for (int k = 0; k < 3 && still; ++k)
             still = std::fabs(pose[k] - c.pose[k]) < 0.01f;
          still = still && pose[3] == c.pose[3] && pose[4] == c.pose[4] && pose[5] == c.pose[5];
+         // (once it has been captured anew a while: not the first frames, as
+         // its textures get their maps and names)
+         static std::unordered_map<uint32_t, int> s_anewRun;
+         int &run = s_anewRun[obj];
+         run = still ? run + 1 : 0;
          int &times = s_anewLogged[obj];
-         if (still && s_anewLogged.size() <= 12 && times < 3) {
+         if (still && (run == 8 || run == 60) && s_anewLogged.size() <= 16 && times < 2) {
             ++times;
             auto describe = [](const std::vector<CapturedPrim> &ps) {
                std::map<std::string, size_t> tex;
@@ -9570,9 +9575,43 @@ void RenderRTObjectEnd(void)
             for (CapturedPrim &p : b) { p.texture.clear(); p.family.clear(); }
             char nm[128];
             RenderRTGameObjectName(obj, nm, sizeof(nm));
-            fprintf(stderr, "RT: model %u \"%s\" captured anew, holding still (frame %u; the shape %s): now %s; before %s\n",
-                    obj, nm, g_frameNumber, hash_prims_unordered(a) == hash_prims_unordered(b) ? "the same" : "changed",
-                    describe(g_currentCapture).c_str(), describe(c.prims).c_str());
+            // its triangles (1 mm, by their corners) not in what was kept, and
+            // the other way: how many, and the first
+            auto keys = [](const std::vector<CapturedPrim> &ps) {
+               std::map<std::array<int64_t, 9>, const RgPrimitiveVertex *> out;
+               for (const CapturedPrim &p : ps)
+                  for (size_t t = 0; t + 2 < p.verts.size(); t += 3) {
+                     std::array<std::array<int64_t, 3>, 3> q;
+                     for (int k = 0; k < 3; ++k)
+                        for (int j = 0; j < 3; ++j)
+                           q[k][j] = int64_t(std::llround(p.verts[t + k].position[j] * 1000.0f));
+                     std::sort(q.begin(), q.end());
+                     std::array<int64_t, 9> key;
+                     for (int k = 0; k < 9; ++k)
+                        key[k] = q[k / 3][k % 3];
+                     out.emplace(key, &p.verts[t]);
+                  }
+               return out;
+            };
+            const auto ka = keys(c.prims), kb = keys(g_currentCapture);
+            size_t newOnes = 0, goneOnes = 0;
+            const RgPrimitiveVertex *firstNew = nullptr;
+            for (const auto &e : kb)
+               if (!ka.count(e.first) && newOnes++ == 0)
+                  firstNew = e.second;
+            for (const auto &e : ka)
+               if (!kb.count(e.first))
+                  ++goneOnes;
+            char first[200] = "";
+            if (firstNew)
+               snprintf(first, sizeof(first), "; the first new one (%.4f %.4f %.4f) (%.4f %.4f %.4f) (%.4f %.4f %.4f)",
+                        firstNew[0].position[0], firstNew[0].position[1], firstNew[0].position[2], firstNew[1].position[0],
+                        firstNew[1].position[1], firstNew[1].position[2], firstNew[2].position[0], firstNew[2].position[1],
+                        firstNew[2].position[2]);
+            fprintf(stderr, "RT: model %u \"%s\" captured anew %d frames running, holding still (frame %u; the shape %s; "
+                    "%zu triangles new to 1 mm, %zu gone%s): now %s; before %s\n",
+                    obj, nm, run, g_frameNumber, hash_prims_unordered(a) == hash_prims_unordered(b) ? "the same" : "changed",
+                    newOnes, goneOnes, first, describe(g_currentCapture).c_str(), describe(c.prims).c_str());
          }
       }
       if (!sprites && same && c.settled && c.whole && g_cfg.steadyFaces) {
