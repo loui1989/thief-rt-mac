@@ -144,6 +144,10 @@ game_dirs() {
 }
 
 DOWNLOADS="$HOME/Downloads"
+# how to get innoextract (for the HD Mods' Windows installers): Homebrew; an Intel
+# Homebrew (in /usr/local, run under Rosetta) refuses a plain "brew install" on Apple silicon
+BREW_INNO="brew install innoextract"
+if [ ! -x /opt/homebrew/bin/brew ] && [ -x /usr/local/bin/brew ]; then BREW_INNO="arch -x86_64 /usr/local/bin/brew install innoextract"; fi
 GAME_ROOTS=("$HOME/Games" "$HOME/Library/Application Support/Steam/steamapps/common"
             "$HOME/Library/Application Support/Steam/SteamApps/common" "$HOME/Applications" "/Applications"
             "$DOWNLOADS" "$HOME/Documents" "$HOME/Desktop"
@@ -322,6 +326,7 @@ fi
 # an Inno Setup installer: unpacked with innoextract, from Homebrew, when it is there).
 
 INNOEXTRACT="$(command -v innoextract 2>/dev/null)"
+
 for x in /opt/homebrew/bin/innoextract /usr/local/bin/innoextract; do
   [ -z "$INNOEXTRACT" ] && [ -x "$x" ] && INNOEXTRACT="$x"
 done
@@ -371,7 +376,7 @@ if [ -n "$TG_DIR" ]; then
             else
               HD_NOTE="
 
-The Thief Gold HD Mod's installer is in your Downloads ($(basename "$a")), but it is a Windows installer: to unpack it, install innoextract (in Terminal: brew install innoextract), then choose File > Find Games Again in Thief RT."
+The Thief Gold HD Mod's installer is in your Downloads ($(basename "$a")), but it is a Windows installer: to unpack it, install innoextract (in Terminal: $BREW_INNO), then choose File > Find Games Again in Thief RT."
             fi ;;
         esac
       done
@@ -420,7 +425,7 @@ if [ -n "$T2_DIR" ]; then
               case "$(basename "$a" | tr '[:upper:]' '[:lower:]')" in
                 *thief2*|*thief?2*|*thief?ii*|t2*) T2HD_NOTE="
 
-The Thief II HD Mod's installer is in your Downloads ($(basename "$a")), but it is a Windows installer: to unpack it, install innoextract (in Terminal: brew install innoextract), then choose File > Find Games Again in Thief RT." ;;
+The Thief II HD Mod's installer is in your Downloads ($(basename "$a")), but it is a Windows installer: to unpack it, install innoextract (in Terminal: $BREW_INNO), then choose File > Find Games Again in Thief RT." ;;
               esac
             fi ;;
         esac
@@ -691,12 +696,12 @@ games=""
 if [ -n "$TG_DIR" ] && [ -z "$HD_ON" ] && [ -z "$HD_NOTE" ]; then
   HD_NOTE="
 
-Optional: the Thief Gold HD Mod (HD textures, models and skies). Download its installer (Thief1HDMod1.2.exe, from ModDB) to your Downloads, install innoextract (in Terminal: brew install innoextract), then choose File > Find Games Again in Thief RT."
+Optional: the Thief Gold HD Mod (HD textures, models and skies). Download its installer (Thief1HDMod1.2.exe, from ModDB) to your Downloads, install innoextract (in Terminal: $BREW_INNO), then choose File > Find Games Again in Thief RT."
 fi
 if [ -n "$T2_DIR" ] && [ -z "$T2HD_ON" ] && [ -z "$T2HD_NOTE" ]; then
   T2HD_NOTE="
 
-Optional: the Thief II HD Mod (HD textures, objects, skies and water). Download its installer (Thief 2 HD Mod 1.0, from ModDB or Nexus Mods) to your Downloads, install innoextract (in Terminal: brew install innoextract), then choose File > Find Games Again in Thief RT."
+Optional: the Thief II HD Mod (HD textures, objects, skies and water). Download its installer (Thief 2 HD Mod 1.0, from ModDB or Nexus Mods) to your Downloads, install innoextract (in Terminal: $BREW_INNO), then choose File > Find Games Again in Thief RT."
 fi
 
 if [ -n "$SETUP" ]; then
