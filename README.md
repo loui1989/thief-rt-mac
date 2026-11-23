@@ -34,14 +34,14 @@ The app isn't notarised: the first time, macOS refuses to open it. Go to **Syste
 
 ### Optional: the Thief Gold HD Mod
 
-Hand-made HD textures, models and skies for Thief Gold. Download the full installer (`Thief1HDMod1.2.exe`) into your Downloads folder and the Thief RT installer finds it and sets it up (it needs `innoextract`: `brew install innoextract`). An `HDMOD` folder copied from a Windows install works too.
+Hand-made HD textures, models and skies for Thief Gold. Download the full installer (`Thief1HDMod1.2.exe`) into your Downloads folder and the Thief RT installer finds it and sets it up (Thief RT brings its own innoextract to unpack it). An `HDMOD` folder copied from a Windows install works too.
 
 - ModDB: https://www.moddb.com/mods/thief-gold-hd-texture-mod
 - Nexus Mods: https://www.nexusmods.com/thiefthedarkproject/mods/1
 
 ### Optional: the Thief II HD Mod
 
-The same author's HD Mod for Thief II (version 1.0): HD textures, objects, skies and water. Put its full installer in Downloads too; the installer (or the launcher's *File → Find Games Again*) finds it and installs it into Thief II's folder (about 5 GB; also needs `innoextract`).
+The same author's HD Mod for Thief II (version 1.0): HD textures, objects, skies and water. Put its full installer in Downloads too; the installer (or the launcher's *File → Find Games Again*) finds it and installs it into Thief II's folder (about 5 GB).
 
 - ModDB: https://www.moddb.com/mods/thief-2-hd-texture-mod
 - Nexus Mods: https://www.nexusmods.com/thief2/mods/5

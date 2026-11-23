@@ -25,6 +25,11 @@ Libraries inside the engine
   FFmpeg is linked into the engine: Source/setup.sh builds it from its own source and
   links the engine with it again, so a changed FFmpeg can be used.
 
+innoextract (unpacks the HD Mods' Windows installers)
+  Daniel Scharrer. zlib licence. https://github.com/dscharrer/innoextract
+  Built with Boost (Boost Software License 1.0) and xz's liblzma (0BSD); in the installer's
+  and the launcher's Resources.
+
 Not included (the installer finds the player's own copies)
   Thief: The Dark Project, Thief Gold and Thief II: The Metal Age (Looking Glass
   Studios; Eidos, now Square Enix): the games' data.

@@ -325,8 +325,20 @@ fi
 # Windows install); an archive holding one; or its Windows installer (Thief1HDMod1.2.exe,
 # an Inno Setup installer: unpacked with innoextract, from Homebrew, when it is there).
 
-INNOEXTRACT="$(command -v innoextract 2>/dev/null)"
-
+# innoextract: Thief RT's own (in this app's Resources; or next to this script in the kit),
+# copied out and its download quarantine taken off, so macOS runs it; else Homebrew's
+INNOEXTRACT=""
+for x in "$RES/innoextract" "$(dirname "$0")/../innoextract/innoextract"; do
+  if [ -z "$INNOEXTRACT" ] && [ -f "$x" ]; then
+    d="$(mktemp -d "${TMPDIR:-/tmp}/thiefrt-inno.XXXXXX")"
+    if cp "$x" "$d/innoextract" 2>>"$LOG"; then
+      xattr -c "$d/innoextract" 2>/dev/null
+      chmod +x "$d/innoextract"
+      "$d/innoextract" --version >&3 2>&1 && INNOEXTRACT="$d/innoextract"
+    fi
+  fi
+done
+[ -z "$INNOEXTRACT" ] && INNOEXTRACT="$(command -v innoextract 2>/dev/null)"
 for x in /opt/homebrew/bin/innoextract /usr/local/bin/innoextract; do
   [ -z "$INNOEXTRACT" ] && [ -x "$x" ] && INNOEXTRACT="$x"
 done

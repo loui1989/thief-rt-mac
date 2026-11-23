@@ -74,6 +74,11 @@ cp "$PKG/installer/launch.sh" "$L/Contents/Resources/launch.sh"
 # (the installer's finding part, run by the launcher when the installer could not look)
 cp "$PKG/installer/install.sh" "$L/Contents/Resources/setup.sh"
 chmod +x "$L/Contents/Resources/launch.sh" "$L/Contents/Resources/setup.sh"
+# (innoextract, for the HD Mods' Windows installers: the launcher's finding part and the
+# installer each have their own)
+cp "$PKG/innoextract/innoextract" "$L/Contents/Resources/innoextract"
+chmod +x "$L/Contents/Resources/innoextract"
+codesign --force -s - "$L/Contents/Resources/innoextract"
 cp "$APP/Contents/Resources/thief.icns" "$L/Contents/Resources/icon.icns"
 cat > "$L/Contents/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
@@ -101,6 +106,9 @@ codesign --force -s - "$L"
 say "Installer"
 cp "$PKG/installer/install.sh" "$INST/Contents/MacOS/install"
 chmod +x "$INST/Contents/MacOS/install"
+cp "$PKG/innoextract/innoextract" "$INST/Contents/Resources/innoextract"
+chmod +x "$INST/Contents/Resources/innoextract"
+codesign --force -s - "$INST/Contents/Resources/innoextract"
 cp "$APP/Contents/Resources/thief.icns" "$INST/Contents/Resources/icon.icns"
 cat > "$INST/Contents/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
@@ -139,6 +147,9 @@ lic "Ogg (BSD).txt" deps/src/ogg/COPYING
 lic "Vorbis (BSD).txt" deps/src/vorbis/COPYING
 lic "Squirrel (MIT).txt" deps/src/squirrel/COPYRIGHT
 lic "Steam Audio (Apache 2).txt" deps/src/steamaudio/LICENSE-steam-audio.md
+lic "innoextract (zlib).txt" "$PKG/licences/innoextract-LICENSE.txt"
+lic "Boost (BSL 1.0).txt" "$PKG/licences/Boost-LICENSE_1_0.txt"
+lic "xz liblzma (0BSD).txt" "$PKG/licences/xz-liblzma-COPYING.0BSD.txt"
 # the source: the engine as built here, the changes to the path tracer, and how it is all
 # built (setup.sh: which versions of the libraries; FFmpeg and OpenAL Soft can be rebuilt
 # and the engine linked again with them)
