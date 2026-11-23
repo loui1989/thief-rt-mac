@@ -285,10 +285,13 @@ extern "C" int ObjLODModelNumber(ObjID obj, int idx)
    static BOOL s_forceLow = FALSE;
    if (s_factor < 0.0f)
    {
-      s_factor = 1.0f;
+      // (twice NewDark's distances unless cam.cfg says: the Thief II HD Mod's
+      // grass went to the original game's sparse tufts 45 ft away, a field
+      // looking bare a little way off)
+      s_factor = 2.0f;
       config_get_float("model_lod_dist_factor", &s_factor);
       if (s_factor <= 0.0f)
-         s_factor = 1.0f;
+         s_factor = 2.0f;
       s_forceLow = config_is_defined("model_lod_force_low");
    }
    const ObjPos* pos = ObjPosGet(obj);
